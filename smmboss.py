@@ -6,20 +6,6 @@ from threading import Lock
 from binascii import hexlify
 import time
 
-class RPLSegment:
-    def __init__(self, data):
-        self.addr, self.slide, self.size = struct.unpack('>III', data)
-    def __repr__(self):
-        return 'RPLSegment(addr=%#x, slide=%#x, slide=%#x)' % (self.addr, self.slide, self.size)
-class RPL:
-    def __init__(self, data, guest):
-        name_addr, = struct.unpack('>I', data[:4])
-        self.name = GuestCString(guest, name_addr)
-        self.text = RPLSegment(data[4:16])
-        self.data = RPLSegment(data[16:28])
-        self.rodata = RPLSegment(data[28:40])
-    def __repr__(self):
-        return 'RPL(name=%r, text=%r, data=%r, rodata=%r)' % (self.name, self.text, self.data, self.rodata)
 
 def to_addr(x):
     if hasattr(x, 'addr'):

@@ -22,10 +22,12 @@ class Guest:
         def write(self, addr, val):
             return self.write(addr, struct.pack(fmt, val))
         return read, write
-    read8, write8 = _xreadwrite('>B')
-    read16, write16 = _xreadwrite('>H')
-    read32, write32 = _xreadwrite('>I')
-    read64, write64 = _xreadwrite('>Q')
+    read8, write8 = _xreadwrite('<B')
+    read16, write16 = _xreadwrite('<H')
+    read32, write32 = _xreadwrite('<I')
+    read64, write64 = _xreadwrite('<Q')
+    def read_ptr(self, ty, addr):
+        return ptr_to(ty)(self, addr).get()
     def __hash__(self):
         return id(self)
 
@@ -118,7 +120,7 @@ class GuestPrimPtr(GuestPtr):
         return self.guest.write(self.addr, self.encode_data(val, self.guest))
 
 def make_GuestPrimPtr(code):
-    code = '>'+code
+    code = '<'+code
     size = struct.calcsize(code)
     class GuestXPrimPtr(GuestPrimPtr):
         sizeof_star = size
@@ -141,18 +143,21 @@ s64 = make_GuestPrimPtr('q')
 f32 = make_GuestPrimPtr('f')
 f64 = make_GuestPrimPtr('d')
 
+usize = u64
+ptr_size = usize.sizeof_star
+
 @functools.lru_cache(None)
 def ptr_to(ptr_ty):
     class GuestXPtrPtr(GuestPrimPtr):
-        sizeof_star = 4
+        sizeof_star = ptr_size
         val_ty = ptr_ty
         @staticmethod
         def decode_data(data, guest):
-            return maybe_call(ptr_ty)(guest, u32.decode_data(data, guest))
+            return maybe_call(ptr_ty)(guest, usize.decode_data(data, guest))
         @staticmethod
         def encode_data(val, guest):
-            assert isinstance(val, ptr_ty) 
-            return u32.encode_data(val.addr, guest)
+            assert isinstance(val, ptr_ty)
+            return usize.encode_data(val.addr, guest)
     return GuestXPtrPtr
 
 GuestPtrPtr = ptr_to(GuestPtr)
@@ -216,15 +221,15 @@ class GuestArray(GuestPtr):
             dump(item, fp, indent2)
             fp.write(',')
 
-def count_ptr(ptr_ty):
+def count4_ptr(ptr_ty):
     pp = ptr_to(ptr_ty)
     class CountPtr(GuestArray, GuestStruct):
         def __init__(self, guest, addr):
             GuestPtr.__init__(self, guest, addr)
             self.ptr_ty = ptr_ty
         count = prop(0, u32)
-        base = prop(4, pp)
-        sizeof_star = 8
+        base = prop(ptr_size, pp)
+        sizeof_star = ptr_size
         def __len__(self):
             return self.count
     return CountPtr
@@ -270,7 +275,7 @@ def as_addr(obj_or_addr):
     if isinstance(obj_or_addr, GuestStruct):
         return obj_or_addr.addr
     else:
-        return int(obj_or_addr) & 0xffffffff
+        return int(obj_or_addr) & 0xffffffffffffffff
 
 class GuestStruct(GuestPtr):
     def dump(self, fp, indent):

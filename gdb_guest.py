@@ -1,8 +1,8 @@
 import guest_access
 import smmboss
 import gdb
-import re
-import struct
+import re, struct
+
 class GDBGuest(smmboss.MMGuest):
     def __init__(self):
         super().__init__()
@@ -13,6 +13,7 @@ class GDBGuest(smmboss.MMGuest):
                 frm, to, syms_read, path = m.groups()
                 if path.endswith('main.elf'):
                     self._slide = int(frm, 16)
+                    print(f'Slide is {self._slide:#x}')
                     break
         else:
             raise Exception('no file')
@@ -43,12 +44,17 @@ class MyBT(gdb.Command):
     def print_frame(self, idx, addr, extra):
         addr = guest.gunslide(addr) if addr else addr
         gdb.write(f'{idx:5}: 0x{addr:016x}{extra}\n')
+class SomeCommand(gdb.Command):
+    def __init__(self, name, func):
+        super().__init__(name, gdb.COMMAND_USER)
+        self.func = func
+    def invoke(self, arg, from_tty):
+        self.func(guest)
 def add_niceties():
     global guest
     guest = guest_access.CachingGuest(GDBGuest())
     MyBT()
     gdb.parse_and_eval(f'$slide = {guest._gslide:#x}')
-add_niceties()
-
-
+    for name in ['print_exported_types', 'print_idees', 'print_ent', 'print_timer']:
+        SomeCommand(name, getattr(smmboss, name))
 

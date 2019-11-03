@@ -6,24 +6,21 @@ import re, struct
 class GDBGuest(smmboss.MMGuest):
     def __init__(self):
         self.inf = gdb.selected_inferior()
-        progspace = self.inf.progspace
-        if progspace.filename is None:
-            raise Exception("gdb didn't load main executable")
 
-        info_targ = gdb.execute('info target', to_string=True)
-        m = re.search(r'(0x\w+) - .* is \.text\n', info_targ)
-        if m:
-            self._slide = int(m.group(1), 0)
-            print(f'Slide is {self._slide:#x}')
-        else:
-            raise Exception("couldn't find slide from `info target`")
+        stuff = gdb.execute('maint packet qOffsets', to_string=True)
+        m = re.search(r'received: "TextSeg=([^"]+)"', stuff)
+        if not m:
+            raise Exception("couldn't find slide using qOffsets")
+        self._slide = int(m.group(1), 16)
 
-        for objfile in progspace.objfiles():
-            if objfile.filename == progspace.filename:
-                self.build_id = objfile.build_id.ljust(64, '0')
-                break
-        else:
-            raise Exception("couldn't find objfile")
+        pid = self.inf.pid
+        stuff = gdb.execute(f'maint packet qXfer:exec-file:read:{pid:x}:0,999', to_string=True)
+        m = re.search(r'received: "l([^"]+)"', stuff)
+        if not m:
+            raise Exception("couldn't find build id using qXfer:exec-file")
+        self.build_id = m.group(1)
+        if len(self.build_id) != 64:
+            raise Exception(f"build_id is {self.build_id!r}, which is not length 64")
 
         super().__init__()
 

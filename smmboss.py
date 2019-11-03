@@ -24,7 +24,7 @@ class MMGuest(Guest):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.addr = self.Addr(self)
-        self.yaml = addrs_yaml['60b80d35e3db760620135e023f1ca0b300000000000000000000000000000000'] # XXX
+        self.yaml = addrs_yaml[self.build_id]
     def slide(self, addr):
         return (addr + self._slide) & 0xffffffffffffffff
     def unslide(self, addr):

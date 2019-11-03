@@ -5,18 +5,28 @@ import re, struct
 
 class GDBGuest(smmboss.MMGuest):
     def __init__(self):
-        super().__init__()
         self.inf = gdb.selected_inferior()
-        for line in gdb.execute('info shared', to_string=True).split('\n'):
-            m = re.match('(0x[0-9a-f]+)\s+(0x[0-9a-f]+)\s+(No|Yes)\s+(.*)', line.rstrip())
-            if m:
-                frm, to, syms_read, path = m.groups()
-                if path.endswith('main.elf'):
-                    self._slide = int(frm, 16)
-                    print(f'Slide is {self._slide:#x}')
-                    break
+        progspace = self.inf.progspace
+        if progspace.filename is None:
+            raise Exception("gdb didn't load main executable")
+
+        info_targ = gdb.execute('info target', to_string=True)
+        m = re.search(r'(0x\w+) - .* is \.text\n', info_targ)
+        if m:
+            self._slide = int(m.group(1), 0)
+            print(f'Slide is {self._slide:#x}')
         else:
-            raise Exception('no file')
+            raise Exception("couldn't find slide from `info target`")
+
+        for objfile in progspace.objfiles():
+            if objfile.filename == progspace.filename:
+                self.build_id = objfile.build_id.ljust(64, '0')
+                break
+        else:
+            raise Exception("couldn't find objfile")
+
+        super().__init__()
+
 
     def try_read(self, addr, size):
         return self.inf.read_memory(addr, size)

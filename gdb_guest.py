@@ -7,18 +7,31 @@ class GDBGuest(smmboss.MMGuest):
     def __init__(self):
         self.inf = gdb.selected_inferior()
 
-        stuff = gdb.execute('maint packet qOffsets', to_string=True)
-        m = re.search(r'received: "TextSeg=([^"]+)"', stuff)
-        if not m:
-            raise Exception("couldn't find slide using qOffsets")
-        self._slide = int(m.group(1), 16)
+        is_twili = False # XXX
+        if is_twili:
+            stuff = gdb.execute('maint packet qOffsets', to_string=True)
+            m = re.search(r'received: "TextSeg=([^"]+)"', stuff)
+            if not m:
+                raise Exception("couldn't find slide using qOffsets")
+            self._slide = int(m.group(1), 16)
+            pid = self.inf.pid
+            stuff = gdb.execute(f'maint packet qXfer:exec-file:read:{pid:x}:0,999', to_string=True)
+            m = re.search(r'received: "l([^"]+)"', stuff)
+            if not m:
+                raise Exception("couldn't find build id using qXfer:exec-file")
+            self.build_id = m.group(1)
+        else:
+            # Atmosphere GDB stub
+            stuff = gdb.execute('monitor get info', to_string=True)
+            if stuff == 'Not attached.\n':
+                raise Exception("not attached!")
+            m = re.search(r'\n  (0x[0-9a-f]+) - 0x[0-9a-f]+ Slope\.nss', stuff)
+            if not m:
+                raise Exception("couldn't find slide using monitor get info")
+            self._slide = int(m.group(1), 16)
+            # XXX: actually get build ID rather than hardcoding
+            self.build_id = 'edb8feede2bfa3ffd1adf65a4424361a00000000000000000000000000000000'
 
-        pid = self.inf.pid
-        stuff = gdb.execute(f'maint packet qXfer:exec-file:read:{pid:x}:0,999', to_string=True)
-        m = re.search(r'received: "l([^"]+)"', stuff)
-        if not m:
-            raise Exception("couldn't find build id using qXfer:exec-file")
-        self.build_id = m.group(1)
         if len(self.build_id) != 64:
             raise Exception(f"build_id is {self.build_id!r}, which is not length 64")
 
@@ -61,7 +74,8 @@ def add_niceties():
     global guest
     guest = guest_access.CachingGuest(GDBGuest())
     MyBT()
-    gdb.parse_and_eval(f'$slide = {guest._gslide:#x}')
+    gdb.parse_and_eval(f'$gslide = {guest._gslide:#x}')
+    gdb.parse_and_eval(f'$slide = {guest._slide:#x}')
     for name in ['print_exported_types', 'print_idees', 'print_ent', 'print_timer']:
         SomeCommand(name, getattr(smmboss, name))
 

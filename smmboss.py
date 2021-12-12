@@ -7,7 +7,7 @@ from binascii import hexlify
 import time
 import yaml
 
-addrs_yaml = yaml.load(open(os.path.join(os.path.dirname(__file__), 'addrs.yaml')))
+addrs_yaml = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), 'addrs.yaml')))
 
 def to_addr(x):
     if hasattr(x, 'addr'):

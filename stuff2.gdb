@@ -1,4 +1,4 @@
-source /usr/src/nx/smmboss2/so.py
+source /Users/comex/src/nx/smmboss2/so.py
 define break_set_state
     hb *($slide+0x710122f040)
     commands

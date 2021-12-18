@@ -62,14 +62,14 @@ class MyBT(gdb.Command):
             self.print_frame(f'f{i}', fpc, f' [{f:#x}]')
             f = new_f
     def print_frame(self, idx, addr, extra):
-        addr = guest.gunslide(addr) if addr else addr
+        addr = guest.unslide(addr) if addr else addr
         gdb.write(f'{idx:5}: 0x{addr:016x}{extra}\n')
 class SomeCommand(gdb.Command):
     def __init__(self, name, func):
         super().__init__(name, gdb.COMMAND_USER)
         self.func = func
     def invoke(self, arg, from_tty):
-        self.func(guest)
+        self.func()
 def add_niceties():
     global guest
     guest = guest_access.CachingGuest(GDBGuest())
@@ -77,5 +77,5 @@ def add_niceties():
     gdb.parse_and_eval(f'$gslide = {guest._gslide:#x}')
     gdb.parse_and_eval(f'$slide = {guest._slide:#x}')
     for name in ['print_exported_types', 'print_idees', 'print_ent', 'print_timer']:
-        SomeCommand(name, getattr(smmboss, name))
+        SomeCommand(name, getattr(guest.world, name))
 

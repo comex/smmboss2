@@ -8,6 +8,6 @@ importlib.reload(smmboss)
 importlib.reload(gdb_guest)
 gdb_guest.add_niceties()
 from gdb_guest import guest
-from smmboss import *
-
-
+for (_attr, _attrval) in guest.world.__dict__.items():
+    if not _attr.startswith('_'):
+        globals()[_attr] = _attrval

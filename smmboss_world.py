@@ -51,7 +51,7 @@ class ObjRec(GuestStruct):
     @staticmethod
     @functools.lru_cache(None)
     def by_idee(idee):
-        objrecs_by_idee = fixed_array(ptr_to(ObjRec), 0xee)(guest, guest.addr.idee_to_objrec)
+        objrecs_by_idee = fixed_array(ptr_to(ObjRec), 0xee)(guest.addr.idee_to_objrec)
         return objrecs_by_idee[idee]
 
 class Entity(GuestStruct):
@@ -61,13 +61,16 @@ class Entity(GuestStruct):
     mama = prop(0x48, lambda: ptr_to(Entity))
 
 class PYES(Entity):
-    loc = prop(0x228, Point3D) # XXX
-    houvelo = prop(0x234, Point3D)
-    rngthing = prop(0x264, u32)
-    source_xvel = prop(0x26c, f32)
-    source_xvel_goal = prop(0x270, f32)
-    gravity = prop(0x278, f32)
-    source_xvel_step = prop(0x27c, f32)
+    if guest.version >= 300:
+        loc = prop(0x230, Point3D)
+    else:
+        loc = prop(0x228, Point3D)
+        houvelo = prop(0x234, Point3D)
+        rngthing = prop(0x264, u32)
+        source_xvel = prop(0x26c, f32)
+        source_xvel_goal = prop(0x270, f32)
+        gravity = prop(0x278, f32)
+        source_xvel_step = prop(0x27c, f32)
 
 class LiftSegmentIsh(GuestStruct):
     smgr = prop(0xd0, StateMgr)
@@ -117,7 +120,7 @@ def print_exported_types():
 def print_idees():
     for idee in range(0xee):
         objrec = ObjRec.by_idee(idee)
-        print(f'{idee:x} -> {objrec.base_name},{objrec.variation_name} {objrec.get_name()}')
+        print(f'{idee:x} -> {objrec.base_name},{objrec.variation_name} {objrec.get_name()} or={objrec}')
 
 def print_ent():
    for yatsu in ActorMgr.get().mp5.pointers.get_all():

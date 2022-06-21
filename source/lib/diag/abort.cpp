@@ -39,13 +39,14 @@ namespace exl::diag {
             /* TODO: maybe write to a file? custom fatal program? */
             register u64 addr __asm__("x27") = 0x6969696969696969;
             register u64 val __asm__("x28")  = ctx.m_Result;
-            while (true) {
-                __asm__ __volatile__ (
-                    "str %[val], [%[addr]]"
-                    :
-                    : [val]"r"(val), [addr]"r"(addr)
-                );
-            }
+            __asm__ __volatile__ (
+                "str %[val], [%[addr]]"
+                :
+                : [val]"r"(val), [addr]"r"(addr)
+            );
+            /* better on Yuzu: */
+            /* svcExitProcess(); */
+            while (1) { __asm__ __volatile__(""); }
         }
 
         UNREACHABLE;

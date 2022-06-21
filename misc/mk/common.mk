@@ -44,7 +44,7 @@ CFLAGS	:=	-g -Wall -Werror -O3 \
 
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__ -D__RTLD_6XX__
 
-CFLAGS	+= $(EXL_CFLAGS) -I"$(DEVKITPRO)/libnx/include" -I$(ROOT_SOURCE) $(addprefix -I,$(MODULES))
+CFLAGS	+= $(EXL_CFLAGS) -I$(ROOT_SOURCE) $(addprefix -I,$(MODULES))
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -fno-asynchronous-unwind-tables -fno-unwind-tables -std=gnu++20 
 

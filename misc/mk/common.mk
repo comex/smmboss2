@@ -49,7 +49,7 @@ CFLAGS	+= $(EXL_CFLAGS) -I$(ROOT_SOURCE) $(addprefix -I,$(MODULES))
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -fno-asynchronous-unwind-tables -fno-unwind-tables -std=gnu++20 
 
 ASFLAGS	:=	-g $(ARCH)
-LDFLAGS	:=  -specs=$(SPECS_PATH)/$(SPECS_NAME) -g $(ARCH) -Wl,-Map,$(notdir $*.map) -nostartfiles -nostdlib
+LDFLAGS	:=  -specs=$(SPECS_PATH)/$(SPECS_NAME) -g $(ARCH) -Wl,-Map,$(notdir $*.map) -nostartfiles
 
 LIBS	:=
 

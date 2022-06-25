@@ -3,7 +3,6 @@
 
 namespace nn::diag::detail {
     int PrintDebugString(const char *);
-    int ThisFunctionDoesNotExist();
 }
 
 union state_obj_callback {
@@ -64,7 +63,7 @@ static void log_str(const char *str) {
 
 __attribute__((format(printf, 1, 2)))
 static void xprintf(const char *fmt, ...) {
-    char buf[128];
+    char buf[196];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -93,22 +92,44 @@ static uintptr_t get_state_callback(struct statemgr *smgr, int state, int which_
         func = cb->nonvirt.func;
     }
     if (func)
-        func -= exl::hook::GetTargetStart(); // unslide address
+        func -= exl::util::modules::GetTargetStart(); // unslide address
     return func;
 }
 
-MAKE_HOOK_T(void, statemgr_set_state, (struct statemgr *smgr, int state),
-    int old_state = smgr->state;
-    xprintf("set_state(%s(%d) -> %s(%d) in:0x%lx tick:0x%lx out:0x%lx (obj:%p))",
-        get_state_name(smgr, old_state), old_state,
-        get_state_name(smgr, state), state,
-        get_state_callback(smgr, state, 0),
-        get_state_callback(smgr, state, 1),
-        get_state_callback(smgr, state, 2),
-        smgr->state_objs[state].self
-    );
-    impl(smgr, state);
-);
+static void *
+return_address_from_frame_impl(void *frame0, size_t n) {
+    while (n--) {
+        if (!frame0)
+            return nullptr;
+        frame0 = ((void **)frame0)[0];
+    }
+    if (!frame0)
+        return nullptr;
+    return ((void **)frame0)[1];
+}
+
+#define return_address_from_frame(n) \
+    return_address_from_frame_impl(__builtin_frame_address(0), n)
+
+HOOK_DEFINE_TRAMPOLINE(StubStatemgrSetState) {
+    static void Callback(struct statemgr *smgr, int state) {
+        int old_state = smgr->state;
+        xprintf("set_state(%s(%d) -> %s(%d) in:0x%lx tick:0x%lx out:0x%lx (obj:%p)) <- %p <- %p <- %p <- %p <- %p",
+            get_state_name(smgr, old_state), old_state,
+            get_state_name(smgr, state), state,
+            get_state_callback(smgr, state, 0),
+            get_state_callback(smgr, state, 1),
+            get_state_callback(smgr, state, 2),
+            smgr->state_objs[state].self,
+            __builtin_return_address(0),
+            return_address_from_frame(0),
+            return_address_from_frame(1),
+            return_address_from_frame(2),
+            return_address_from_frame(3)
+        );
+        Orig(smgr, state);
+    }
+};
 
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
@@ -116,7 +137,7 @@ extern "C" void exl_main(void* x0, void* x1) {
     envSetOwnProcessHandle(exl::util::proc_handle::Get());
     exl::hook::Initialize();
 
-    INJECT_HOOK_T(0x8b9280, statemgr_set_state);
+    StubStatemgrSetState::InstallAtOffset(0x8b9280);
 
     log_str("done hooking");
 }

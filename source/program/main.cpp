@@ -131,6 +131,13 @@ HOOK_DEFINE_TRAMPOLINE(StubStatemgrSetState) {
     }
 };
 
+HOOK_DEFINE_TRAMPOLINE(StubOpenFile) {
+    static long Callback(struct string *name, long x1, long x2, long x3, long x4, long x5) {
+        xprintf("open_file(%s)", name->str);
+        return Orig(name, x1, x2, x3, x4, x5);
+    }
+};
+
 HOOK_DEFINE_TRAMPOLINE(StubWtf) {
     static void Callback(struct statemgr *smgr, int state) {
         log_str("wtf");
@@ -145,6 +152,7 @@ extern "C" void exl_main(void* x0, void* x1) {
     exl::hook::Initialize();
 
     StubStatemgrSetState::InstallAtOffset(0x8b9280);
+    //StubOpenFile::InstallAtOffset(0x008b7b80);
     //StubWtf::InstallAtOffset(0x1bc1590);
 
     log_str("done hooking");

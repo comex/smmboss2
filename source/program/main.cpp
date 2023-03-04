@@ -148,7 +148,6 @@ HOOK_DEFINE_TRAMPOLINE(StubWtf) {
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
     log_str("exl_main");
-    envSetOwnProcessHandle(exl::util::proc_handle::Get());
     exl::hook::Initialize();
 
     StubStatemgrSetState::InstallAtOffset(0x8b9280);

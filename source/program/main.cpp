@@ -131,6 +131,13 @@ HOOK_DEFINE_TRAMPOLINE(StubStatemgrSetState) {
     }
 };
 
+HOOK_DEFINE_TRAMPOLINE(StubWtf) {
+    static void Callback(struct statemgr *smgr, int state) {
+        log_str("wtf");
+        EXL_ABORT(0x420);
+    }
+};
+
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
     log_str("exl_main");
@@ -138,6 +145,7 @@ extern "C" void exl_main(void* x0, void* x1) {
     exl::hook::Initialize();
 
     StubStatemgrSetState::InstallAtOffset(0x8b9280);
+    //StubWtf::InstallAtOffset(0x1bc1590);
 
     log_str("done hooking");
 }

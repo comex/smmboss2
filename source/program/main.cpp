@@ -159,6 +159,21 @@ HOOK_DEFINE_TRAMPOLINE(StubOpenFile) {
     }
 };
 
+HOOK_DEFINE_TRAMPOLINE(StubSearchAndEmit) {
+    static long Callback(long x0, const char *name, long x2) {
+        xprintf("SearchAndEmit(%s)", name);
+        return Orig(x0, name, x2);
+    }
+};
+
+HOOK_DEFINE_TRAMPOLINE(StubSearchAssetCallTableByName) {
+    static void Callback(void *out, void *self, const char *name) {
+        xprintf("SearchAndEmit(%s)", name);
+        log_str("wtf");
+        EXL_ABORT(0x420);
+    }
+};
+
 HOOK_DEFINE_TRAMPOLINE(StubWtf) {
     static void Callback(struct statemgr *smgr, int state) {
         log_str("wtf");
@@ -173,9 +188,11 @@ extern "C" void exl_main(void* x0, void* x1) {
 
     // this is for 3.0.1:
 
-    StubStatemgrSetState::InstallAtOffset(0x8b9280);
-    StubOpenFile::InstallAtOffset(0x008b7b80);
+    //StubStatemgrSetState::InstallAtOffset(0x8b9280);
+    //StubOpenFile::InstallAtOffset(0x008b7b80);
+    //StubSearchAndEmit::InstallAtOffset(0x005ab004);
     //StubWtf::InstallAtOffset(0x1bc1590);
+    StubSearchAssetCallTableByName::InstallAtOffset(0x005ac9e0);
     
     {
         exl::patch::CodePatcher p(0x017e428c);

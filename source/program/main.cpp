@@ -133,8 +133,29 @@ HOOK_DEFINE_TRAMPOLINE(StubStatemgrSetState) {
 
 HOOK_DEFINE_TRAMPOLINE(StubOpenFile) {
     static long Callback(struct string *name, long x1, long x2, long x3, long x4, long x5) {
-        xprintf("open_file(%s)", name->str);
-        return Orig(name, x1, x2, x3, x4, x5);
+        char mine[256];
+        const char *orig = name->str;
+        if (orig) {
+            size_t len = strlen(orig);
+            if (len < sizeof(mine) - 1) {
+                memcpy(mine, orig, len);
+                mine[len] = '\0';
+                while (char *s = strstr(mine, "WU")) {
+                    s[0] = 'M';
+                    s[1] = '1';
+                }
+                name->str = mine;
+                long ret = Orig(name, x1, x2, x3, x4, x5);
+                xprintf("open_file(%s) => %lx", name->str, ret);
+                name->str = orig;
+                if (ret) {
+                    return ret;
+                }
+            }
+        }
+        long ret = Orig(name, x1, x2, x3, x4, x5);
+        xprintf("open_file(%s) => %lx", name->str, ret);
+        return ret;
     }
 };
 
@@ -150,9 +171,16 @@ extern "C" void exl_main(void* x0, void* x1) {
     log_str("exl_main");
     exl::hook::Initialize();
 
+    // this is for 3.0.1:
+
     StubStatemgrSetState::InstallAtOffset(0x8b9280);
-    //StubOpenFile::InstallAtOffset(0x008b7b80);
+    StubOpenFile::InstallAtOffset(0x008b7b80);
     //StubWtf::InstallAtOffset(0x1bc1590);
+    
+    {
+        exl::patch::CodePatcher p(0x017e428c);
+        p.Write<uint32_t>(0x321e03e1); // orr w1, wzr, #4 (instead of 2)
+    }
 
     log_str("done hooking");
 }

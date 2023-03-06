@@ -159,25 +159,23 @@ HOOK_DEFINE_TRAMPOLINE(StubOpenFile) {
     }
 };
 
-HOOK_DEFINE_TRAMPOLINE(StubSearchAndEmit) {
-    static long Callback(long x0, const char *name, long x2) {
-        xprintf("SearchAndEmit(%s)", name);
-        return Orig(x0, name, x2);
-    }
-};
-
 HOOK_DEFINE_TRAMPOLINE(StubSearchAssetCallTableByName) {
-    static void Callback(void *out, void *self, const char *name) {
-        xprintf("SearchAndEmit(%s)", name);
-        log_str("wtf");
-        EXL_ABORT(0x420);
-    }
-};
-
-HOOK_DEFINE_TRAMPOLINE(StubWtf) {
-    static void Callback(struct statemgr *smgr, int state) {
-        log_str("wtf");
-        EXL_ABORT(0x420);
+    static void *Callback(void *out, void *self, const char *name) {
+        xprintf("searchAssetCallTableByName(%s)", name);
+        size_t len = strlen(name);
+        char mine[256];
+        if (len >= 5 && len < sizeof(mine) - 1 &&
+            !memcmp(name, "P_", 2) &&
+            !memcmp(name + len - 3, "_WU", 3)) {
+            memcpy(mine, name, len - 2);
+            memcpy(mine + len - 2, "M1", 3);
+            void *ret = Orig(out, self, mine);
+            if (ret) {
+                xprintf("==> replaced with %s", mine);
+                return ret;
+            }
+        }
+        return Orig(out, self, name);
     }
 };
 

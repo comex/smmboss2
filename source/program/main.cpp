@@ -179,6 +179,16 @@ HOOK_DEFINE_TRAMPOLINE(StubSearchAssetCallTableByName) {
     }
 };
 
+HOOK_DEFINE_TRAMPOLINE(Stub_xlink2_System_setGlobalPropertyValue) {
+    static void Callback(void *self, int property_id, int value) {
+        xprintf("setGlobalPropertyValue(%p, %d, %d)", self, property_id, value);
+        if (property_id == 0) {
+            value = 2; // Super Mario World
+        }
+        Orig(self, property_id, value);
+    }
+};
+
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
     log_str("exl_main");
@@ -190,9 +200,11 @@ extern "C" void exl_main(void* x0, void* x1) {
     //StubOpenFile::InstallAtOffset(0x008b7b80);
     //StubSearchAndEmit::InstallAtOffset(0x005ab004);
     //StubWtf::InstallAtOffset(0x1bc1590);
-    StubSearchAssetCallTableByName::InstallAtOffset(0x005ac9e0);
-    
+    //StubSearchAssetCallTableByName::InstallAtOffset(0x005ac9e0);
+    Stub_xlink2_System_setGlobalPropertyValue::InstallAtOffset(0x5a3490);
+
     {
+        // Patch to skip intro cutscene
         exl::patch::CodePatcher p(0x017e428c);
         p.Write<uint32_t>(0x321e03e1); // orr w1, wzr, #4 (instead of 2)
     }

@@ -162,19 +162,6 @@ HOOK_DEFINE_TRAMPOLINE(StubOpenFile) {
 HOOK_DEFINE_TRAMPOLINE(StubSearchAssetCallTableByName) {
     static void *Callback(void *out, void *self, const char *name) {
         xprintf("searchAssetCallTableByName(%s)", name);
-        size_t len = strlen(name);
-        char mine[256];
-        if (len >= 5 && len < sizeof(mine) - 1 &&
-            !memcmp(name, "P_", 2) &&
-            !memcmp(name + len - 3, "_WU", 3)) {
-            memcpy(mine, name, len - 2);
-            memcpy(mine + len - 2, "M1", 3);
-            void *ret = Orig(out, self, mine);
-            if (ret) {
-                xprintf("==> replaced with %s", mine);
-                return ret;
-            }
-        }
         return Orig(out, self, name);
     }
 };
@@ -183,9 +170,16 @@ HOOK_DEFINE_TRAMPOLINE(Stub_xlink2_System_setGlobalPropertyValue) {
     static void Callback(void *self, int property_id, int value) {
         xprintf("setGlobalPropertyValue(%p, %d, %d)", self, property_id, value);
         if (property_id == 0) {
-            value = 2; // Super Mario World
+            value = 3; // NSMBU
         }
         Orig(self, property_id, value);
+    }
+};
+
+HOOK_DEFINE_TRAMPOLINE(StubGetBlockInfo) {
+    static int *Callback(void *block) {
+        static int x = 0x100009;
+        return &x;
     }
 };
 
@@ -198,10 +192,10 @@ extern "C" void exl_main(void* x0, void* x1) {
 
     //StubStatemgrSetState::InstallAtOffset(0x8b9280);
     //StubOpenFile::InstallAtOffset(0x008b7b80);
-    //StubSearchAndEmit::InstallAtOffset(0x005ab004);
     //StubWtf::InstallAtOffset(0x1bc1590);
-    //StubSearchAssetCallTableByName::InstallAtOffset(0x005ac9e0);
+    StubSearchAssetCallTableByName::InstallAtOffset(0x005ac9e0);
     Stub_xlink2_System_setGlobalPropertyValue::InstallAtOffset(0x5a3490);
+    StubGetBlockInfo::InstallAtOffset(0x00e25ae0);
 
     {
         // Patch to skip intro cutscene

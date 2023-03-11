@@ -17,6 +17,22 @@ class MMGuest(Guest):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.addr = self.Addr(self)
+        if self.build_id is None:
+            for build_id, yaml in list(addrs_yaml.items())[::-1]:
+                build_id_raw = bytes.fromhex(build_id)
+                try:
+                    build_id_addr = yaml['addrs']['dot_note'] + 16
+                except (KeyError, TypeError):
+                    continue
+                try:
+                    maybe_build_id = self.read(self.slide(build_id_addr), 16)
+                except: # TODO: use a proper class for read errors
+                    continue
+                if bytes(maybe_build_id) == build_id_raw[:16]:
+                    self.build_id = build_id
+                    break
+            else:
+                raise Exception('unable to guess build ID')
         self.yaml = addrs_yaml[self.build_id]
         self.version = self.yaml['version']
     def slide(self, addr):

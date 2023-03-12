@@ -183,6 +183,20 @@ HOOK_DEFINE_TRAMPOLINE(StubGetBlockInfo) {
     }
 };
 
+HOOK_DEFINE_TRAMPOLINE(Stub_gsys_Model_create) {
+    static void *Callback(struct string *name, void *create_arg, void *heap) {
+        void *ret = Orig(name, create_arg, heap);
+        xprintf("gsys::Model::create(name=%s) => %p", name->str, ret);
+        return ret;
+    }
+};
+HOOK_DEFINE_TRAMPOLINE(Stub_gsys_Model_pushBack) {
+    static void *Callback(void *self, void *model_resource, struct string *name, void *heap) {
+        xprintf("-- gsys::Model::pushBack(%p, name=%s)", self, name->str);
+        return Orig(self, model_resource, name, heap);
+    }
+};
+
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
     log_str("exl_main");
@@ -196,6 +210,9 @@ extern "C" void exl_main(void* x0, void* x1) {
     StubSearchAssetCallTableByName::InstallAtOffset(0x005ac9e0);
     Stub_xlink2_System_setGlobalPropertyValue::InstallAtOffset(0x5a3490);
     StubGetBlockInfo::InstallAtOffset(0x00e25ae0);
+
+    Stub_gsys_Model_create::InstallAtOffset(0x003e8cd0);
+    Stub_gsys_Model_pushBack::InstallAtOffset(0x003e90f0);
 
     {
         // Patch to skip intro cutscene

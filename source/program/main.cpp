@@ -197,6 +197,50 @@ HOOK_DEFINE_TRAMPOLINE(Stub_gsys_Model_pushBack) {
     }
 };
 
+struct NVNmemoryPool {
+    char x0[0x10];
+    char flags;
+    char x11[0x70-0x11];
+    char *ptr;
+};
+
+struct agl_VertexBuffer {
+    char x0[0xf8];
+    int offset;
+    int xfc;
+    NVNmemoryPool *pool;
+};
+
+
+HOOK_DEFINE_TRAMPOLINE(Stub_agl_VertexBuffer_flushCPUCache) {
+    static void Callback(agl_VertexBuffer *self, int offset, long size) {
+        NVNmemoryPool *pool = self->pool;
+        if (pool && ((pool->flags & 5) == 4) && pool->ptr) {
+            char *ptr = pool->ptr;
+            static volatile void *ptr_to_corrupt;
+            xprintf("flushCPUCache(offset=%#x+%#x, size=%#lx): data=%p <%p>", self->offset, offset, size, ptr, &ptr_to_corrupt);
+            if (ptr == ptr_to_corrupt) {
+                xprintf("!");
+                memset(ptr + self->offset + offset, 0xee, size);
+            }
+        } else {
+            xprintf("flushCPUCache(offset=%#x+%#x, size=%#lx): weird", self->offset, offset, size);
+        }
+        Orig(self, offset, size);
+
+    }
+};
+HOOK_DEFINE_TRAMPOLINE(StubBgUnitGroupInitSpecific) {
+    static void Callback(void *self, int type) {
+        Orig(self, type);
+        float *fp = (float *)((char *)self + 0x6c);
+        xprintf("InitSpecific(%p, %d): %f,%f,%f %f,%f", self, type, fp[0], fp[1], fp[2], fp[3], fp[4]);
+        fp[3] /= 2;
+        fp[4] *= 2;
+
+    }
+};
+
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
     log_str("exl_main");
@@ -207,12 +251,15 @@ extern "C" void exl_main(void* x0, void* x1) {
     //StubStatemgrSetState::InstallAtOffset(0x8b9280);
     //StubOpenFile::InstallAtOffset(0x008b7b80);
     //StubWtf::InstallAtOffset(0x1bc1590);
-    StubSearchAssetCallTableByName::InstallAtOffset(0x005ac9e0);
-    Stub_xlink2_System_setGlobalPropertyValue::InstallAtOffset(0x5a3490);
-    StubGetBlockInfo::InstallAtOffset(0x00e25ae0);
+    //StubSearchAssetCallTableByName::InstallAtOffset(0x005ac9e0);
+    //Stub_xlink2_System_setGlobalPropertyValue::InstallAtOffset(0x5a3490);
+    //StubGetBlockInfo::InstallAtOffset(0x00e25ae0);
 
-    Stub_gsys_Model_create::InstallAtOffset(0x003e8cd0);
-    Stub_gsys_Model_pushBack::InstallAtOffset(0x003e90f0);
+    //Stub_gsys_Model_create::InstallAtOffset(0x003e8cd0);
+    //Stub_gsys_Model_pushBack::InstallAtOffset(0x003e90f0);
+
+    //Stub_agl_VertexBuffer_flushCPUCache::InstallAtOffset(0x002fba20);
+    StubBgUnitGroupInitSpecific::InstallAtOffset(0x00daf110);
 
     {
         // Patch to skip intro cutscene
@@ -227,3 +274,5 @@ extern "C" NORETURN void exl_exception_entry() {
     /* TODO: exception handling */
     EXL_ABORT(0x420);
 }
+
+// tilted blocks: p/x *(int*)($slide+0x00da3ae8 ) = 0x1e2a1000

@@ -12,7 +12,6 @@ class GDBGuest(smmboss.MMGuest):
         if kind == 'yuzu':
             stuff = gdb.execute('maint packet qXfer:libraries:read::0,10000', to_string=True)
             m = re.search(r'received: "l(<\?xml.*</library-list>)"', stuff)
-            print(stuff)
             assert m, "invalid response to libraries:read"
             xml = m.group(1)
             m = re.search('<library name="main"><segment address="(.*?)"', xml)
@@ -93,7 +92,7 @@ def add_niceties():
     MyBT()
     gdb.parse_and_eval(f'$gslide = {guest._gslide:#x}')
     gdb.parse_and_eval(f'$slide = {guest._slide:#x}')
-    for name in ['print_exported_types', 'print_idees', 'print_ent', 'print_timer']:
+    for name in ['print_exported_types', 'print_idees', 'print_ent', 'print_timer', 'print_block_kind_info', 'print_bg']:
         SomeCommand(name, getattr(guest.world, name))
 
 class MemDump:
@@ -131,7 +130,9 @@ class MemDump:
                 import subprocess
                 self.dumps[start] = subprocess.check_output(['ssh', 'solidus', 'cat', '/tmp/yuzu-dump.bin'])
 
-    def find(self, regex, flags=0):
+    def find(self, regex, flags=0, exact=False):
+        if exact:
+            regex = re.escape(regex)
         r = re.compile(regex, flags=flags)
         for addr, dump in self.dumps.items():
             for m in r.finditer(dump):

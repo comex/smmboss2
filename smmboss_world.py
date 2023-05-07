@@ -2,6 +2,8 @@ class Point2D(GuestStruct):
     x = prop(0, f32)
     y = prop(4, f32)
     sizeof_star = 8
+    def xy(self):
+        return (self.x, self.y)
 class Point3D(Point2D):
     z = prop(8, f32)
     sizeof_star = 12
@@ -14,6 +16,8 @@ class Rect(GuestStruct):
     min = prop(0, Point2D)
     max = prop(8, Point2D)
     sizeof_star = 0x10
+    def size(self):
+        return (self.max.x - self.min.x, self.max.y - self.min.y)
 
 class SpawnRect(GuestStruct):
     x = prop(0x00, u32)
@@ -90,26 +94,57 @@ class RNGPlus(GuestStruct):
 class Spawner(GuestStruct):
     counts = prop(8, fixed_array(u32, 8)) # not sure about length
 
+class BG(GuestStruct):
+    rect = prop(0x238, fixed_array(Rect, 3))
+    base_info = prop(0x364, u32)
+    ext_pos = prop(0x290, fixed_array(ptr_to(Point2D), 2))
+    ext_unk = prop(0x2a0, ptr_to(u32))
+    int_off = prop(0x2b0, fixed_array(Point2D, 3))
+    ext_size = prop(0x3b8, ptr_to(fixed_array(f32, 4)))
+
+class NormalBgOuter(GuestStruct):
+    # aka HBO1
+    bg = prop(0x38, BG)
+
+class Bloch(GuestStruct):
+    normal_bg_outer_array = prop(0x18, count4_ptr(ptr_to(NormalBgOuter)))
+
+class BGCollisionSystem(GuestStruct):
+    pass
+
 class AreaSystem(GuestStruct):
-    rngplus = prop(0xf8, ptr_to(RNGPlus))
+    use_second_coords = prop(0x30, u8)
     spawner = prop(0x70, ptr_to(Spawner))
+    bg_collision_system = prop(0x90, ptr_to(BGCollisionSystem))
+    bloch = prop(0xa0, ptr_to(Bloch))
+    rngplus = prop(0xf8, ptr_to(RNGPlus))
 
 class World(GuestStruct):
+    id = prop(0x20, u32)
     actor_mgr = prop(0x18, lambda: ptr_to(ActorMgr))
-    area_sys = prop(0x130, ptr_to(AreaSystem))
+    area_sys = prop(0x140, ptr_to(AreaSystem)) # was 0x130
 
 class ActorMgr(GuestStruct):
     @staticmethod
     def get():
         return guest.read_ptr(ActorMgr, guest.addr.actor_mgr)
     mp5 = prop(0x30, ptr_to(MP5))
-    cur_world = prop(0x98, ptr_to(World))
+    #cur_world = prop(0x98, ptr_to(World))
+    worlds = prop(0x80, count4_ptr(ptr_to(World)))
 
 class OtherTimerRelated(GuestStruct):
     @staticmethod
     def get():
         return guest.read_ptr(OtherTimerRelated, guest.addr.other_timer_related)
     frames = prop(0x38, u32)
+
+class BlockKindInfo(GuestStruct):
+    bits = prop(0, u32)
+    name = prop(8, ptr_to(GuestCString))
+    sizeof_star = 0x10
+
+def block_kind_info_array():
+    return fixed_array(BlockKindInfo, 0x1e)(guest.addr.block_kind_info_array)
 
 def print_exported_types():
     for i in range(70):
@@ -138,3 +173,30 @@ def print_ent():
 
 def print_timer():
     print(OtherTimerRelated.get().frames)
+
+def print_block_kind_info():
+    bkia = block_kind_info_array()
+    for i, bki in enumerate(bkia):
+        print(f'0x{i:02}: bits=0x{bki.bits:8} {bki.name}')
+
+def print_bg():
+    for i, world in enumerate(ActorMgr.get().worlds):
+        if (area_sys := world.area_sys):
+            array = area_sys.bloch.normal_bg_outer_array
+            print(f'world {i}: ({array.count})')
+            for normal in array:
+                print(f'  {normal}')
+                for i in range(3):
+                    rect = normal.bg.rect[i]
+                    width, height = rect.size()
+                    print(f'    rect{i}: x:{rect.min.x}-{rect.max.x} y:{rect.min.y}-{rect.max.y} size:{width},{height}')
+                line = '    ext_pos'
+                for i in range(2):
+                    line += f'    {i}:{normal.bg.ext_pos[i].xy()}'
+                print(line)
+                print(f'    ext_unk:   {normal.bg.ext_unk.get()}')
+                line = '    int_off'
+                for i in range(3):
+                    line += f'    {i}:{normal.bg.int_off[i].xy()}'
+                print(line)
+                print(f'    ext_size: ' + ' '.join(str(normal.bg.ext_size[i]) for i in range(4)))

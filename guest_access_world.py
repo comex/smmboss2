@@ -97,7 +97,7 @@ class GuestArray(GuestPtr):
     def __setitem__(self, n, val):
         return self.ptr_at(n).set(val)
     def ptr_at(self, n):
-        if not (0 <= n <= self.count):
+        if not (0 <= n < self.count):
             raise IndexError
         return self.base.raw_offset(self.ptr_ty.sizeof_star * n, self.ptr_ty)
     def __iter__(self):

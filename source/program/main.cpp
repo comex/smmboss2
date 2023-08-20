@@ -241,12 +241,15 @@ HOOK_DEFINE_TRAMPOLINE(StubBgUnitGroupInitSpecific) {
     }
 };
 
+#if 0
+// this stretches blocks' visual appearance 
 HOOK_DEFINE_TRAMPOLINE(StubBgRendererXX) {
     static void Callback(void *self, int w1, float *xyz, void *w3, float *wh_in_blocks, int x5, void *x6) {
         float new_wh_in_blocks[2] = {wh_in_blocks[0] / 2, wh_in_blocks[1] * 2};
         Orig(self, w1, xyz, w3, new_wh_in_blocks, x5, x6);
     }
 };
+#endif
 
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
@@ -267,7 +270,7 @@ extern "C" void exl_main(void* x0, void* x1) {
 
     //Stub_agl_VertexBuffer_flushCPUCache::InstallAtOffset(0x002fba20);
     //StubBgUnitGroupInitSpecific::InstallAtOffset(0x00daf110);
-    StubBgRendererXX::InstallAtOffset(0x00da2ec0);
+    //StubBgRendererXX::InstallAtOffset(0x00da2ec0);
 
     {
         // Patch to skip intro cutscene

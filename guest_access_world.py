@@ -228,6 +228,21 @@ class GuestCString(GuestPtr):
         #return '%s %s' % (super().__repr__(), self.get())
         return repr(self.get())
 
+class GuestPtrToMemberFunction(GuestStruct):
+    # todo: we are not doing a good job distinguishing values and pointers.
+    word1 = prop(0, usize)
+    word2 = prop(8, usize)
+
+    def resolve(self, obj) -> GuestPtr:
+        word1, word2 = self.word1, self.word2
+        if word2 & 1:
+            vtable_offset = word1
+            offset_to_vtable = word2 >> 1
+            vtable = usize(obj.addr + offset_to_vtable).get()
+            return GuestPtrPtr(vtable + vtable_offset).get()
+        else:
+            return GuestPtr(word1)
+
 def dump(val, fp=sys.stdout, indent=''):
     if hasattr(val, 'dump'):
         val.dump(fp, indent)

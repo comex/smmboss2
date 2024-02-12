@@ -35,11 +35,32 @@ class FancyString(GuestStruct):
     def as_str(self):
         return self.cstr.as_str()
 
+class StateMgrState(GuestStruct):
+    sizeof_star = 0x40
+    vtable = prop(0, usize)
+    target = prop(8, GuestPtrPtr)
+    cb_in = prop(0x10, GuestPtrToMemberFunction)
+    cb_tick = prop(0x20, GuestPtrToMemberFunction)
+    cb_out = prop(0x30, GuestPtrToMemberFunction)
+
 class StateMgr(GuestStruct):
     counter = prop(0xc, u32)
     state = prop(0x8, u32)
-    names_count = prop(0x38, u32)
-    names = prop(0x40, ptr_to(fixed_array(FancyString, 999)))
+    state_objs = prop(0x28, count4_ptr(StateMgrState))
+    names = prop(0x38, count4_ptr(FancyString))
+
+    def dump_states(self):
+        count = self.state_objs.count
+        assert count == self.names.count
+        for i in range(count):
+            state = self.state_objs[i]
+            line = f'State {i}: name={self.names[i]}'
+            for kind in ['in', 'tick', 'out']:
+                cb = getattr(state, f'cb_{kind}')
+                func = guest.unslide(cb.resolve(state.target).addr)
+                line += f' {kind}={func:#x}'
+            line += f' [target={state.target.addr:#x}]'
+            print(line)
 
 class ObjRec(GuestStruct):
     vt = prop(0, usize)

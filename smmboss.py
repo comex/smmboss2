@@ -36,8 +36,12 @@ class MMGuest(Guest):
         self.yaml = addrs_yaml[self.build_id]
         self.version = self.yaml['version']
     def slide(self, addr):
+        if addr == 0:
+            return 0
         return (addr + self._slide) & 0xffffffffffffffff
     def unslide(self, addr):
+        if addr == 0:
+            return 0
         return (addr - self._slide) & 0xffffffffffffffff
     @property
     def _gslide(self):

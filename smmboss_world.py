@@ -134,6 +134,8 @@ class BGCollisionSystem(GuestStruct):
     pass
 
 class AreaSystem(GuestStruct):
+    world_id = prop(0x18, u32)
+    also_world_id = prop(0x1c, u32)
     use_second_coords = prop(0x30, u8)
     spawner = prop(0x70, ptr_to(Spawner))
     bg_collision_system = prop(0x90, ptr_to(BGCollisionSystem))
@@ -164,13 +166,19 @@ class BlockKindInfo(GuestStruct):
     name = prop(8, ptr_to(GuestCString))
     sizeof_star = 0x10
 
-class CoinLocArray(GuestArray, GuestStruct):
-    ptr_ty = Point3D
-    base = prop(0, ptr_to(Point3D))
+class CoinInfo(GuestStruct):
+    x = prop(0, f32)
+    y = prop(4, f32)
+    world = prop(8, u32)
+    sizeof_star = 0xc
+
+class CoinInfoArray(GuestArray, GuestStruct):
+    ptr_ty = CoinInfo
+    base = prop(0, ptr_to(CoinInfo))
     capacity = prop(8, u32)
     unk_c = prop(0xc, u32)
     count = prop(0x10, u32)
-    coin_info_storage = prop(0x14, fixed_array(Point3D, 10))
+    coin_info_storage = prop(0x14, fixed_array(CoinInfo, 10))
 
 class PendingCoinInfo(GuestStruct):
     area_sys = prop(0x0, ptr_to(AreaSystem))
@@ -192,8 +200,9 @@ class PendingCoinInfoArray(GuestArray, GuestStruct):
 class CoinMan(GuestStruct):
     vt = prop(0, usize)
     max_coins = prop(0x20, u32)
-    cur_locs = prop(0x28, CoinLocArray)
-    saved_locs = prop(0xc0, CoinLocArray)
+    cur_info = prop(0x28, CoinInfoArray)
+    also_max_coins = prop(0xb8, u32)
+    saved_info = prop(0xc0, CoinInfoArray)
     pending = prop(0x150, fixed_array(PendingCoinInfoArray, 2))
     f310 = prop(0x310, u32)
     flag314 = prop(0x314, u8)

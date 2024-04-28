@@ -164,6 +164,47 @@ class BlockKindInfo(GuestStruct):
     name = prop(8, ptr_to(GuestCString))
     sizeof_star = 0x10
 
+class CoinInfoA(GuestStruct):
+    a = prop(0, f32)
+    b = prop(0, f32)
+    c = prop(0, f32)
+    sizeof_star = 0xc
+
+class CoinManSubA(GuestStruct):
+    coin_info_p = prop(0, ptr_to(CoinInfoA))
+    capacity = prop(8, u32)
+    unk_c = prop(0xc, u32)
+    length = prop(0x10, u32)
+    coin_info_storage = prop(0x14, fixed_array(CoinInfoA, 10))
+
+class CoinInfoB(GuestStruct):
+    area_sys = prop(0x0, ptr_to(AreaSystem))
+    floats = fixed_array(f32, 4)
+    f18 = prop(0x18, u32)
+    f1c = prop(0x1c, u32)
+    f20 = prop(0x20, u64)
+    sizeof_star = 0x28
+
+class CoinManSubB(GuestStruct):
+    coin_info_p = prop(0, ptr_to(CoinInfoB))
+    capacity = prop(8, u32)
+    unk_c = prop(0xc, u32)
+    length = prop(0x10, u32)
+    coin_info_storage = prop(0x14, fixed_array(CoinInfoB, 5))
+    sizeof_star = 0xe0
+
+class CoinMan(GuestStruct):
+    vt = prop(0, usize)
+    max_coins = prop(0x20, u32)
+    cur_suba = prop(0x28, CoinManSubA)
+    saved_suba = prop(0xc0, CoinManSubA)
+    subbs = prop(0x150, fixed_array(CoinManSubB, 2))
+    f310 = prop(0x310, u32)
+    flag314 = prop(0x314, u8)
+    @staticmethod
+    def get():
+        return guest.read_ptr(CoinMan, guest.addr.coinman)
+
 def block_kind_info_array():
     return fixed_array(BlockKindInfo, 0x1e)(guest.addr.block_kind_info_array)
 

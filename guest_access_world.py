@@ -121,7 +121,7 @@ class GuestArray(GuestPtr):
         for i in range(0, count * sizeof_elm, sizeof_elm):
             out.append(self.ptr_ty.decode_data(raw[i:i+sizeof_elm]))
         return out
-    def dump(self, fp, indent):
+    def dump(self, fp, indent, **opts):
         count = self.count
         fp.write('array (%#x, count=%x):' % (self.addr, count))
         if self.addr == 0:
@@ -131,7 +131,7 @@ class GuestArray(GuestPtr):
         for i in range(count):
             fp.write('\n%s[%d] = ' % (indent2, i))
             item = self[i]
-            dump(item, fp, indent2)
+            dump(item, fp, indent2, **opts)
             fp.write(',')
 
 def count4_ptr(ptr_ty):
@@ -155,14 +155,31 @@ def fixed_array(ptr_ty, count):
     return GuestFixedArray
 
 class MyProperty(property):
-    def __init__(self, fget, fset, fptr, **kwargs):
-        super().__init__(fget, fset, **kwargs)
-        self.fptr = fptr
+    def __init__(self, offset, ptr_cls_f, dump_deep=False):
+        assert isinstance(offset, int)
+        self.offset = offset
+        self.ptr_cls_f = ptr_cls_f
+        self.dump_deep = dump_deep
+        super().__init__(self.read, self.write)
+    def ptr(self, this):
+        return maybe_call(self.ptr_cls_f)(this.addr + self.offset)
+    def read(self, this):
+        return self.ptr(this).get()
+    def write(self, this, value):
+        return self.ptr(this).set(value)
+    def dump_val(self, this, fp, indent2, **opts):
+        val = self.read(this)
+        if (issubclass(getattr(self.ptr_cls_f, 'val_ty', type(None)), GuestPtr) and
+            not self.dump_deep):
+            fp.write(repr(val))
+        else:
+            dump(val, fp, indent2, **opts)
+prop = MyProperty
 
 def addrof(obj, prop):
     prop = type(obj).__dict__[prop]
     assert isinstance(prop, MyProperty)
-    return prop.fptr(obj)
+    return prop.ptr(obj)
 
 @functools.lru_cache(None)
 def offsetof(cls, prop):
@@ -174,16 +191,6 @@ def maybe_call(f):
     else:
         return f()
 
-def prop(offset, ptr_cls_f):
-    assert isinstance(offset, int)
-    def ptr(self):
-        return maybe_call(ptr_cls_f)(self.addr + offset)
-    def read(self):
-        return ptr(self).get()
-    def write(self, value):
-        return ptr(self).set(value)
-    return MyProperty(read, write, ptr)
-
 def as_addr(obj_or_addr):
     if isinstance(obj_or_addr, GuestStruct):
         return obj_or_addr.addr
@@ -191,7 +198,7 @@ def as_addr(obj_or_addr):
         return int(obj_or_addr) & 0xffffffffffffffff
 
 class GuestStruct(GuestPtr):
-    def dump(self, fp, indent):
+    def dump(self, fp, indent, **opts):
         fp.write('%s (%#x):' % (self.__class__.__name__, self.addr))
         if self.addr == 0:
             fp.write(' (null)')
@@ -201,7 +208,7 @@ class GuestStruct(GuestPtr):
             for key, prop in cls.__dict__.items():
                 if isinstance(prop, MyProperty):
                     fp.write('\n%s%s: ' % (indent2, key))
-                    dump(getattr(self, key), fp, indent2)
+                    prop.dump_val(self, fp, indent2, **opts)
     def get(self):
         return self
     def set(self, val):
@@ -243,9 +250,9 @@ class GuestPtrToMemberFunction(GuestStruct):
         else:
             return GuestPtr(word1)
 
-def dump(val, fp=sys.stdout, indent=''):
+def dump(val, fp=sys.stdout, indent='', **opts):
     if hasattr(val, 'dump'):
-        val.dump(fp, indent)
+        val.dump(fp, indent, **opts)
     elif isinstance(val, int):
         fp.write('%#x' % val)
     else:

@@ -76,10 +76,12 @@ def ptr_to(ptr_ty):
 GuestPtrPtr = ptr_to(GuestPtr)
 
 class GuestArray(GuestPtr):
-    def __init__(self, addr, ptr_ty, count):
+    def __init__(self, addr, ptr_ty=None, count=None):
         super().__init__(addr)
-        self.ptr_ty = ptr_ty
-        self.count = count
+        if ptr_ty is not None:
+            self.ptr_ty = ptr_ty
+        if count is not None:
+            self.count = count
     def __getitem__(self, n):
         if isinstance(n, slice):
             assert n.step is None or n.step == 1
@@ -138,8 +140,7 @@ def count4_ptr(ptr_ty):
     pp = ptr_to(ptr_ty)
     class CountPtr(GuestArray, GuestStruct):
         def __init__(self, addr):
-            GuestPtr.__init__(self, addr)
-            self.ptr_ty = ptr_ty
+            super().__init__(addr, ptr_ty)
         count = prop(0, u32)
         base = prop(ptr_size, pp)
         sizeof_star = ptr_size
@@ -155,10 +156,11 @@ def fixed_array(ptr_ty, count):
     return GuestFixedArray
 
 class MyProperty(property):
-    def __init__(self, offset, ptr_cls_f, dump_deep=False):
+    def __init__(self, offset, ptr_cls_f, dump=True, dump_deep=False):
         assert isinstance(offset, int)
         self.offset = offset
         self.ptr_cls_f = ptr_cls_f
+        self.dump = True
         self.dump_deep = dump_deep
         super().__init__(self.read, self.write)
     def ptr(self, this):
@@ -167,13 +169,16 @@ class MyProperty(property):
         return self.ptr(this).get()
     def write(self, this, value):
         return self.ptr(this).set(value)
-    def dump_val(self, this, fp, indent2, **opts):
+    def dump_field(self, this, fp, indent, key, **opts):
+        if not self.dump:
+            return
+        fp.write('\n%s%s: ' % (indent, key))
         val = self.read(this)
         if (issubclass(getattr(self.ptr_cls_f, 'val_ty', type(None)), GuestPtr) and
             not self.dump_deep):
             fp.write(repr(val))
         else:
-            dump(val, fp, indent2, **opts)
+            dump(val, fp, indent, **opts)
 prop = MyProperty
 
 def addrof(obj, prop):
@@ -207,8 +212,7 @@ class GuestStruct(GuestPtr):
         for cls in type(self).mro()[::-1]:
             for key, prop in cls.__dict__.items():
                 if isinstance(prop, MyProperty):
-                    fp.write('\n%s%s: ' % (indent2, key))
-                    prop.dump_val(self, fp, indent2, **opts)
+                    prop.dump_field(self, fp, indent2, key, **opts)
     def get(self):
         return self
     def set(self, val):

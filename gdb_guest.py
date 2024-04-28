@@ -14,7 +14,7 @@ class GDBGuest(smmboss.MMGuest):
             m = re.search(r'received: "l(<\?xml.*</library-list>)"', stuff)
             assert m, "invalid response to libraries:read"
             xml = m.group(1)
-            m = re.search('<library name="main"><segment address="(.*?)"', xml)
+            m = re.search('<library name="(?:main|Slope.nss)"><segment address="(.*?)"', xml)
             assert m, "couldn't find main by hackily running a regex on the xml"
             self._slide = int(m.group(1), 16)
         elif kind == 'yuzu-info-shared':

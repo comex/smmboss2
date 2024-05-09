@@ -82,8 +82,9 @@ class GuestArray(GuestPtr):
             self.ptr_ty = ptr_ty
         if count is not None:
             self.count = count
-    def __getitem__(self, n):
+    def __getitem__(self, n, unchecked=False):
         if isinstance(n, slice):
+            assert not unchecked # todo
             assert n.step is None or n.step == 1
             start, stop = n.start, n.stop
             if start is None: start = 0
@@ -92,14 +93,16 @@ class GuestArray(GuestPtr):
             if stop < 0: start += self.count
             assert start <= stop
             return GuestArray(self.addr + start * self.ptr_ty.sizeof_star, self.ptr_ty, stop - start)
-        item = self.ptr_at(n)
+        item = self.ptr_at(n, unchecked=unchecked)
         if hasattr(item, 'get'):
             item = item.get() # xxx
         return item
-    def __setitem__(self, n, val):
-        return self.ptr_at(n).set(val)
-    def ptr_at(self, n):
-        if not (0 <= n < self.count):
+    def get_unchecked(self, n):
+        return self.__getitem__(n, unchecked=True)
+    def __setitem__(self, n, val, unchecked=False):
+        return self.ptr_at(n, unchecked=unchecked).set(val)
+    def ptr_at(self, n, unchecked=False):
+        if not unchecked and not (0 <= n < self.count):
             raise IndexError
         return self.base.raw_offset(self.ptr_ty.sizeof_star * n, self.ptr_ty)
     def __iter__(self):

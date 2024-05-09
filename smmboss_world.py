@@ -182,7 +182,8 @@ class CoinInfoArray(GuestArray, GuestStruct):
 
 class PendingCoinInfo(GuestStruct):
     area_sys = prop(0x0, ptr_to(AreaSystem))
-    floats = fixed_array(f32, 4)
+    mario_pos = prop(0x8, Point2D)
+    coin_pos = prop(0x10, Point2D)
     f18 = prop(0x18, u32)
     f1c = prop(0x1c, u32)
     f20 = prop(0x20, u64)

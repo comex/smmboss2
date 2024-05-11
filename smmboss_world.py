@@ -51,6 +51,55 @@ class FancyString(GuestStruct):
     def as_str(self):
         return self.cstr.as_str()
 
+class SeadListNode(GuestStruct):
+    prev = prop(0, ptr_to(lambda: SeadListNode))
+    next = prop(8, ptr_to(lambda: SeadListNode))
+
+class SeadListImpl(SeadListNode):
+    count = prop(0x10, u32)
+    link_offset = prop(0x14, u32)
+    sizeof_star = 0x18
+
+    def __iter__(self, rev=False):
+        expected_count = self.count
+        actual_count = 0
+        link_offset = self.link_offset
+        link = self.prev if rev else self.next
+        while link != self:
+            next = link.prev if rev else link.next
+            yield link.raw_offset(-link_offset, self.elem_ty)
+            link = next
+            actual_count += 1
+            assert actual_count <= expected_count
+        assert actual_count == expected_count
+
+    def __getitem__(self, i):
+        count = self.count
+        if i < 0:
+            i += count
+        assert 0 <= i < count, (i, count)
+        it = iter(self)
+        for j in range(i):
+            next(it)
+        return next(it)
+
+    def dump(self, fp, indent, **opts):
+        fp.write(f'sead::List ({self.addr:#x}, count={self.count}):')
+        i = 0
+        indent2 = indent + '  '
+        for item in self:
+            fp.write(f'\n{indent2}[{i}] = ')
+            dump(item, fp, indent2, **opts)
+            fp.write(',')
+            i += 1
+
+def sead_list(_elem_ty):
+    class C(SeadListImpl):
+        elem_ty = _elem_ty
+    C.__name__ = f'sead_list({_elem_ty.__name__})'
+    return C
+
+
 class StateMgrState(GuestStruct):
     sizeof_star = 0x40
     vtable = prop(0, usize)
@@ -146,8 +195,22 @@ class NormalBgOuter(GuestStruct):
 class Bloch(GuestStruct):
     normal_bg_outer_array = prop(0x18, count4_ptr(ptr_to(NormalBgOuter)))
 
-class BGCollisionSystem(GuestStruct):
+class Collider(GuestStruct):
+    # aka h60 + 0x20
     pass
+
+class BGCollisionGrid(GuestStruct):
+    baseidx = prop(0, IntPoint2D)
+    first_wh = prop(8, IntPoint2D)
+    second_wh = prop(0x10, IntPoint2D)
+    triple_count = prop(0x18, u32)
+    field_1c = prop(0x1c, u32)
+    triple_array = prop(0x20, GuestPtrPtr)
+
+class BGCollisionSystem(GuestStruct):
+    colliders1 = prop(0x38, sead_list(Collider))
+    colliders2 = prop(0x58, sead_list(Collider))
+    grid = prop(0x18, ptr_to(BGCollisionGrid))
 
 class Tile(GuestStruct):
     what_to_draw = prop(0, u32)
@@ -298,54 +361,6 @@ class CoinMan(GuestStruct):
     @staticmethod
     def get():
         return guest.read_ptr(CoinMan, guest.addr.coinman)
-
-class SeadListNode(GuestStruct):
-    prev = prop(0, ptr_to(lambda: SeadListNode))
-    next = prop(8, ptr_to(lambda: SeadListNode))
-
-class SeadListImpl(SeadListNode):
-    count = prop(0x10, u32)
-    link_offset = prop(0x14, u32)
-    sizeof_star = 0x18
-
-    def __iter__(self, rev=False):
-        expected_count = self.count
-        actual_count = 0
-        link_offset = self.link_offset
-        link = self.prev if rev else self.next
-        while link != self:
-            next = link.prev if rev else link.next
-            yield link.raw_offset(-link_offset, self.elem_ty)
-            link = next
-            actual_count += 1
-            assert actual_count <= expected_count
-        assert actual_count == expected_count
-
-    def __getitem__(self, i):
-        count = self.count
-        if i < 0:
-            i += count
-        assert 0 <= i < count, (i, count)
-        it = iter(self)
-        for j in range(i):
-            next(it)
-        return next(it)
-
-    def dump(self, fp, indent, **opts):
-        fp.write(f'sead::List ({self.addr:#x}, count={self.count}):')
-        i = 0
-        indent2 = indent + '  '
-        for item in self:
-            fp.write(f'\n{indent2}[{i}] = ')
-            dump(item, fp, indent2, **opts)
-            fp.write(',')
-            i += 1
-
-def sead_list(_elem_ty):
-    class C(SeadListImpl):
-        elem_ty = _elem_ty
-    C.__name__ = f'sead_list({_elem_ty.__name__})'
-    return C
 
 class BgUnitGroupTypeSpecificVtable(GuestStruct):
     get_name = prop(0x50, GuestPtrPtr)

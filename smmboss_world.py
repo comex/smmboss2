@@ -1,3 +1,5 @@
+import struct
+
 class Point2D(GuestStruct):
     x = prop(0, f32)
     y = prop(4, f32)
@@ -147,6 +149,77 @@ class Bloch(GuestStruct):
 class BGCollisionSystem(GuestStruct):
     pass
 
+class Tile(GuestStruct):
+    what_to_draw = prop(0, u32)
+    field_4 = prop(4, u32)
+    pos = prop(8, Point3D)
+    sizeof_star = 0x14
+
+class TileArray(GuestArray, GuestStruct):
+    base = prop(0, ptr_to(Tile))
+    capacity = prop(8, u32)
+    offset = prop(0xc, u32) # ?
+    count = prop(0x10, u32)
+    ptr_ty = Tile
+
+class GridSquare(GuestStruct):
+    what_to_draw = prop(0, u16)
+    field_2 = prop(2, u8)
+    field_3 = prop(3, u8)
+    sizeof_star = 4
+
+    @staticmethod
+    def decode_data(data):
+        # fast path when getting all.  it's a hack.
+        return struct.unpack('<HBB', data)
+
+class Tiler2Grid(GuestStruct, GuestArray):
+    width = prop(0, u32)
+    height = prop(4, u32)
+    base = prop(8, ptr_to(GridSquare))
+    ptr_ty = GridSquare
+
+    @property
+    def count(self):
+        return self.width * self.height
+
+    def squares(self):
+        width = self.width
+        return [(i // width, i % width, decoded)
+                for (i, decoded) in enumerate(self.get_all())]
+
+    def nonzero_squares(self):
+        zeroes = (0, 0, 0)
+        return [(x, y, decoded)
+                for (x, y, decoded) in self.squares()
+                if decoded != zeroes]
+
+    def square(self, x, y):
+        assert 0 <= x < self.width
+        assert 0 <= y < self.height
+        return self[y * self.width + x]
+
+class SparkleEntry(GuestStruct):
+    pass
+
+class SparkleTable(GuestStruct, GuestArray):
+    count = prop(0, u32)
+    capacity = prop(4, u32)
+    base = prop(8, ptr_to(SparkleEntry))
+    next_alloc = prop(0x10, ptr_to(SparkleEntry))
+    storage = prop(0x18, GuestPtrPtr)
+    ptr_ty = SparkleEntry
+
+class SparkleTableOuter(GuestStruct):
+    table = prop(8, SparkleTable)
+
+class Tiler2(GuestStruct):
+    grid1 = prop(0x08, Tiler2Grid)
+    grid2 = prop(0x18, Tiler2Grid)
+    grid3 = prop(0x28, Tiler2Grid)
+    tiles = prop(0x48, TileArray)
+    sparkle = prop(0x60, ptr_to(SparkleTableOuter))
+
 class AreaSystem(GuestStruct):
     world_id = prop(0x18, u32)
     also_world_id = prop(0x1c, u32)
@@ -155,6 +228,7 @@ class AreaSystem(GuestStruct):
     bg_collision_system = prop(0x90, ptr_to(BGCollisionSystem))
     bloch = prop(0xa0, ptr_to(Bloch))
     rngplus = prop(0xf8, ptr_to(RNGPlus))
+    tiler2 = prop(0x110, ptr_to(Tiler2))
 
 class World(GuestStruct):
     id = prop(0x20, u32)
@@ -297,7 +371,7 @@ class BgUnitGroup(GuestStruct):
     field_84 = prop(0x84, u32)
     field_88 = prop(0x88, u32)
     field_8c = prop(0x8c, u32)
-    offset = prop(0x90, Point2D)
+    tilt = prop(0x90, Point2D)
     field_98 = prop(0x98, u32)
     field_9c = prop(0x9c, u32)
     field_a0 = prop(0xa0, u32)

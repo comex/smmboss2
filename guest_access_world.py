@@ -60,16 +60,20 @@ usize = u64
 ptr_size = usize.sizeof_star
 
 @functools.lru_cache(None)
-def ptr_to(ptr_ty):
+def ptr_to(ptr_ty_or_f):
+    assert isinstance(ptr_ty_or_f, type) or callable(ptr_ty_or_f)
     class GuestXPtrPtr(GuestPrimPtr):
         sizeof_star = ptr_size
-        val_ty = ptr_ty
-        @staticmethod
-        def decode_data(data):
-            return maybe_call(ptr_ty)(usize.decode_data(data))
-        @staticmethod
-        def encode_data(val):
-            assert isinstance(val, ptr_ty)
+        val_ty_or_f = ptr_ty_or_f
+        @classmethod
+        def val_ty(cls):
+            return maybe_call(cls.val_ty_or_f)
+        @classmethod
+        def decode_data(cls, data):
+            return cls.val_ty()(usize.decode_data(data))
+        @classmethod
+        def encode_data(cls, val):
+            assert isinstance(val, cls.val_ty())
             return usize.encode_data(val.addr)
     return GuestXPtrPtr
 
@@ -128,7 +132,7 @@ class GuestArray(GuestPtr):
         return out
     def dump(self, fp, indent, **opts):
         count = self.count
-        fp.write('array (%#x, count=%x):' % (self.addr, count))
+        fp.write('array (%#x, count=%u):' % (self.addr, count))
         if self.addr == 0:
             fp.write(' (null)')
             return
@@ -159,15 +163,18 @@ def fixed_array(ptr_ty, count):
     return GuestFixedArray
 
 class MyProperty(property):
-    def __init__(self, offset, ptr_cls_f, dump=True, dump_deep=False):
+    def __init__(self, offset, ptr_cls_or_f, dump=True, dump_deep=False):
         assert isinstance(offset, int)
         self.offset = offset
-        self.ptr_cls_f = ptr_cls_f
+        self.ptr_cls_or_f = ptr_cls_or_f
         self.dump = True
         self.dump_deep = dump_deep
         super().__init__(self.read, self.write)
+    @property
+    def ptr_cls(self):
+        return maybe_call(self.ptr_cls_or_f)
     def ptr(self, this):
-        return maybe_call(self.ptr_cls_f)(this.addr + self.offset)
+        return self.ptr_cls(this.addr + self.offset)
     def read(self, this):
         return self.ptr(this).get()
     def write(self, this, value):
@@ -177,8 +184,8 @@ class MyProperty(property):
             return
         fp.write('\n%s%s: ' % (indent, key))
         val = self.read(this)
-        if (issubclass(getattr(self.ptr_cls_f, 'val_ty', type(None)), GuestPtr) and
-            not self.dump_deep):
+        val_ty_func = getattr(self.ptr_cls, 'val_ty', None)
+        if val_ty_func is not None and issubclass(val_ty_func(), GuestPtr) and not self.dump_deep:
             fp.write(repr(val))
         else:
             dump(val, fp, indent, **opts)
@@ -228,14 +235,7 @@ class GuestCString(GuestPtr):
         addr = self.addr
         if addr == 0:
             return None
-        data = b''
-        while b'\0' not in data:
-            size = 0x20 - (addr & 0x1f)
-            #print(hex(addr), hex(size), data)
-            data += guest.read(addr, size)
-            addr += size
-        #print(repr(data))
-        return data[:data.index(b'\0')]
+        return guest.read_cstr(self.addr)
     def as_str(self):
         return self.get().decode('utf-8')
     def __repr__(self):
@@ -267,3 +267,54 @@ def dump(val, fp=sys.stdout, indent='', **opts):
     if indent == '':
         fp.write('\n') # pfft
 
+class GuestPlusFakeStack:
+    def __init__(self, backing):
+        self.backing = backing
+
+    def try_read(self, addr, size):
+        if addr > 0x2000 and addr + size <= 0x10000:
+            return b'\0' * size
+        return self.backing.try_read(addr, size)
+
+    def try_write(self, addr, data):
+        raise Exception("should not try to write to this")
+
+# barebones (for now)
+def emulate_call(pc, x0=0):
+    import unicorn
+    import unicorn.arm64_const as ac
+    mu = unicorn.Uc(unicorn.UC_ARCH_ARM64, unicorn.UC_MODE_ARM)
+
+    from guest_access import CachingGuest
+    fake_guest = CachingGuest(GuestPlusFakeStack(guest), imaginary_mode=True)
+
+    fake_mem = {}
+
+    def mmio_read_cb(uc, offset, size, data):
+        ret = int.from_bytes(fake_guest.read(offset, size), 'little') 
+        #print(f">>> read {size} from {offset:#x} => {ret:#x}")
+        return ret
+
+    def mmio_write_cb(uc, offset, size, value, data):
+        #print(f">>> write {value:#x} size {size} to {offset:#x}")
+        fake_guest.write(offset, value.to_bytes(size, 'little'))
+
+    ADDR = 0
+    SIZE = 1 << 48
+    mu.mmio_map(ADDR, SIZE, mmio_read_cb, None, mmio_write_cb, None)
+    mu.mem_protect(ADDR, SIZE, unicorn.UC_PROT_READ | unicorn.UC_PROT_WRITE | unicorn.UC_PROT_EXEC)
+    mu.reg_write(ac.UC_ARM64_REG_SP, 0x10000)
+    mu.reg_write(ac.UC_ARM64_REG_LR, 0x1234)
+    mu.reg_write(ac.UC_ARM64_REG_X0, x0)
+    single_step = False
+    max_insns = 300
+    for step in range(max_steps if single_step else 1):
+        #print(f'pc={pc:#x}')
+        mu.emu_start(begin=pc, until=0x1234, timeout=10_000_000, count=1 if single_step else max_insns)
+        pc = mu.reg_read(ac.UC_ARM64_REG_PC)
+        if pc == 0x1234:
+            break
+    else:
+        raise Exception("took too long")
+
+    return {'guest': fake_guest, 'ret': mu.reg_read(ac.UC_ARM64_REG_X0)}

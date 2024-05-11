@@ -19,6 +19,20 @@ class Rect(GuestStruct):
     def size(self):
         return (self.max.x - self.min.x, self.max.y - self.min.y)
 
+class IntPoint2D(GuestStruct):
+    x = prop(0, u32)
+    y = prop(4, u32)
+    sizeof_star = 8
+    def xy(self):
+        return (self.x, self.y)
+
+class IntRect(GuestStruct):
+    min = prop(0, IntPoint2D)
+    max = prop(8, IntPoint2D)
+    sizeof_star = 0x10
+    def size(self):
+        return (self.max.x - self.min.x, self.max.y - self.min.y)
+
 class SpawnRect(GuestStruct):
     x = prop(0x00, u32)
     y = prop(0x04, u32)
@@ -210,6 +224,101 @@ class CoinMan(GuestStruct):
     @staticmethod
     def get():
         return guest.read_ptr(CoinMan, guest.addr.coinman)
+
+class SeadListNode(GuestStruct):
+    prev = prop(0, ptr_to(lambda: SeadListNode))
+    next = prop(8, ptr_to(lambda: SeadListNode))
+
+class SeadListImpl(SeadListNode):
+    count = prop(0x10, u32)
+    link_offset = prop(0x14, u32)
+    sizeof_star = 0x18
+
+    def __iter__(self, rev=False):
+        expected_count = self.count
+        actual_count = 0
+        link_offset = self.link_offset
+        link = self.prev if rev else self.next
+        while link != self:
+            next = link.prev if rev else link.next
+            yield link.raw_offset(-link_offset, self.elem_ty)
+            link = next
+            actual_count += 1
+            assert actual_count <= expected_count
+        assert actual_count == expected_count
+
+    def __getitem__(self, i):
+        count = self.count
+        if i < 0:
+            i += count
+        assert 0 <= i < count, (i, count)
+        it = iter(self)
+        for j in range(i):
+            next(it)
+        return next(it)
+
+    def dump(self, fp, indent, **opts):
+        fp.write(f'sead::List ({self.addr:#x}, count={self.count}):')
+        i = 0
+        indent2 = indent + '  '
+        for item in self:
+            fp.write(f'\n{indent2}[{i}] = ')
+            dump(item, fp, indent2, **opts)
+            fp.write(',')
+            i += 1
+
+def sead_list(_elem_ty):
+    class C(SeadListImpl):
+        elem_ty = _elem_ty
+    C.__name__ = f'sead_list({_elem_ty.__name__})'
+    return C
+
+class BgUnitGroupTypeSpecificVtable(GuestStruct):
+    get_name = prop(0x50, GuestPtrPtr)
+
+class BgUnitGroupTypeSpecific(GuestStruct):
+    vt = prop(0, ptr_to(BgUnitGroupTypeSpecificVtable))
+    @functools.cached_property
+    def name(self):
+        stuff = emulate_call(self.vt.get_name.addr, x0=self.addr)
+        return stuff['guest'].read_cstr(stuff['ret'])
+
+class BgUnitGroup(GuestStruct):
+    node1 = prop(0x20, SeadListNode)
+    node2 = prop(0x30, SeadListNode)
+    type_specific = prop(0x40, ptr_to(BgUnitGroupTypeSpecific))
+    heap = prop(0x48, GuestPtrPtr)
+    type = prop(0x50, u32)
+    rect = prop(0x54, IntRect) # in units of blocks
+    field_64 = prop(0x64, u32)
+    field_68 = prop(0x68, u32)
+    pos = prop(0x6c, Point3D) # in native units
+    scale = prop(0x78, Size2D)
+    field_84 = prop(0x84, u32)
+    field_88 = prop(0x88, u32)
+    field_8c = prop(0x8c, u32)
+    offset = prop(0x90, Point2D)
+    field_98 = prop(0x98, u32)
+    field_9c = prop(0x9c, u32)
+    field_a0 = prop(0xa0, u32)
+    field_a4 = prop(0xa4, u32)
+    field_a8 = prop(0xa8, u32)
+    flags = prop(0xac, u32)
+    field_b0 = prop(0xb0, u32)
+    world_idx = prop(0xb4, u8)
+    field_b8 = prop(0xb8, u32)
+    field_bc = prop(0xbc, u32)
+
+    def dump(self, fp, indent, **opts):
+        super().dump(fp, indent, **opts)
+        fp.write(f'\n{indent}  type_specific.name: {self.type_specific.name}')
+
+class BgUnitGroupMgr(GuestStruct):
+    unit_group_lists = prop(0x28, fixed_array(sead_list(BgUnitGroup), 2))
+    unit_group_heaps = prop(0x58, fixed_array(GuestPtr, 2))
+    @staticmethod
+    def get():
+        return guest.read_ptr(BgUnitGroupMgr, guest.addr.bg_unit_group_mgr)
 
 def block_kind_info_array():
     return fixed_array(BlockKindInfo, 0x1e)(guest.addr.block_kind_info_array)

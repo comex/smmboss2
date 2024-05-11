@@ -20,7 +20,7 @@ class Guest:
     def write(self, addr, data):
         actual = self.try_write(addr, data)
         if actual != len(data):
-            raise Exception('only read %#x/%#x bytes @ %#x' % (actual, len(data), addr))
+            raise Exception('only wrote %#x/%#x bytes @ %#x' % (actual, len(data), addr))
     def _xreadwrite(fmt):
         size = struct.calcsize(fmt)
         def read(self, addr):
@@ -34,6 +34,17 @@ class Guest:
     read64, write64 = _xreadwrite('<Q')
     def read_ptr(self, ty, addr):
         return self.world.ptr_to(ty)(addr).get()
+
+    def read_cstr(self, addr):
+        data = b''
+        while b'\0' not in data:
+            size = 0x20 - (addr & 0x1f)
+            #print(hex(addr), hex(size), data)
+            data += self.read(addr, size)
+            addr += size
+        #print(repr(data))
+        return data[:data.index(b'\0')]
+
     def __hash__(self):
         return id(self)
 
@@ -44,14 +55,20 @@ class Guest:
         return world
 
 class CachingGuest(Guest):
-    def __init__(self, backing):
+    def __init__(self, backing, imaginary_mode=False):
         super().__init__()
         self.backing = backing
         self.chunk_size = 0x100
         self.cache = {}
-        self.active_count = 0
-    def read(self, addr, size):
+        self.active_count = 1 if imaginary_mode else 0
+        # if imaginary_mode is True, we won't actually write back any changes,
+        # and this serves as an overlay on top of real memory - used for
+        # emulation
+        self.imaginary_mode = imaginary_mode
+
+    def try_read(self, addr, size):
         if not self.active_count:
+            assert not self.imaginary_mode
             return self.backing.try_read(addr, size)
         ret = b''
         chunk_addr = addr - (addr % self.chunk_size)
@@ -63,10 +80,11 @@ class CachingGuest(Guest):
                 while (chunk_addr + read_size) < addr + size and \
                     (chunk_addr + read_size) not in self.cache:
                     read_size += self.chunk_size
-                read_data = self.backing.read(chunk_addr, read_size)
-                assert len(read_data) == read_size
+                read_data = self.backing.try_read(chunk_addr, read_size)
+                if len(read_data) != read_size:
+                    break
                 for off in range(0, read_size, self.chunk_size):
-                    self.cache[chunk_addr + off] = read_data[off:off+self.chunk_size]
+                    self.cache[chunk_addr + off] = bytearray(read_data[off:off+self.chunk_size])
                 ret += read_data
                 chunk_addr += read_size
             else:
@@ -75,15 +93,26 @@ class CachingGuest(Guest):
         off = addr % self.chunk_size
         return ret[off:off+size]
 
-
     def try_write(self, addr, data):
         size = len(data)
         chunk_addr = addr - (addr % self.chunk_size)
+        if self.imaginary_mode:
+            readable_size = len(self.try_read(addr, size))
+            size = readable_size
+            data = data[:size]
         while chunk_addr < addr + size:
-            if chunk_addr in self.cache:
-                del self.cache[chunk_addr]
+            chunk = self.cache.get(chunk_addr)
+            if self.imaginary_mode:
+                assert chunk is not None
+            if chunk is not None:
+                lo = max(addr, chunk_addr)
+                hi = min(addr + size, chunk_addr + self.chunk_size)
+                self.cache[chunk_addr][lo - chunk_addr : hi - chunk_addr] = data[lo - addr : hi - addr]
             chunk_addr += self.chunk_size
-        return self.backing.try_write(addr, data)
+        if self.imaginary_mode:
+            return size
+        else:
+            return self.backing.try_write(addr, data)
 
     def __enter__(self):
         self.active_count += 1

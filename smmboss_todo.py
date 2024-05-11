@@ -172,28 +172,6 @@ def exported_type_to_idee_TODO(n, guest):
     return array[n]
 
 
-class AllocLink(GuestStruct):
-    prev = prop(0, ptr_to(lambda: AllocLink))
-    next = prop(4, ptr_to(lambda: AllocLink))
-class AllocTracker(AllocLink):
-    obj_count = prop(8, u32)
-    link_offset = prop(0xc, u32)
-    sizeof_star = 0x10
-    def iter_allocs(self):
-        link_offset = self.link_offset
-        link = self.next
-        while link != self:
-            next = link.next
-            yield link.raw_offset(-link_offset, GuestPtr)
-            link = next
-    def iter_allocs_rev(self):
-        link_offset = self.link_offset
-        link = self.prev
-        while link != self:
-            prev = link.prev
-            yield link.raw_offset(-link_offset, GuestPtr)
-            link = prev
-
 
 class MP5(GuestStruct):
     pointers = prop(0, count_ptr(ptr_to(Entity)))

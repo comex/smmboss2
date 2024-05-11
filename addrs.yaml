@@ -22,6 +22,7 @@ edb8feede2bfa3ffd1adf65a4424361a00000000000000000000000000000000:
         dot_note: 0x27b5f00
         block_kind_info_array: 0x02e6c7b0
         coinman: 0x02bf8418
+        bg_unit_group_mgr: 0x02a61288
 aac32b77fb8e040b18e5940f37ca6c7f00000000000000000000000000000000:
     version: 301
     addrs:

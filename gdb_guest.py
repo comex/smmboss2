@@ -52,11 +52,15 @@ class GDBGuest(smmboss.MMGuest):
 
         super().__init__()
 
-
     def try_read(self, addr, size):
         return self.inf.read_memory(addr, size)
+
     def try_write(self, addr, data):
-        return self.inf.write_memory(addr, data)
+        try:
+            self.inf.write_memory(addr, data)
+            return len(data)
+        except gdb.MemoryError:
+            return 0
 
 def reg(name):
     return int(gdb.parse_and_eval(name))

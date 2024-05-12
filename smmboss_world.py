@@ -141,17 +141,32 @@ class ObjRec(GuestStruct):
     @staticmethod
     @functools.lru_cache(None)
     def by_idee(idee):
-        objrecs_by_idee = fixed_array(ptr_to(ObjRec), 0xee)(guest.addr.idee_to_objrec)
+        objrecs_by_idee = fixed_array(ptr_to(ObjRec), 0xee)(mm.addr.idee_to_objrec)
         return objrecs_by_idee[idee]
 
-class Entity(GuestStruct):
+class Relly(GuestStruct):
+    # afaik this is what I used to call EditActorPlacementData, but I'm
+    # not sure that name is right
+    idbits = prop(0xf0, u64)
+    bg_unit_group = prop(0xf8, lambda: ptr_to(BgUnitGroup))
+    x = prop(8, f32)
+    y = prop(0xc, f32)
+    z = prop(0x118, f32)
+    x2 = prop(0x11c, f32)
+    y2 = prop(0x120, f32)
+    z2 = prop(0x124, f32)
+
+class ActorBase(GuestStruct):
     vtable = prop(0, GuestPtrPtr)
     idbits = prop(0x30, s32)
     objrec = prop(0x38, lambda: ptr_to(ObjRec))
-    mama = prop(0x48, lambda: ptr_to(Entity))
+    mama = prop(0x48, lambda: ptr_to(ActorBase))
 
-class PYES(Entity):
-    if guest.version >= 300:
+class EditActor(ActorBase):
+    relly = prop(0x320, ptr_to(Relly))
+
+class Actor(ActorBase):
+    if mm.version >= 300:
         loc = prop(0x230, Point3D)
     else:
         loc = prop(0x228, Point3D)
@@ -165,11 +180,11 @@ class PYES(Entity):
 class LiftSegmentIsh(GuestStruct):
     smgr = prop(0xd0, StateMgr)
 
-class YouganLift(PYES):
+class YouganLift(Actor):
     part_statemgrs = prop(0x2dd8, fixed_array(ptr_to(LiftSegmentIsh), 4))
 
 class MP5(GuestStruct):
-    pointers = prop(0x0, count4_ptr(ptr_to(Entity)))
+    pointers = prop(0x0, count4_ptr(ptr_to(ActorBase)))
 
 class RNG(GuestStruct):
     state = fixed_array(u32, 4)
@@ -195,21 +210,36 @@ class NormalBgOuter(GuestStruct):
 class Bloch(GuestStruct):
     normal_bg_outer_array = prop(0x18, count4_ptr(ptr_to(NormalBgOuter)))
 
+class xxxcollider(GuestStruct):
+    pass
+
+class Triple24KList(GuestStruct):
+    list0 = prop(0x00, sead_list(xxxcollider))
+    list1 = prop(0x18, sead_list(xxxcollider))
+    list2 = prop(0x30, sead_list(xxxcollider))
+    sizeof_star = 0x48
+    def any_nonempty(self):
+        return self.list0.count or self.list1.count or self.list2.count
+
+class BGCollisionGrid(GuestStruct, GuestArray):
+    baseidx = prop(0, IntPoint2D)
+    first_wh = prop(8, IntPoint2D)
+    second_wh = prop(0x10, IntPoint2D)
+    count = prop(0x18, u32)
+    base = prop(0x20, ptr_to(Triple24KList))
+    ptr_ty = Triple24KList
+
 class Collider(GuestStruct):
     # aka h60 + 0x20
     pass
 
-class BGCollisionGrid(GuestStruct):
-    baseidx = prop(0, IntPoint2D)
-    first_wh = prop(8, IntPoint2D)
-    second_wh = prop(0x10, IntPoint2D)
-    triple_count = prop(0x18, u32)
-    field_1c = prop(0x1c, u32)
-    triple_array = prop(0x20, GuestPtrPtr)
-
 class BGCollisionSystem(GuestStruct):
+    # things that can land
     colliders1 = prop(0x38, sead_list(Collider))
+
+    # things that can be landed on (not blocks)
     colliders2 = prop(0x58, sead_list(Collider))
+
     grid = prop(0x18, ptr_to(BGCollisionGrid))
 
 class Tile(GuestStruct):
@@ -301,7 +331,7 @@ class World(GuestStruct):
 class ActorMgr(GuestStruct):
     @staticmethod
     def get():
-        return guest.read_ptr(ActorMgr, guest.addr.actor_mgr)
+        return guest_read_ptr(ActorMgr, mm.addr.actor_mgr)
     mp5 = prop(0x30, ptr_to(MP5))
     #cur_world = prop(0x98, ptr_to(World))
     worlds = prop(0x80, count4_ptr(ptr_to(World)))
@@ -309,7 +339,7 @@ class ActorMgr(GuestStruct):
 class OtherTimerRelated(GuestStruct):
     @staticmethod
     def get():
-        return guest.read_ptr(OtherTimerRelated, guest.addr.other_timer_related)
+        return guest_read_ptr(OtherTimerRelated, mm.addr.other_timer_related)
     frames = prop(0x38, u32)
 
 class BlockKindInfo(GuestStruct):
@@ -360,7 +390,7 @@ class CoinMan(GuestStruct):
     flag314 = prop(0x314, u8)
     @staticmethod
     def get():
-        return guest.read_ptr(CoinMan, guest.addr.coinman)
+        return guest.read_ptr(CoinMan, mm.addr.coinman)
 
 class BgUnitGroupTypeSpecificVtable(GuestStruct):
     get_name = prop(0x50, GuestPtrPtr)
@@ -407,10 +437,10 @@ class BgUnitGroupMgr(GuestStruct):
     unit_group_heaps = prop(0x58, fixed_array(GuestPtr, 2))
     @staticmethod
     def get():
-        return guest.read_ptr(BgUnitGroupMgr, guest.addr.bg_unit_group_mgr)
+        return guest.read_ptr(BgUnitGroupMgr, mm.addr.bg_unit_group_mgr)
 
 def block_kind_info_array():
-    return fixed_array(BlockKindInfo, 0x1e)(guest.addr.block_kind_info_array)
+    return fixed_array(BlockKindInfo, 0x1e)(mm.addr.block_kind_info_array)
 
 def print_exported_types():
     for i in range(70):
@@ -430,10 +460,11 @@ def print_ent():
         ):
             name = yatsu.objrec.get_name()
             if name.startswith('Edit'):
-                pass # ...
-                loc_str = '?'
+                yatsu = yatsu.cast(EditActor)
+                relly = yatsu.relly
+                loc_str = '%f,%f' % (relly.x, relly.y)
             else:
-                yatsu = yatsu.cast(PYES)
+                yatsu = yatsu.cast(Actor)
                 loc_str = '%f,%f' % (yatsu.loc.x, yatsu.loc.y)
             print(f'{name} @ {loc_str} {yatsu} {yatsu.idbits:#x}')
 

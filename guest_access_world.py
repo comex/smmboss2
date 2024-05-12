@@ -122,13 +122,15 @@ class GuestArray(GuestPtr):
         return self.count * self.ptr_ty.sizeof_star
     def get(self):
         return self
-    def get_all(self):
+    def get_all(self, decoder=None):
         count = self.count
         sizeof_elm = self.ptr_ty.sizeof_star
-        raw = guest.read(self.base.addr, count * sizeof_elm)
+        if decoder is None:
+            decoder = self.ptr_ty.decode_data
+        raw_data = guest.read(self.base.addr, count * sizeof_elm)
         out = []
         for i in range(0, count * sizeof_elm, sizeof_elm):
-            out.append(self.ptr_ty.decode_data(raw[i:i+sizeof_elm]))
+            out.append(decoder(raw_data[i:i+sizeof_elm]))
         return out
     def dump(self, fp, indent, **opts):
         count = self.count
@@ -318,3 +320,6 @@ def emulate_call(pc, x0=0):
         raise Exception("took too long")
 
     return {'guest': fake_guest, 'ret': mu.reg_read(ac.UC_ARM64_REG_X0)}
+
+def guest_read_ptr(ty, addr):
+    return ptr_to(ty)(addr).get()

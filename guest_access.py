@@ -32,8 +32,6 @@ class Guest:
     read16, write16 = _xreadwrite('<H')
     read32, write32 = _xreadwrite('<I')
     read64, write64 = _xreadwrite('<Q')
-    def read_ptr(self, ty, addr):
-        return self.world.ptr_to(ty)(addr).get()
 
     def read_cstr(self, addr):
         data = b''
@@ -48,11 +46,11 @@ class Guest:
     def __hash__(self):
         return id(self)
 
-    def make_world(self):
-        world = World()
-        world.guest = self
-        world._import('guest_access_world.py')
-        return world
+def make_guest_access_world(guest):
+    world = World()
+    world.guest = guest
+    world._import('guest_access_world.py')
+    return world
 
 class CachingGuest(Guest):
     def __init__(self, backing, imaginary_mode=False):
@@ -121,6 +119,5 @@ class CachingGuest(Guest):
         if self.active_count == 0:
             self.cache = {}
 
-    def __getattr__(self, attr):
-        return getattr(self.backing, attr)
-
+    def extract_image_info(self):
+        return self.backing.extract_image_info()

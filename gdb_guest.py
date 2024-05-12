@@ -3,56 +3,14 @@ import smmboss
 import gdb
 import re, struct
 
-class GDBGuest(smmboss.MMGuest):
+class GDBGuest(smmboss.Guest):
     def __init__(self):
         self.inf = gdb.selected_inferior()
-        self.build_id = None
-
-        kind = 'yuzu'
-        if kind == 'yuzu':
-            stuff = gdb.execute('maint packet qXfer:libraries:read::0,10000', to_string=True)
-            m = re.search(r'received: "l(<\?xml.*</library-list>)"', stuff)
-            assert m, "invalid response to libraries:read"
-            xml = m.group(1)
-            m = re.search('<library name="(?:main|Slope.nss)"><segment address="(.*?)"', xml)
-            assert m, "couldn't find main by hackily running a regex on the xml"
-            self._slide = int(m.group(1), 16)
-        elif kind == 'yuzu-info-shared':
-            # note(2023-3-4): why does this not work?
-            stuff = gdb.execute('info shared', to_string=True)
-            m = re.search(r'^(0x\w+)\s+0x\w+\s+.*\bmain$', stuff, re.M)
-            if not m:
-                raise Exception("couldn't find slide using `info shared`")
-            self._slide = int(m.group(1), 16)
-        elif kind == 'twili':
-            stuff = gdb.execute('maint packet qOffsets', to_string=True)
-            m = re.search(r'received: "TextSeg=([^"]+)"', stuff)
-            if not m:
-                raise Exception("couldn't find slide using qOffsets")
-            self._slide = int(m.group(1), 16)
-            pid = self.inf.pid
-            stuff = gdb.execute(f'maint packet qXfer:exec-file:read:{pid:x}:0,999', to_string=True)
-            m = re.search(r'received: "l([^"]+)"', stuff)
-            if not m:
-                raise Exception("couldn't find build id using qXfer:exec-file")
-            self.build_id = m.group(1)
-        else:
-            assert kind == 'atmosphere'
-            # Atmosphere GDB stub
-            stuff = gdb.execute('monitor get info', to_string=True)
-            if stuff == 'Not attached.\n':
-                raise Exception("not attached!")
-            m = re.search(r'\n  (0x[0-9a-f]+) - 0x[0-9a-f]+ Slope\.nss', stuff)
-            if not m:
-                raise Exception("couldn't find slide using monitor get info")
-            self._slide = int(m.group(1), 16)
-
-        if self.build_id is not None and len(self.build_id) != 64:
-            raise Exception(f"build_id is {self.build_id!r}, which is not length 64")
 
         super().__init__()
 
     def try_read(self, addr, size):
+        #print(f'try_read({addr:#x}, {size:#x})')
         return self.inf.read_memory(addr, size)
 
     def try_write(self, addr, data):
@@ -62,12 +20,59 @@ class GDBGuest(smmboss.MMGuest):
         except gdb.MemoryError:
             return 0
 
+    def extract_image_info(self):
+        build_id = None
+        kind = 'yuzu'
+        if kind == 'yuzu':
+            stuff = gdb.execute('maint packet qXfer:libraries:read::0,10000', to_string=True)
+            m = re.search(r'received: "l(<\?xml.*</library-list>)"', stuff)
+            assert m, "invalid response to libraries:read"
+            xml = m.group(1)
+            m = re.search('<library name="(?:main|Slope.nss)"><segment address="(.*?)"', xml)
+            assert m, "couldn't find main by hackily running a regex on the xml"
+            slide = int(m.group(1), 16)
+        elif kind == 'yuzu-info-shared':
+            # note(2023-3-4): why does this not work?
+            stuff = gdb.execute('info shared', to_string=True)
+            m = re.search(r'^(0x\w+)\s+0x\w+\s+.*\bmain$', stuff, re.M)
+            if not m:
+                raise Exception("couldn't find slide using `info shared`")
+            slide = int(m.group(1), 16)
+        elif kind == 'twili':
+            stuff = gdb.execute('maint packet qOffsets', to_string=True)
+            m = re.search(r'received: "TextSeg=([^"]+)"', stuff)
+            if not m:
+                raise Exception("couldn't find slide using qOffsets")
+            slide = int(m.group(1), 16)
+            pid = self.inf.pid
+            stuff = gdb.execute(f'maint packet qXfer:exec-file:read:{pid:x}:0,999', to_string=True)
+            m = re.search(r'received: "l([^"]+)"', stuff)
+            if not m:
+                raise Exception("couldn't find build id using qXfer:exec-file")
+            build_id = m.group(1)
+        else:
+            assert kind == 'atmosphere'
+            # Atmosphere GDB stub
+            stuff = gdb.execute('monitor get info', to_string=True)
+            if stuff == 'Not attached.\n':
+                raise Exception("not attached!")
+            m = re.search(r'\n  (0x[0-9a-f]+) - 0x[0-9a-f]+ Slope\.nss', stuff)
+            if not m:
+                raise Exception("couldn't find slide using monitor get info")
+            slide = int(m.group(1), 16)
+
+        if build_id is not None and len(build_id) != 64:
+            raise Exception(f"build_id is {build_id!r}, which is not length 64")
+        return build_id, slide
+
+
 def reg(name):
     return int(gdb.parse_and_eval(name))
 
 class MyBT(gdb.Command):
-    def __init__(self):
+    def __init__(self, mm):
         super().__init__('my_bt', gdb.COMMAND_USER)
+        self.mm = mm
     def invoke(self, arg, from_tty):
         limit = 20
         self.print_frame('pc', reg('$pc'), '')
@@ -81,23 +86,17 @@ class MyBT(gdb.Command):
             self.print_frame(f'f{i}', fpc, f' [{f:#x}]')
             f = new_f
     def print_frame(self, idx, addr, extra):
-        addr = guest.unslide(addr) if addr else addr
+        addr = self.guest.unslide(addr) if addr else addr
         gdb.write(f'{idx:5}: 0x{addr:016x}{extra}\n')
 
 class SomeCommand(gdb.Command):
-    def __init__(self, name, func):
+    def __init__(self, name, func, guest):
         super().__init__(name, gdb.COMMAND_USER)
         self.func = func
+        self.guest = guest
     def invoke(self, arg, from_tty):
-        self.func()
-def add_niceties():
-    global guest
-    guest = guest_access.CachingGuest(GDBGuest())
-    MyBT()
-    gdb.parse_and_eval(f'$gslide = {guest._gslide:#x}')
-    gdb.parse_and_eval(f'$slide = {guest._slide:#x}')
-    for name in ['print_exported_types', 'print_idees', 'print_ent', 'print_timer', 'print_block_kind_info', 'print_bg']:
-        SomeCommand(name, getattr(guest.world, name))
+        with self.guest:
+            self.func()
 
 class MemDump:
     def __init__(self):
@@ -145,3 +144,11 @@ class MemDump:
     def find_print_addrs(self, *args, **kwargs):
         for addr, m in self.find(*args, **kwargs):
             print(hex(addr))
+
+def add_niceties(mm):
+    MyBT(mm)
+    gdb.parse_and_eval(f'$slide = {mm._slide:#x}')
+    gdb.parse_and_eval(f'$gslide = {mm._gslide:#x}')
+    for name in ['print_exported_types', 'print_idees', 'print_ent', 'print_timer', 'print_block_kind_info', 'print_bg']:
+        SomeCommand(name, getattr(mm.world, name), mm.guest)
+

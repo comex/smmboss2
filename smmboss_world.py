@@ -6,13 +6,17 @@ class Point2D(GuestStruct):
     sizeof_star = 8
     def xy(self):
         return (self.x, self.y)
+    full_repr = True
 class Point3D(Point2D):
     z = prop(8, f32)
     sizeof_star = 12
+    full_repr = True
+
 class Size2D(GuestStruct):
     w = prop(0, f32)
     h = prop(4, f32)
     sizeof_star = 8
+    full_repr = True
 
 class Rect(GuestStruct):
     min = prop(0, Point2D)
@@ -20,6 +24,7 @@ class Rect(GuestStruct):
     sizeof_star = 0x10
     def size(self):
         return (self.max.x - self.min.x, self.max.y - self.min.y)
+    full_repr = True
 
 class IntPoint2D(GuestStruct):
     x = prop(0, u32)
@@ -27,6 +32,15 @@ class IntPoint2D(GuestStruct):
     sizeof_star = 8
     def xy(self):
         return (self.x, self.y)
+    full_repr = True
+
+class IntSize2D(GuestStruct):
+    w = prop(0, u32)
+    h = prop(4, u32)
+    sizeof_star = 8
+    full_repr = True
+    def wh(self):
+        return (self.w, self.h)
 
 class IntRect(GuestStruct):
     min = prop(0, IntPoint2D)
@@ -195,50 +209,128 @@ class RNGPlus(GuestStruct):
 class Spawner(GuestStruct):
     counts = prop(8, fixed_array(u32, 8)) # not sure about length
 
-class BG(GuestStruct):
-    rect = prop(0x238, fixed_array(Rect, 3))
-    base_info = prop(0x364, u32)
-    ext_pos = prop(0x290, fixed_array(ptr_to(Point2D), 2))
-    ext_unk = prop(0x2a0, ptr_to(u32))
-    int_off = prop(0x2b0, fixed_array(Point2D, 3))
-    ext_size = prop(0x3b8, ptr_to(fixed_array(f32, 4)))
+class ColliderBox(GuestStruct):
+    field_0 = prop(0, u32)
+    rel_pos_1 = prop(4, Point2D)
+    rel_pos_2 = prop(0xc, Point2D)
+    field_14 = prop(0x14, u32)
+    sizeof_star = 0x18
 
-class NormalBgOuter(GuestStruct):
+class Collider(GuestStruct):
+    # aka HasBlockInfo
+    vtable = prop(0, GuestPtrPtr)
+    items = prop(0x58, lambda: fixed_array(ColliderItemOuter, 5))
+    rects = prop(0x238, fixed_array(Rect, 3))
+    base_info = prop(0x364, u32)
+    actor = prop(0x278, ptr_to(Actor))
+    actor_idbits = prop(0x280, u32)
+    owner = prop(0x288, GuestPtrPtr)
+    ext_pos = prop(0x290, fixed_array(ptr_to(Point2D), 2), dump_deep=True)
+    ext_unk = prop(0x2a0, ptr_to(u32), dump_deep=True)
+    int_off = prop(0x2b0, fixed_array(Point2D, 3))
+    ext_size = prop(0x3b8, ptr_to(fixed_array(f32, 4)), dump_deep=True)
+    boxes = prop(0x3c0, fixed_array(count4_ptr(ColliderBox), 2))
+
+class BlockColliderOwner(GuestStruct):
     # aka HBO1
-    bg = prop(0x38, BG)
+    collider = prop(0x38, Collider)
 
 class Bloch(GuestStruct):
-    normal_bg_outer_array = prop(0x18, count4_ptr(ptr_to(NormalBgOuter)))
+    block_collider_owners = prop(0x18, count4_ptr(ptr_to(BlockColliderOwner)))
 
-class xxxcollider(GuestStruct):
-    pass
+class ColliderItem(GuestStruct):
+    # aka h60 + 0x20
+    node = prop(0, SeadListNode)
+    node_ptr = prop(0x10, GuestPtrPtr)
+    list = prop(0x18, GuestPtrPtr) # todo: check
+    vtable = prop(0x20, GuestPtrPtr)
+    collider = prop(0x28, lambda: ptr_to(Collider))
+    callback = prop(0x30, GuestPtrPtr)
 
-class Triple24KList(GuestStruct):
-    list0 = prop(0x00, sead_list(xxxcollider))
-    list1 = prop(0x18, sead_list(xxxcollider))
-    list2 = prop(0x30, sead_list(xxxcollider))
+class ColliderItemOuter(GuestStruct):
+    # aka H60
+    item = prop(0x20, ColliderItem)
+    sizeof_star = 0x60
+
+class BlockColliderListItem(GuestStruct):
+    # aka 24k_item
+    bc = prop(0x8, ptr_to(Collider), dump_deep=True)
+
+class BlockColliderListEntry(GuestStruct):
+    item = prop(0x10, ptr_to(BlockColliderListItem), dump_deep=True)
+
+class BGCollisionGridSquare(GuestStruct):
+    # aka triple_24klist
+    list0 = prop(0x00, sead_list(BlockColliderListEntry))
+    list1 = prop(0x18, sead_list(BlockColliderListEntry))
+    list2 = prop(0x30, sead_list(BlockColliderListEntry))
     sizeof_star = 0x48
     def any_nonempty(self):
         return self.list0.count or self.list1.count or self.list2.count
 
 class BGCollisionGrid(GuestStruct, GuestArray):
-    baseidx = prop(0, IntPoint2D)
-    first_wh = prop(8, IntPoint2D)
-    second_wh = prop(0x10, IntPoint2D)
-    count = prop(0x18, u32)
-    base = prop(0x20, ptr_to(Triple24KList))
-    ptr_ty = Triple24KList
+    # Grid coordinates are in units of blocks.
 
-class Collider(GuestStruct):
-    # aka h60 + 0x20
-    pass
+    # (0, 0) corresponds to (x, y) in the grid; thus some negative coordinates
+    # are in the grid.
+    base_pos = prop(0, IntPoint2D)
+
+    size_if_horizontal = prop(8, IntSize2D)
+    size_if_vertical = prop(0x10, IntSize2D)
+    count = prop(0x18, u32)
+    base = prop(0x20, ptr_to(BGCollisionGridSquare))
+    ptr_ty = BGCollisionGridSquare
+    is_vertical_level = prop(0x28, u8)
+
+    def size(self):
+        if self.is_vertical_level:
+            return self.size_if_horizontal
+        else:
+            return self.size_if_vertical
+
+    def coord_range(self):
+        width, height = self.size().wh()
+        base_x, base_y = self.base_pos.xy()
+        x_bounds = (-base_x, width - base_x)
+        y_bounds = (-base_y, height - base_y)
+        return (x_bounds, y_bounds)
+
+    def square(self, x, y):
+        x_bounds, y_bounds = self.coord_range()
+        if (not (x_bounds[0] <= x < x_bounds[1]) or
+            not (y_bounds[0] <= y < y_bounds[1])):
+            return None
+        width = self.size().w
+        return self[(y - y_bounds[0]) * width + (x - x_bounds[0])]
+
+    def _squares(self):
+        width = self.size().w
+        base_x, base_y = self.base_pos.xy()
+        return (((i % width) - base_x, (i // width) - base_y, self[i])
+                for i in range(self.count))
+
+    def nonempty_squares(self):
+        with guest:
+            self.cache_all()
+            for (x, y, square) in self._squares():
+                if square.any_nonempty() != 0:
+                    yield (x, y, square)
+
+    def dump(self, fp, indent, **opts):
+        super().dump(fp, indent, **opts)
+        indent2 = indent + '  '
+        fp.write(f'\n{indent2}nonempty squares:')
+        indent3 = indent2 + '  '
+        for x, y, square in self.nonempty_squares():
+            fp.write(f'\n{indent3}({x}, {y}): ')
+            square.dump(fp, indent3, **opts)
 
 class BGCollisionSystem(GuestStruct):
     # things that can land
-    colliders1 = prop(0x38, sead_list(Collider))
+    colliders1 = prop(0x38, sead_list(ColliderItem))
 
     # things that can be landed on (not blocks)
-    colliders2 = prop(0x58, sead_list(Collider))
+    colliders2 = prop(0x58, sead_list(ColliderItem))
 
     grid = prop(0x18, ptr_to(BGCollisionGrid))
 
@@ -260,11 +352,7 @@ class GridSquare(GuestStruct):
     field_2 = prop(2, u8)
     field_3 = prop(3, u8)
     sizeof_star = 4
-
-    @staticmethod
-    def decode_data(data):
-        # fast path when getting all.  it's a hack.
-        return struct.unpack('<HBB', data)
+    full_repr = True
 
 class Tiler2Grid(GuestStruct, GuestArray):
     width = prop(0, u32)
@@ -276,16 +364,17 @@ class Tiler2Grid(GuestStruct, GuestArray):
     def count(self):
         return self.width * self.height
 
-    def squares(self):
+    def _squares(self):
         width = self.width
-        return [(i // width, i % width, decoded)
-                for (i, decoded) in enumerate(self.get_all())]
+        return ((i % width, i // width, self[i])
+                for i in range(self.count))
 
-    def nonzero_squares(self):
-        zeroes = (0, 0, 0)
-        return [(x, y, decoded)
-                for (x, y, decoded) in self.squares()
-                if decoded != zeroes]
+    def nonempty_squares(self):
+        with guest:
+            self.cache_all()
+            return [(x, y, square)
+                    for (x, y, square) in self._squares()
+                    if square.what_to_draw != 0]
 
     def square(self, x, y):
         assert 0 <= x < self.width
@@ -390,7 +479,7 @@ class CoinMan(GuestStruct):
     flag314 = prop(0x314, u8)
     @staticmethod
     def get():
-        return guest.read_ptr(CoinMan, mm.addr.coinman)
+        return guest_read_ptr(CoinMan, mm.addr.coinman)
 
 class BgUnitGroupTypeSpecificVtable(GuestStruct):
     get_name = prop(0x50, GuestPtrPtr)
@@ -437,7 +526,7 @@ class BgUnitGroupMgr(GuestStruct):
     unit_group_heaps = prop(0x58, fixed_array(GuestPtr, 2))
     @staticmethod
     def get():
-        return guest.read_ptr(BgUnitGroupMgr, mm.addr.bg_unit_group_mgr)
+        return guest_read_ptr(BgUnitGroupMgr, mm.addr.bg_unit_group_mgr)
 
 def block_kind_info_array():
     return fixed_array(BlockKindInfo, 0x1e)(mm.addr.block_kind_info_array)
@@ -479,21 +568,21 @@ def print_block_kind_info():
 def print_bg():
     for i, world in enumerate(ActorMgr.get().worlds):
         if (area_sys := world.area_sys):
-            array = area_sys.bloch.normal_bg_outer_array
+            array = area_sys.bloch.block_collider_owners
             print(f'world {i}: ({array.count})')
-            for normal in array:
-                print(f'  {normal}')
+            for bco in array:
+                print(f'  {bco}')
                 for i in range(3):
-                    rect = normal.bg.rect[i]
+                    rect = bco.collider.rects[i]
                     width, height = rect.size()
                     print(f'    rect{i}: x:{rect.min.x}-{rect.max.x} y:{rect.min.y}-{rect.max.y} size:{width},{height}')
                 line = '    ext_pos'
                 for i in range(2):
-                    line += f'    {i}:{normal.bg.ext_pos[i].xy()}'
+                    line += f'    {i}:{bco.collider.ext_pos[i].xy()}'
                 print(line)
-                print(f'    ext_unk:   {normal.bg.ext_unk.get()}')
+                print(f'    ext_unk:   {bco.collider.ext_unk.get()}')
                 line = '    int_off'
                 for i in range(3):
-                    line += f'    {i}:{normal.bg.int_off[i].xy()}'
+                    line += f'    {i}:{bco.collider.int_off[i].xy()}'
                 print(line)
-                print(f'    ext_size: ' + ' '.join(str(normal.bg.ext_size[i]) for i in range(4)))
+                print(f'    ext_size: ' + ' '.join(str(bco.collider.ext_size[i]) for i in range(4)))

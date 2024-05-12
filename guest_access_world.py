@@ -31,8 +31,18 @@ class GuestPrimPtr(GuestPtr):
         return self.decode_data(guest.read(self.addr, self.sizeof_star))
     def set(self, val):
         return guest.write(self.addr, self.encode_data(val))
+    def dump(self, fp, indent, **opts):
+        fp.write(f'{self.__class__.__name__}@{self.addr:#x}')
+        if self.addr == 0:
+            return
+        try:
+            val = self.get()
+        except Exception as e:
+            fp.write(f' => bad {e!r}')
+        else:
+            fp.write(f' => {val:#x}')
 
-def make_GuestPrimPtr(code):
+def make_GuestPrimPtr(code, class_name):
     code = '<'+code
     size = struct.calcsize(code)
     class GuestXPrimPtr(GuestPrimPtr):
@@ -43,18 +53,19 @@ def make_GuestPrimPtr(code):
         @staticmethod
         def encode_data(val):
             return struct.pack(code, val)
+    GuestXPrimPtr.__name__ = class_name
     return GuestXPrimPtr
 
-u8 = make_GuestPrimPtr('B')
-u16 = make_GuestPrimPtr('H')
-u32 = make_GuestPrimPtr('I')
-u64 = make_GuestPrimPtr('Q')
-s8 = make_GuestPrimPtr('b')
-s16 = make_GuestPrimPtr('h')
-s32 = make_GuestPrimPtr('i')
-s64 = make_GuestPrimPtr('q')
-f32 = make_GuestPrimPtr('f')
-f64 = make_GuestPrimPtr('d')
+u8 = make_GuestPrimPtr('B', 'u8')
+u16 = make_GuestPrimPtr('H', 'u16')
+u32 = make_GuestPrimPtr('I', 'u32')
+u64 = make_GuestPrimPtr('Q', 'u64')
+s8 = make_GuestPrimPtr('b', 's8')
+s16 = make_GuestPrimPtr('h', 's16')
+s32 = make_GuestPrimPtr('i', 's32')
+s64 = make_GuestPrimPtr('q', 's64')
+f32 = make_GuestPrimPtr('f', 'f32')
+f64 = make_GuestPrimPtr('d', 'f64')
 
 usize = u64
 ptr_size = usize.sizeof_star
@@ -132,6 +143,8 @@ class GuestArray(GuestPtr):
         for i in range(0, count * sizeof_elm, sizeof_elm):
             out.append(decoder(raw_data[i:i+sizeof_elm]))
         return out
+    def cache_all(self):
+        guest.cache_region(self.base.addr, self.count * self.ptr_ty.sizeof_star)
     def dump(self, fp, indent, **opts):
         count = self.count
         fp.write('array (%#x, count=%u):' % (self.addr, count))
@@ -152,7 +165,7 @@ def count4_ptr(ptr_ty):
             super().__init__(addr, ptr_ty)
         count = prop(0, u32)
         base = prop(ptr_size, pp)
-        sizeof_star = ptr_size
+        sizeof_star = 2 * ptr_size
         def __len__(self):
             return self.count
     return CountPtr
@@ -229,6 +242,18 @@ class GuestStruct(GuestPtr):
         return self
     def set(self, val):
         raise Exception("can't set() struct")
+
+    full_repr = False
+    def __repr__(self):
+        ret = super().__repr__()
+        if self.full_repr:
+            subreprs = []
+            for cls in type(self).mro()[::-1]:
+                for key, prop in cls.__dict__.items():
+                    if isinstance(prop, MyProperty):
+                        subreprs.append(repr(getattr(self, key)))
+            ret += '({})'.format(', '.join(subreprs))
+        return ret
 
 class GuestCString(GuestPtr):
     def sizeof_star(self):

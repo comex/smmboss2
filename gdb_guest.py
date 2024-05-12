@@ -86,7 +86,7 @@ class MyBT(gdb.Command):
             self.print_frame(f'f{i}', fpc, f' [{f:#x}]')
             f = new_f
     def print_frame(self, idx, addr, extra):
-        addr = self.guest.unslide(addr) if addr else addr
+        addr = self.mm.unslide(addr) if addr else addr
         gdb.write(f'{idx:5}: 0x{addr:016x}{extra}\n')
 
 class SomeCommand(gdb.Command):

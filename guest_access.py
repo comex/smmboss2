@@ -56,13 +56,17 @@ class CachingGuest(Guest):
     def __init__(self, backing, imaginary_mode=False):
         super().__init__()
         self.backing = backing
-        self.chunk_size = 0x100
+        self.chunk_size = 0x1000
         self.cache = {}
         self.active_count = 1 if imaginary_mode else 0
         # if imaginary_mode is True, we won't actually write back any changes,
         # and this serves as an overlay on top of real memory - used for
         # emulation
         self.imaginary_mode = imaginary_mode
+
+    def cache_region(self, addr, size):
+        assert self.active_count
+        self.read(addr, size)
 
     def try_read(self, addr, size):
         if not self.active_count:

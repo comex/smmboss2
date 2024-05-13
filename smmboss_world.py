@@ -174,7 +174,7 @@ class ActorBase(GuestStruct):
     vtable = prop(0, GuestPtrPtr)
     idbits = prop(0x30, s32)
     objrec = prop(0x38, lambda: ptr_to(ObjRec))
-    mama = prop(0x48, lambda: ptr_to(ActorBase))
+    world = prop(0x48, lambda: ptr_to(World)) # ?
 
 class EditActor(ActorBase):
     relly = prop(0x320, ptr_to(Relly))
@@ -219,15 +219,18 @@ class ColliderBox(GuestStruct):
 class Collider(GuestStruct):
     # aka HasBlockInfo
     vtable = prop(0, GuestPtrPtr)
+    sco_list_belonged_to = prop(0x38, GuestPtrPtr)
     items = prop(0x58, lambda: fixed_array(ColliderItemOuter, 5))
     rects = prop(0x238, fixed_array(Rect, 3))
-    base_info = prop(0x364, u32)
+    field_26a = prop(0x26a, u8)
     actor = prop(0x278, ptr_to(Actor))
     actor_idbits = prop(0x280, u32)
     owner = prop(0x288, GuestPtrPtr)
     ext_pos = prop(0x290, fixed_array(ptr_to(Point2D), 2), dump_deep=True)
     ext_unk = prop(0x2a0, ptr_to(u32), dump_deep=True)
     int_off = prop(0x2b0, fixed_array(Point2D, 3))
+    field_2e0 = prop(0x2e0, u32)
+    base_block_info = prop(0x364, u32)
     ext_size = prop(0x3b8, ptr_to(fixed_array(f32, 4)), dump_deep=True)
     boxes = prop(0x3c0, fixed_array(count4_ptr(ColliderBox), 2))
 
@@ -240,11 +243,12 @@ class Bloch(GuestStruct):
 
 class ColliderItem(GuestStruct):
     # aka h60 + 0x20
+    # XXX naming!
     node = prop(0, SeadListNode)
     node_ptr = prop(0x10, GuestPtrPtr)
     list = prop(0x18, GuestPtrPtr) # todo: check
     vtable = prop(0x20, GuestPtrPtr)
-    collider = prop(0x28, lambda: ptr_to(Collider))
+    owner = prop(0x28, GuestPtrPtr) # could be Collider or not
     callback = prop(0x30, GuestPtrPtr)
 
 class ColliderItemOuter(GuestStruct):
@@ -303,18 +307,18 @@ class BGCollisionGrid(GuestStruct, GuestArray):
         width = self.size().w
         return self[(y - y_bounds[0]) * width + (x - x_bounds[0])]
 
-    def _squares(self):
+    def squares(self):
         width = self.size().w
         base_x, base_y = self.base_pos.xy()
-        return (((i % width) - base_x, (i // width) - base_y, self[i])
-                for i in range(self.count))
-
-    def nonempty_squares(self):
         with guest:
             self.cache_all()
-            for (x, y, square) in self._squares():
-                if square.any_nonempty() != 0:
-                    yield (x, y, square)
+            for i in range(self.count):
+                yield ((i % width) - base_x, (i // width) - base_y, self[i])
+
+    def nonempty_squares(self):
+        for (x, y, square) in self.squares():
+            if square.any_nonempty() != 0:
+                yield (x, y, square)
 
     def dump(self, fp, indent, **opts):
         super().dump(fp, indent, **opts)
@@ -413,6 +417,7 @@ class AreaSystem(GuestStruct):
     tiler2 = prop(0x110, ptr_to(Tiler2))
 
 class World(GuestStruct):
+    name = prop(8, FancyString)
     id = prop(0x20, u32)
     actor_mgr = prop(0x18, lambda: ptr_to(ActorMgr))
     area_sys = prop(0x140, ptr_to(AreaSystem)) # was 0x130
@@ -585,4 +590,5 @@ def print_bg():
                 for i in range(3):
                     line += f'    {i}:{bco.collider.int_off[i].xy()}'
                 print(line)
-                print(f'    ext_size: ' + ' '.join(str(bco.collider.ext_size[i]) for i in range(4)))
+                ext_size = ' '.join(str(bco.collider.ext_size[i]) for i in range(4))
+                print(f'    ext_size: {ext_size}    info:0x{bco.collider.base_block_info:8x}')

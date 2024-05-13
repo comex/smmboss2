@@ -289,6 +289,13 @@ def dump(val, fp=sys.stdout, indent='', **opts):
         val.dump(fp, indent, **opts)
     elif isinstance(val, int):
         fp.write('%#x' % val)
+    elif hasattr(val, '__iter__') and not isinstance(val, (list, tuple)):
+        fp.write(f'iterable (type {type(val)}):')
+        indent2 = indent + '  '
+        for i, item in enumerate(val):
+            fp.write(f'\n{indent2}[{i}] = ')
+            dump(item, fp, indent2, **opts)
+            fp.write(',')
     else:
         fp.write(repr(val))
     if indent == '':

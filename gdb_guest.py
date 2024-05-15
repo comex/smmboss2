@@ -149,6 +149,7 @@ def add_niceties(mm):
     MyBT(mm)
     gdb.parse_and_eval(f'$slide = {mm._slide:#x}')
     gdb.parse_and_eval(f'$gslide = {mm._gslide:#x}')
-    for name in ['print_exported_types', 'print_idees', 'print_ent', 'print_timer', 'print_block_kind_info', 'print_bg']:
-        SomeCommand(name, getattr(mm.world, name), mm.guest)
+    for name, val in mm.world.__dict__.items():
+        if getattr(val, 'commandlike', False):
+            SomeCommand(name, val, mm.guest)
 

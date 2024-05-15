@@ -209,11 +209,11 @@ class RNGPlus(GuestStruct):
 class Spawner(GuestStruct):
     counts = prop(8, fixed_array(u32, 8)) # not sure about length
 
-class ColliderBox(GuestStruct):
-    field_0 = prop(0, u32)
+class ColliderSegment(GuestStruct):
+    which_side = prop(0, u8)
     rel_pos_1 = prop(4, Point2D)
     rel_pos_2 = prop(0xc, Point2D)
-    field_14 = prop(0x14, u32)
+    last_word = prop(0x14, u32)
     sizeof_star = 0x18
 
 class Collider(GuestStruct):
@@ -221,18 +221,28 @@ class Collider(GuestStruct):
     vtable = prop(0, GuestPtrPtr)
     sco_list_belonged_to = prop(0x38, GuestPtrPtr)
     items = prop(0x58, lambda: fixed_array(ColliderItemOuter, 5))
-    rects = prop(0x238, fixed_array(Rect, 3))
+    bbox_cur = prop(0x238, Rect)
+    bbox_old = prop(0x248, Rect)
+    bbox_both = prop(0x258, Rect)
     field_26a = prop(0x26a, u8)
+    flags_270 = prop(0x270, u32)
     actor = prop(0x278, ptr_to(Actor))
     actor_idbits = prop(0x280, u32)
-    owner = prop(0x288, GuestPtrPtr)
-    ext_pos = prop(0x290, fixed_array(ptr_to(Point2D), 2), dump_deep=True)
+    block_owner = prop(0x288, GuestPtrPtr)
+    ext_pos_cur = prop(0x290, ptr_to(Point2D))
+    ext_pos_old = prop(0x298, ptr_to(Point2D))
     ext_unk = prop(0x2a0, ptr_to(u32), dump_deep=True)
-    int_off = prop(0x2b0, fixed_array(Point2D, 3))
-    field_2e0 = prop(0x2e0, u32)
+    int_off_cur = prop(0x2b0, Point2D)
+    int_off_old = prop(0x2b8, Point2D)
+    int_aoff_cur = prop(0x2c0, Point2D)
+    int_aoff_old = prop(0x2c8, Point2D)
+    int_boff_cur = prop(0x2d0, Point2D)
+    int_boff_old = prop(0x2d8, Point2D)
+    some_bitmask = prop(0x2e0, u32) # & 1 means no collision, used for coins
     base_block_info = prop(0x364, u32)
     ext_size = prop(0x3b8, ptr_to(fixed_array(f32, 4)), dump_deep=True)
-    boxes = prop(0x3c0, fixed_array(count4_ptr(ColliderBox), 2))
+    segments_cur = prop(0x3c0, count4_ptr(ColliderSegment))
+    segments_old = prop(0x3d0, count4_ptr(ColliderSegment))
 
 class BlockColliderOwner(GuestStruct):
     # aka HBO1
@@ -258,7 +268,7 @@ class ColliderItemOuter(GuestStruct):
 
 class BlockColliderListItem(GuestStruct):
     # aka 24k_item
-    bc = prop(0x8, ptr_to(Collider), dump_deep=True)
+    collider = prop(0x8, ptr_to(Collider), dump_deep=True)
 
 class BlockColliderListEntry(GuestStruct):
     item = prop(0x10, ptr_to(BlockColliderListItem), dump_deep=True)
@@ -427,7 +437,7 @@ class ActorMgr(GuestStruct):
     def get():
         return guest_read_ptr(ActorMgr, mm.addr.actor_mgr)
     mp5 = prop(0x30, ptr_to(MP5))
-    #cur_world = prop(0x98, ptr_to(World))
+    cur_world = prop(0x98, ptr_to(World))
     worlds = prop(0x80, count4_ptr(ptr_to(World)))
 
 class OtherTimerRelated(GuestStruct):
@@ -536,17 +546,24 @@ class BgUnitGroupMgr(GuestStruct):
 def block_kind_info_array():
     return fixed_array(BlockKindInfo, 0x1e)(mm.addr.block_kind_info_array)
 
+def commandlike(f):
+    f.commandlike = True
+    return f
+
+@commandlike
 def print_exported_types():
     for i in range(70):
         idee = exported_type_to_idee(i)
         objrec = ObjRec.by_idee(idee)
         print(f'{i:x} -> {idee:x} -> {objrec.name}')
 
+@commandlike
 def print_idees():
     for idee in range(0xee):
         objrec = ObjRec.by_idee(idee)
         print(f'{idee:x} -> {objrec.base_name},{objrec.variation_name} {objrec.get_name()} or={objrec}')
 
+@commandlike
 def print_ent():
    for yatsu in ActorMgr.get().mp5.pointers.get_all():
         if yatsu and (
@@ -562,33 +579,59 @@ def print_ent():
                 loc_str = '%f,%f' % (yatsu.loc.x, yatsu.loc.y)
             print(f'{name} @ {loc_str} {yatsu} {yatsu.idbits:#x}')
 
+@commandlike
 def print_timer():
     print(OtherTimerRelated.get().frames)
 
+@commandlike
 def print_block_kind_info():
     bkia = block_kind_info_array()
     for i, bki in enumerate(bkia):
         print(f'0x{i:02}: bits=0x{bki.bits:8} {bki.name}')
 
+def _print_collider(collider):
+    print(f'  {collider}')
+    actor = collider.actor
+    block_owner = collider.block_owner
+    if actor:
+        print(f'    actor:{actor.addr:#x} {actor.objrec.get_name()}')
+    if block_owner:
+        print(f'    block_owner:{block_owner.addr:#x}')
+    for kind in ('cur', 'old'):
+        pos = getattr(collider, f'ext_pos_{kind}')
+        int_off = getattr(collider, f'int_off_{kind}')
+        int_aoff = getattr(collider, f'int_aoff_{kind}')
+        int_boff = getattr(collider, f'int_boff_{kind}')
+        print(f'    {kind}:   pos={pos.xy()}   off={int_off.xy()}  aoff={int_aoff.xy()}  boff={int_boff.xy()}')
+        bbox = getattr(collider, f'bbox_{kind}')
+        width, height = bbox.size()
+        print(f'           bbox: x:{bbox.min.x}-{bbox.max.x} y:{bbox.min.y}-{bbox.max.y} size:{width},{height}')
+        segments = getattr(collider, f'segments_{kind}')
+        for i, seg in enumerate(segments):
+            print(f'           segments[{i}]: x:{seg.rel_pos_1.x:5} - {seg.rel_pos_2.x:5} y:{seg.rel_pos_1.y:5} - {seg.rel_pos_2.y:5} which={seg.which_side} last={seg.last_word:#x}')
+    bbox = collider.bbox_both
+    width, height = bbox.size()
+    print(f'    bbox_both: x:{bbox.min.x}-{bbox.max.x} y:{bbox.min.y}-{bbox.max.y} size:{width},{height}')
+    print(f'    ext_unk:   {collider.ext_unk.get():#08x}        bm:{collider.some_bitmask:#x} f:{collider.flags_270:#x}')
+    ext_size = ' '.join(str(collider.ext_size[i]) for i in range(4))
+    print(f'    ext_size: {ext_size}   info:0x{collider.base_block_info:8x}')
+
+@commandlike
 def print_bg():
-    for i, world in enumerate(ActorMgr.get().worlds):
-        if (area_sys := world.area_sys):
-            array = area_sys.bloch.block_collider_owners
-            print(f'world {i}: ({array.count})')
-            for bco in array:
-                print(f'  {bco}')
-                for i in range(3):
-                    rect = bco.collider.rects[i]
-                    width, height = rect.size()
-                    print(f'    rect{i}: x:{rect.min.x}-{rect.max.x} y:{rect.min.y}-{rect.max.y} size:{width},{height}')
-                line = '    ext_pos'
-                for i in range(2):
-                    line += f'    {i}:{bco.collider.ext_pos[i].xy()}'
-                print(line)
-                print(f'    ext_unk:   {bco.collider.ext_unk.get()}')
-                line = '    int_off'
-                for i in range(3):
-                    line += f'    {i}:{bco.collider.int_off[i].xy()}'
-                print(line)
-                ext_size = ' '.join(str(bco.collider.ext_size[i]) for i in range(4))
-                print(f'    ext_size: {ext_size}    info:0x{bco.collider.base_block_info:8x}')
+    world = ActorMgr.get().cur_world
+    array = world.area_sys.bloch.block_collider_owners
+    print(f'world {world.id}: ({array.count})')
+    for bco in array:
+        _print_collider(bco.collider)
+
+@commandlike
+def print_grid():
+    seen = set()
+    for x, y, square in ActorMgr.get().cur_world.area_sys.bg_collision_system.grid.squares():
+        for slist in [square.list0, square.list1, square.list2]:
+            for entry in slist:
+                collider = entry.item.collider
+                if collider in seen:
+                    continue
+                seen.add(collider)
+                _print_collider(collider)

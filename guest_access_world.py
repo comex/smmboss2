@@ -1,6 +1,13 @@
 import functools, io, sys, struct, inspect
+
+class GuestPtrMeta(type):
+    def __matmul__(self, addr):
+        # silly hack so that e.g. u32@0xdeadbeef is a valid expression
+        # though it doesn't bind tightly - you would need parens in (Foo@0x1234).bar
+        return self(addr)
+
 @functools.total_ordering
-class GuestPtr:
+class GuestPtr(metaclass=GuestPtrMeta):
     def __init__(self, addr):
         self.addr = as_addr(addr)
     def __repr__(self):
@@ -25,6 +32,8 @@ class GuestPtr:
         fp = io.StringIO()
         dump(self, fp)
         return fp.getvalue().rstrip('\n')
+    def __matmul__():
+        pass
 
 class GuestPrimPtr(GuestPtr):
     def get(self):

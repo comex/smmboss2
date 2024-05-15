@@ -66,8 +66,8 @@ class FancyString(GuestStruct):
         return self.cstr.as_str()
 
 class SeadListNode(GuestStruct):
-    prev = prop(0, ptr_to(lambda: SeadListNode))
-    next = prop(8, ptr_to(lambda: SeadListNode))
+    prev = prop(0, lambda: ptr_to(SeadListNode))
+    next = prop(8, lambda: ptr_to(SeadListNode))
 
 class SeadListImpl(SeadListNode):
     count = prop(0x10, u32)
@@ -191,6 +191,105 @@ class Actor(ActorBase):
         gravity = prop(0x278, f32)
         source_xvel_step = prop(0x27c, f32)
 
+class ScolNode(GuestStruct):
+    self = prop(0, lambda: ptr_to(Scol))
+    unk = prop(8, GuestPtrPtr)
+    node = prop(0x10, SeadListNode)
+    sizeof_star = 0x20
+
+class ScolMid(GuestStruct):
+    self = prop(0, lambda: ptr_to(Scol))
+    unk = prop(8, GuestPtrPtr)
+    list = prop(0x10, lambda: sead_list(ScolMidNode))
+    sizeof_star = 0x28
+
+class ScolSublist(GuestStruct):
+    vt = prop(0, GuestPtrPtr)
+    list = prop(8, lambda: sead_list(ColliderItem))
+    sizeof_star = 0x20
+
+class ScolSee(GuestStruct):
+    f0 = prop(0, u32)
+    f4 = prop(4, u32)
+    f8 = prop(8, u32)
+    sizeof_star = 0xc
+
+class ScolResult(GuestStruct):
+    valid = prop(0, u8)
+    f1 = prop(1, u8)
+    f2 = prop(2, u8)
+    f3 = prop(3, u8)
+    f4 = prop(4, u32)
+    f8 = prop(8, u32)
+    point1 = prop(0xc, Point2D)
+    point2 = prop(0x14, Point2D)
+    f1c = prop(0x1c, u32)
+    actor_idbits = prop(0x20, u64)
+    collider = prop(0x28, lambda: ptr_to(Collider))
+    block_info = prop(0x30, u32)
+    f34 = prop(0x34, u32)
+
+    sizeof_star = 0x38
+
+class ScolResultList(fixed_array(ScolResult, 7)):
+    def should_dump_ith(self, i):
+        return self[i].valid
+
+class Scol(GuestStruct):
+    vt = prop(0, GuestPtrPtr)
+    h60 = prop(0x28, lambda: ColliderItemOuter)
+    nodes = prop(0x98, fixed_array(ScolNode, 3))
+    mid = prop(0xf8, ScolMid)
+    sublist_120 = prop(0x120, ScolSublist) # contains Collider h60_2
+    sublist_140 = prop(0x140, ScolSublist) # contains Collider h60_4
+    sublist_160 = prop(0x160, ScolSublist) # contains Collider h60_3
+    should_check_list1_mask = prop(0x180, u32)
+    should_tick_38s = prop(0x184, u32)
+    owner = prop(0x188, ptr_to(Actor))
+    owners_pos_cur = prop(0x190, Point2D)
+    owners_pos_old = prop(0x198, Point2D)
+    owners_relatedtopos = prop(0x1a0, u8)
+
+    point3d_ptrs = prop(0x1a8, fixed_array(ptr_to(Point3D), 8))
+    point3d_storage = prop(0x1e8, fixed_array(Point3D, 8), dump=False)
+    point3d_ptrs_by_point_idx = prop(0x248, fixed_array(ptr_to(Point3D), 4))
+    point3ds_by_point_idx_storage = prop(0x268, fixed_array(Point3D, 4), dump=False)
+    owner_idbits = prop(0x298, u64)
+
+    ptr_owners_pos_cur = prop(0x2a0, ptr_to(Point2D))
+    ptr_owners_pos_old = prop(0x2a8, ptr_to(Point2D))
+
+    point_2b0 = prop(0x2b0, Point2D)
+
+    flags_2b8 = prop(0x2b8, u32)
+    flags_2bc = prop(0x2bc, u32)
+    flags_2c0 = prop(0x2c0, u32)
+    flags_2c4 = prop(0x2c4, u32)
+
+    rects = prop(0x2c8, fixed_array(Rect, 4))
+    point308 = prop(0x308, Point2D)
+    point310 = prop(0x310, Point2D)
+    point318 = prop(0x318, Point2D)
+    point326 = prop(0x326, u16)
+
+    something_from_collider = prop(0x328, u32)
+
+    # these arrays are indexed by point index
+    sees_360 = prop(0x360, fixed_array(ScolSee, 4))
+    sees_valid = prop(0x390, fixed_array(u8, 4))
+    sees_394 = prop(0x394, fixed_array(ScolSee, 4))
+    result_list_idxs_cur = prop(0x3c4, fixed_array(u32, 4))
+    result_list_idxs_old = prop(0x3d4, fixed_array(u32, 4))
+
+    result_lists_cur = prop(0x3e8, fixed_array(ScolResultList, 4))
+    result_lists_old = prop(0xa08, fixed_array(ScolResultList, 4))
+
+
+class PlayerScolWrap(GuestStruct):
+    scol = prop(0x10, Scol)
+class Player(Actor):
+    scol_wrap = prop(0x12a0, PlayerScolWrap)
+
 class LiftSegmentIsh(GuestStruct):
     smgr = prop(0xd0, StateMgr)
 
@@ -216,10 +315,15 @@ class ColliderSegment(GuestStruct):
     last_word = prop(0x14, u32)
     sizeof_star = 0x18
 
+class ScolMidNode(GuestStruct):
+    node = prop(0, SeadListNode)
+    owner = prop(0x10, lambda: ptr_to(Collider))
+    scol_mid = prop(0x18, lambda: ptr_to(ScolMid))
+
 class Collider(GuestStruct):
     # aka HasBlockInfo
     vtable = prop(0, GuestPtrPtr)
-    sco_list_belonged_to = prop(0x38, GuestPtrPtr)
+    scol_mid_node = prop(0x20, ScolMidNode, dump=False)
     items = prop(0x58, lambda: fixed_array(ColliderItemOuter, 5))
     bbox_cur = prop(0x238, Rect)
     bbox_old = prop(0x248, Rect)
@@ -258,7 +362,7 @@ class ColliderItem(GuestStruct):
     node_ptr = prop(0x10, GuestPtrPtr)
     list = prop(0x18, GuestPtrPtr) # todo: check
     vtable = prop(0x20, GuestPtrPtr)
-    owner = prop(0x28, GuestPtrPtr) # could be Collider or not
+    owner = prop(0x28, ptr_to(Collider)) # could be Collider or not
     callback = prop(0x30, GuestPtrPtr)
 
 class ColliderItemOuter(GuestStruct):
@@ -538,7 +642,7 @@ class BgUnitGroup(GuestStruct):
 
 class BgUnitGroupMgr(GuestStruct):
     unit_group_lists = prop(0x28, fixed_array(sead_list(BgUnitGroup), 2))
-    unit_group_heaps = prop(0x58, fixed_array(GuestPtr, 2))
+    unit_group_heaps = prop(0x58, fixed_array(GuestPtrPtr, 2))
     @staticmethod
     def get():
         return guest_read_ptr(BgUnitGroupMgr, mm.addr.bg_unit_group_mgr)

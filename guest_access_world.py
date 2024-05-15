@@ -32,8 +32,6 @@ class GuestPtr(metaclass=GuestPtrMeta):
         fp = io.StringIO()
         dump(self, fp)
         return fp.getvalue().rstrip('\n')
-    def __matmul__():
-        pass
 
 class GuestPrimPtr(GuestPtr):
     def get(self):
@@ -80,20 +78,17 @@ usize = u64
 ptr_size = usize.sizeof_star
 
 @functools.lru_cache(None)
-def ptr_to(ptr_ty_or_f):
-    assert isinstance(ptr_ty_or_f, type) or callable(ptr_ty_or_f)
+def ptr_to(ptr_ty):
+    assert isinstance(ptr_ty, type)
     class GuestXPtrPtr(GuestPrimPtr):
         sizeof_star = ptr_size
-        val_ty_or_f = ptr_ty_or_f
-        @classmethod
-        def val_ty(cls):
-            return maybe_call(cls.val_ty_or_f)
+        val_ty = ptr_ty
         @classmethod
         def decode_data(cls, data):
-            return cls.val_ty()(usize.decode_data(data))
+            return cls.val_ty(usize.decode_data(data))
         @classmethod
         def encode_data(cls, val):
-            assert isinstance(val, cls.val_ty())
+            assert isinstance(val, cls.val_ty)
             return usize.encode_data(val.addr)
     return GuestXPtrPtr
 
@@ -162,10 +157,14 @@ class GuestArray(GuestPtr):
             return
         indent2 = indent + '  '
         for i in range(count):
+            if not self.should_dump_ith(i):
+                continue
             fp.write('\n%s[%d] = ' % (indent2, i))
             item = self[i]
             dump(item, fp, indent2, **opts)
             fp.write(',')
+    def should_dump_ith(self, i):
+        return True # subclass hook
 
 def count4_ptr(ptr_ty):
     pp = ptr_to(ptr_ty)
@@ -184,6 +183,7 @@ def fixed_array(ptr_ty, count):
     class GuestFixedArray(GuestArray):
         def __init__(self, addr):
             super().__init__(addr, ptr_ty, count)
+        sizeof_star = ptr_ty.sizeof_star * count
     return GuestFixedArray
 
 class MyProperty(property):
@@ -191,12 +191,16 @@ class MyProperty(property):
         assert isinstance(offset, int)
         self.offset = offset
         self.ptr_cls_or_f = ptr_cls_or_f
+        self.must_call = not inspect.isclass(ptr_cls_or_f)
         self.dump = True
         self.dump_deep = dump_deep
         super().__init__(self.read, self.write)
     @property
     def ptr_cls(self):
-        return maybe_call(self.ptr_cls_or_f)
+        if self.must_call:
+            self.ptr_cls_or_f = self.ptr_cls_or_f()
+            self.must_call = False
+        return self.ptr_cls_or_f
     def ptr(self, this):
         return self.ptr_cls(this.addr + self.offset)
     def read(self, this):
@@ -208,8 +212,8 @@ class MyProperty(property):
             return
         fp.write('\n%s%s: ' % (indent, key))
         val = self.read(this)
-        val_ty_func = getattr(self.ptr_cls, 'val_ty', None)
-        if val_ty_func is not None and issubclass(val_ty_func(), GuestPtr) and not self.dump_deep:
+        val_ty = getattr(self.ptr_cls, 'val_ty', None)
+        if val_ty is not None and issubclass(val_ty, GuestPtr) and not self.dump_deep:
             fp.write(repr(val))
         else:
             dump(val, fp, indent, **opts)
@@ -255,7 +259,7 @@ class GuestStruct(GuestPtr):
     full_repr = False
     def __repr__(self):
         ret = super().__repr__()
-        if self.full_repr:
+        if self.full_repr and self.addr != 0:
             subreprs = []
             for cls in type(self).mro()[::-1]:
                 for key, prop in cls.__dict__.items():

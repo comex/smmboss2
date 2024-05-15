@@ -25,7 +25,10 @@ namespace exl::util {
 
     template<typename T, size_t Size = sizeof(T), size_t Align = alignof(T)>
     struct TypedStorage {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
         typename std::aligned_storage<Size, Align>::type _storage;
+#pragma GCC diagnostic pop
     };
 
     template<typename T>

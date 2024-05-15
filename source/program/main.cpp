@@ -114,7 +114,8 @@ return_address_from_frame_impl(void *frame0, size_t n) {
 HOOK_DEFINE_TRAMPOLINE(StubStatemgrSetState) {
     static void Callback(struct statemgr *smgr, int state) {
         int old_state = smgr->state;
-        xprintf("set_state(%s(%d) -> %s(%d) in:0x%lx tick:0x%lx out:0x%lx (obj:%p)) <- %p <- %p <- %p <- %p <- %p",
+        xprintf("%p.set_state(%s(%d) -> %s(%d) in:0x%lx tick:0x%lx out:0x%lx (obj:%p)) <- %p <- %p <- %p <- %p <- %p",
+            smgr,
             get_state_name(smgr, old_state), old_state,
             get_state_name(smgr, state), state,
             get_state_callback(smgr, state, 0),
@@ -241,7 +242,6 @@ HOOK_DEFINE_TRAMPOLINE(StubBgUnitGroupInitSpecific) {
     }
 };
 
-#if 0
 // this stretches blocks' visual appearance 
 HOOK_DEFINE_TRAMPOLINE(StubBgRendererXX) {
     static void Callback(void *self, int w1, float *xyz, void *w3, float *wh_in_blocks, int x5, void *x6) {
@@ -249,7 +249,13 @@ HOOK_DEFINE_TRAMPOLINE(StubBgRendererXX) {
         Orig(self, w1, xyz, w3, new_wh_in_blocks, x5, x6);
     }
 };
-#endif
+
+HOOK_DEFINE_TRAMPOLINE(Stub_gsys_ProcessMeter_measureBeginSystem) {
+    static long Callback(void *self, struct string *name, int x2) {
+        xprintf("-- measureBeginSystem(%s)", name->str);
+        return Orig(self, name, x2);
+    }
+};
 
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
@@ -258,7 +264,7 @@ extern "C" void exl_main(void* x0, void* x1) {
 
     // this is for 3.0.1:
 
-    //StubStatemgrSetState::InstallAtOffset(0x8b9280);
+    StubStatemgrSetState::InstallAtOffset(0x8b9280);
     //StubOpenFile::InstallAtOffset(0x008b7b80);
     //StubWtf::InstallAtOffset(0x1bc1590);
     //StubSearchAssetCallTableByName::InstallAtOffset(0x005ac9e0);
@@ -271,12 +277,22 @@ extern "C" void exl_main(void* x0, void* x1) {
     //Stub_agl_VertexBuffer_flushCPUCache::InstallAtOffset(0x002fba20);
     //StubBgUnitGroupInitSpecific::InstallAtOffset(0x00daf110);
     //StubBgRendererXX::InstallAtOffset(0x00da2ec0);
+    //Stub_gsys_ProcessMeter_measureBeginSystem::InstallAtOffset(0x0046c2b0);
 
     {
         // Patch to skip intro cutscene
+        // This function is the tick callback for UIBootSceneSeq state cIdle.
+        // The patch makes it switch to cDisp when it ould otherwise switch to cAppear.
         exl::patch::CodePatcher p(0x017e428c);
         p.Write<uint32_t>(0x321e03e1); // orr w1, wzr, #4 (instead of 2)
     }
+
+    // Store 0 to timer instead of the normal animation length
+    exl::patch::CodePatcher(0x012dcc6c).Write<uint32_t>(0xf900581f); // cPose
+    exl::patch::CodePatcher(0x012dc9e8).Write<uint32_t>(0xf9005a7f); // cFall
+
+
+
 
     log_str("done hooking");
 }

@@ -113,6 +113,17 @@ def sead_list(_elem_ty):
     C.__name__ = f'sead_list({_elem_ty.__name__})'
     return C
 
+@functools.cache
+def table_of(ty):
+    class C(GuestStruct, GuestArray):
+        count = prop(0, u32)
+        capacity = prop(4, u32)
+        base = prop(8, ptr_to(ty))
+        next_alloc = prop(0x10, ptr_to(ty))
+        storage = prop(0x18, GuestPtrPtr)
+        ptr_ty = ty
+    C.__name__ = f'table_of({ty.__name__})'
+    return C
 
 class StateMgrState(GuestStruct):
     sizeof_star = 0x40
@@ -148,10 +159,12 @@ class ObjRec(GuestStruct):
     spawn_rect = prop(0x18, ptr_to(SpawnRect))
     base_name = prop(0x28, FancyString)
     variation_name = prop(0x38, FancyString)
+
     @functools.lru_cache(None)
     def get_name(self):
         name = self.variation_name.as_str() or self.base_name.as_str()
         return '%s(%x)' % (name, self.idee)
+
     @staticmethod
     @functools.lru_cache(None)
     def by_idee(idee):
@@ -175,6 +188,12 @@ class ActorBase(GuestStruct):
     idbits = prop(0x30, s32)
     objrec = prop(0x38, lambda: ptr_to(ObjRec))
     world = prop(0x48, lambda: ptr_to(World)) # ?
+    def __repr__(self):
+        try:
+            name = self.objrec.get_name()
+            return f'{name}@{self.addr:#x}'
+        except:
+            return f'?Actor?@{self.addr:#x}'
 
 class EditActor(ActorBase):
     relly = prop(0x320, ptr_to(Relly))
@@ -192,20 +211,14 @@ class Actor(ActorBase):
         source_xvel_step = prop(0x27c, f32)
 
 class ScolNode(GuestStruct):
-    self = prop(0, lambda: ptr_to(Scol))
-    unk = prop(8, GuestPtrPtr)
-    node = prop(0x10, SeadListNode)
+    node = prop(0, SeadListNode)
+    scol = prop(0x10, lambda: ptr_to(Scol))
+    unk = prop(0x18, GuestPtrPtr)
     sizeof_star = 0x20
-
-class ScolMid(GuestStruct):
-    self = prop(0, lambda: ptr_to(Scol))
-    unk = prop(8, GuestPtrPtr)
-    list = prop(0x10, lambda: sead_list(ScolMidNode))
-    sizeof_star = 0x28
 
 class ScolSublist(GuestStruct):
     vt = prop(0, GuestPtrPtr)
-    list = prop(8, lambda: sead_list(ColliderItem))
+    list = prop(8, lambda: sead_list(ColliderListNode))
     sizeof_star = 0x20
 
 class ScolSee(GuestStruct):
@@ -237,9 +250,9 @@ class ScolResultList(fixed_array(ScolResult, 7)):
 
 class Scol(GuestStruct):
     vt = prop(0, GuestPtrPtr)
-    h60 = prop(0x28, lambda: ColliderItemOuter)
-    nodes = prop(0x98, fixed_array(ScolNode, 3))
-    mid = prop(0xf8, ScolMid)
+    h60 = prop(0x28, lambda: ColliderListNodeOuter, dump=False)
+    nodes = prop(0x88, fixed_array(ScolNode, 4), dump=False)
+    mid = prop(0x108, lambda: sead_list(ScolMidNode)) # contains Colliders
     sublist_120 = prop(0x120, ScolSublist) # contains Collider h60_2
     sublist_140 = prop(0x140, ScolSublist) # contains Collider h60_4
     sublist_160 = prop(0x160, ScolSublist) # contains Collider h60_3
@@ -324,7 +337,8 @@ class Collider(GuestStruct):
     # aka HasBlockInfo
     vtable = prop(0, GuestPtrPtr)
     scol_mid_node = prop(0x20, ScolMidNode, dump=False)
-    items = prop(0x58, lambda: fixed_array(ColliderItemOuter, 5))
+    # nodes[0] is for BGCollisionSystem's colliders1; nodes[1] is for colliders2
+    nodes = prop(0x58, lambda: fixed_array(ColliderListNodeOuter, 5))
     bbox_cur = prop(0x238, Rect)
     bbox_old = prop(0x248, Rect)
     bbox_both = prop(0x258, Rect)
@@ -343,7 +357,9 @@ class Collider(GuestStruct):
     int_boff_cur = prop(0x2d0, Point2D)
     int_boff_old = prop(0x2d8, Point2D)
     some_bitmask = prop(0x2e0, u32) # & 1 means no collision, used for coins
+    ridden_by_scol_lists = prop(0x300, fixed_array(sead_list(ScolNode), 4))
     base_block_info = prop(0x364, u32)
+    push_strength = prop(0x368, f32)
     ext_size = prop(0x3b8, ptr_to(fixed_array(f32, 4)), dump_deep=True)
     segments_cur = prop(0x3c0, count4_ptr(ColliderSegment))
     segments_old = prop(0x3d0, count4_ptr(ColliderSegment))
@@ -355,19 +371,40 @@ class BlockColliderOwner(GuestStruct):
 class Bloch(GuestStruct):
     block_collider_owners = prop(0x18, count4_ptr(ptr_to(BlockColliderOwner)))
 
-class ColliderItem(GuestStruct):
+class ColliderListNode(GuestStruct):
     # aka h60 + 0x20
     # XXX naming!
-    node = prop(0, SeadListNode)
-    node_ptr = prop(0x10, GuestPtrPtr)
-    list = prop(0x18, GuestPtrPtr) # todo: check
-    vtable = prop(0x20, GuestPtrPtr)
-    owner = prop(0x28, ptr_to(Collider)) # could be Collider or not
-    callback = prop(0x30, GuestPtrPtr)
+    node = prop(0, SeadListNode, dump=False)
+    outer = prop(0x10, lambda: ptr_to(ColliderListNodeOuter), dump_deep=True)
 
-class ColliderItemOuter(GuestStruct):
+    @property
+    def owner(self):
+        return self.outer.owner
+
+class ColliderListNodeOuter(GuestStruct):
     # aka H60
-    item = prop(0x20, ColliderItem)
+    node = prop(0x20, ColliderListNode, dump=False)
+    list = prop(0x38, lambda: ptr_to(sead_list(ColliderListNode)))
+    # really this is a new object:
+    vtable = prop(0x40, GuestPtrPtr)
+    owner_ = prop(0x48, GuestPtrPtr, dump=False) # could be Collider or Scol
+    tick_for_landable_callback = prop(0x50, GuestPtrPtr)
+
+    @property
+    def owner(self):
+        raw = self.owner_
+        vtable = guest.read64(raw.addr)
+        vt20 = guest.read64(vtable + 0x20)
+        if vt20 == mm.addr.scol_vt20 or vt20 == mm.addr.scol_subclass_vt20:
+            return Scol(raw.addr)
+        elif vt20 == mm.addr.collider_vt20:
+            return Collider(raw.addr)
+        else:
+            return raw
+
+    def dump(self, fp, indent, **opts):
+        super().dump(fp, indent, **opts)
+        fp.write(f'\n{indent}  owner: {self.owner}')
     sizeof_star = 0x60
 
 class BlockColliderListItem(GuestStruct):
@@ -444,11 +481,13 @@ class BGCollisionGrid(GuestStruct, GuestArray):
             square.dump(fp, indent3, **opts)
 
 class BGCollisionSystem(GuestStruct):
-    # things that can land
-    colliders1 = prop(0x38, sead_list(ColliderItem))
+    # things that can land??
+    # never iterated until game end
+    colliders1 = prop(0x38, sead_list(ColliderListNode))
 
-    # things that can be landed on (not blocks)
-    colliders2 = prop(0x58, sead_list(ColliderItem))
+    # things that can be landed on (not blocks)??
+    # ticked every frame
+    colliders2 = prop(0x58, sead_list(ColliderListNode))
 
     grid = prop(0x18, ptr_to(BGCollisionGrid))
 
@@ -502,16 +541,8 @@ class Tiler2Grid(GuestStruct, GuestArray):
 class SparkleEntry(GuestStruct):
     pass
 
-class SparkleTable(GuestStruct, GuestArray):
-    count = prop(0, u32)
-    capacity = prop(4, u32)
-    base = prop(8, ptr_to(SparkleEntry))
-    next_alloc = prop(0x10, ptr_to(SparkleEntry))
-    storage = prop(0x18, GuestPtrPtr)
-    ptr_ty = SparkleEntry
-
 class SparkleTableOuter(GuestStruct):
-    table = prop(8, SparkleTable)
+    table = prop(8, table_of(SparkleEntry))
 
 class Tiler2(GuestStruct):
     grid1 = prop(0x08, Tiler2Grid)
@@ -520,10 +551,46 @@ class Tiler2(GuestStruct):
     tiles = prop(0x48, TileArray)
     sparkle = prop(0x60, ptr_to(SparkleTableOuter))
 
+class HitboxParams(GuestStruct):
+    pos = prop(0x0, Point2D)
+    radius = prop(0x8, Size2D)
+    is_circle = prop(0x10, u32)
+    which_list = prop(0x14, u32)
+    f18 = prop(0x18, u32)
+    f20 = prop(0x20, u64)
+    f28 = prop(0x28, u64)
+    flags = prop(0x30, u64)
+    callback = prop(0x38, GuestPtrPtr)
+
+class Hitbox(GuestStruct):
+    # aka maybe_collider
+    vt = prop(0, GuestPtrPtr)
+    node = prop(0x20, lambda: HitboxNode, dump=False)
+    params = prop(0x60, HitboxParams)
+    owner = prop(0xa8, ptr_to(Actor))
+    did_collide = prop(0x1b5, u8)
+    rect = prop(0x1b8, Rect)
+
+class HitboxNode(GuestStruct):
+    node = prop(0, SeadListNode)
+    owner = prop(0x10, ptr_to(Hitbox))
+    list = prop(0x18, GuestPtrPtr)
+
+class HitboxManager(GuestStruct):
+    split_hitbox_lists = prop(0x10, fixed_array(sead_list(HitboxNode), 4))
+    staging_hitbox_list = prop(0x70, sead_list(Hitbox))
+    # ...
+    t1 = prop(0x88, table_of(GuestPtr))
+    t2 = prop(0x1098, table_of(GuestPtr))
+    t3 = prop(0x30a8, table_of(GuestPtr))
+    t4 = prop(0x50b8, table_of(GuestPtr))
+    world_id = prop(0x70c8, u32)
+
 class AreaSystem(GuestStruct):
     world_id = prop(0x18, u32)
     also_world_id = prop(0x1c, u32)
     use_second_coords = prop(0x30, u8)
+    hitbox_manager = prop(0x40, ptr_to(HitboxManager))
     spawner = prop(0x70, ptr_to(Spawner))
     bg_collision_system = prop(0x90, ptr_to(BGCollisionSystem))
     bloch = prop(0xa0, ptr_to(Bloch))
@@ -698,7 +765,7 @@ def _print_collider(collider):
     actor = collider.actor
     block_owner = collider.block_owner
     if actor:
-        print(f'    actor:{actor.addr:#x} {actor.objrec.get_name()}')
+        print(f'    actor:{actor}')
     if block_owner:
         print(f'    block_owner:{block_owner.addr:#x}')
     for kind in ('cur', 'old'):
@@ -719,6 +786,9 @@ def _print_collider(collider):
     print(f'    ext_unk:   {collider.ext_unk.get():#08x}        bm:{collider.some_bitmask:#x} f:{collider.flags_270:#x}')
     ext_size = ' '.join(str(collider.ext_size[i]) for i in range(4))
     print(f'    ext_size: {ext_size}   info:0x{collider.base_block_info:8x}')
+    for i, scol_list in enumerate(collider.ridden_by_scol_lists):
+        if scol_list.count != 0:
+            print(f'    ridden_by_scol_lists[{i}] = {list(scol_list)}')
 
 @commandlike
 def print_bg():

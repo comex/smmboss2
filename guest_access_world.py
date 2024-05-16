@@ -192,7 +192,7 @@ class MyProperty(property):
         self.offset = offset
         self.ptr_cls_or_f = ptr_cls_or_f
         self.must_call = not inspect.isclass(ptr_cls_or_f)
-        self.dump = True
+        self.dump = dump
         self.dump_deep = dump_deep
         super().__init__(self.read, self.write)
     @property
@@ -220,7 +220,7 @@ class MyProperty(property):
 prop = MyProperty
 
 def addrof(obj, prop):
-    prop = type(obj).__dict__[prop]
+    prop = getattr(type(obj), prop)
     assert isinstance(prop, MyProperty)
     return prop.ptr(obj)
 

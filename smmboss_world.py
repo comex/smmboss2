@@ -114,15 +114,13 @@ def sead_list(_elem_ty):
     return C
 
 @functools.cache
-def table_of(ty):
+def ptr_array(ty):
     class C(GuestStruct, GuestArray):
         count = prop(0, u32)
         capacity = prop(4, u32)
-        base = prop(8, ptr_to(ty))
-        next_alloc = prop(0x10, ptr_to(ty))
-        storage = prop(0x18, GuestPtrPtr)
-        ptr_ty = ty
-    C.__name__ = f'table_of({ty.__name__})'
+        base = prop(8, ptr_to(ptr_to(ty)))
+        ptr_ty = ptr_to(ty)
+    C.__name__ = f'ptr_array({ty.__name__})'
     return C
 
 class StateMgrState(GuestStruct):
@@ -542,7 +540,7 @@ class SparkleEntry(GuestStruct):
     pass
 
 class SparkleTableOuter(GuestStruct):
-    table = prop(8, table_of(SparkleEntry))
+    table = prop(8, ptr_array(SparkleEntry))
 
 class Tiler2(GuestStruct):
     grid1 = prop(0x08, Tiler2Grid)
@@ -580,10 +578,10 @@ class HitboxManager(GuestStruct):
     split_hitbox_lists = prop(0x10, fixed_array(sead_list(HitboxNode), 4))
     staging_hitbox_list = prop(0x70, sead_list(Hitbox))
     # ...
-    t1 = prop(0x88, table_of(GuestPtr))
-    t2 = prop(0x1098, table_of(GuestPtr))
-    t3 = prop(0x30a8, table_of(GuestPtr))
-    t4 = prop(0x50b8, table_of(GuestPtr))
+    t1 = prop(0x88, ptr_array(Hitbox))
+    t2 = prop(0x1098, ptr_array(Hitbox))
+    t3 = prop(0x30a8, ptr_array(Hitbox))
+    t4 = prop(0x50b8, ptr_array(Hitbox))
     world_id = prop(0x70c8, u32)
 
 class AreaSystem(GuestStruct):
@@ -674,8 +672,8 @@ class BgUnitGroupTypeSpecific(GuestStruct):
     vt = prop(0, ptr_to(BgUnitGroupTypeSpecificVtable))
     @functools.cached_property
     def name(self):
-        stuff = emulate_call(self.vt.get_name.addr, x0=self.addr)
-        return stuff['guest'].read_cstr(stuff['ret'])
+        emu = emulate_call(self.vt.get_name.addr, x0=self.addr)
+        return emu.guest.read_cstr(emu.regs.x0)
 
 class BgUnitGroup(GuestStruct):
     node1 = prop(0x20, SeadListNode)
@@ -809,3 +807,4 @@ def print_grid():
                     continue
                 seen.add(collider)
                 _print_collider(collider)
+

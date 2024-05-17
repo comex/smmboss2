@@ -1,4 +1,4 @@
-import functools, io, sys, struct, inspect
+import functools, io, sys, struct, inspect, re
 
 class GuestPtrMeta(type):
     def __matmul__(self, addr):
@@ -326,8 +326,52 @@ class GuestPlusFakeStack:
     def try_write(self, addr, data):
         raise Exception("should not try to write to this")
 
+@functools.cache
+def unicorn_regs():
+    from dataclasses import dataclass
+    import unicorn.arm64_const as ac
+    @dataclass
+    class Reg:
+        const: int
+
+    class XReg(Reg):
+        def read(self, mu):
+            return mu.reg_read(self.const)
+        def write(self, mu, val):
+            mu.reg_write(self.const, val)
+    class SReg(Reg):
+        def read(self, mu):
+            return struct.unpack('<f', struct.pack('<I', mu.reg_read(self.const)))[0]
+        def write(self, mu, val):
+            mu.reg_write(self.const, struct.unpack('<I', struct.pack('<f', val))[0])
+    uregs = {}
+    for i in range(31):
+        uregs[f'x{i}'] = XReg(getattr(ac, f'UC_ARM64_REG_X{i}'))
+    for i in range(32):
+        uregs[f's{i}'] = SReg(getattr(ac, f'UC_ARM64_REG_S{i}'))
+    return uregs
+
+class RegsWrap:
+    def __init__(self, mu):
+        self.__dict__['mu'] = mu
+        self.__dict__['uregs'] = unicorn_regs()
+    def get(self, reg):
+        return self.uregs[reg].read(self.mu)
+    __getattr__ = get
+    def set(self, reg, val):
+        self.uregs[reg].write(self.mu, val)
+    __setattr__ = set
+
+class Emu:
+    pass
+
 # barebones (for now)
-def emulate_call(pc, x0=0):
+def emulate_call(pc, verbose=False, slide=0, mm=None, **kwargs):
+    if mm is not None:
+        slide = mm.slide
+        unslide = mm.unslide
+    else:
+        slide = unslide = lambda addr: addr
     import unicorn
     import unicorn.arm64_const as ac
     mu = unicorn.Uc(unicorn.UC_ARCH_ARM64, unicorn.UC_MODE_ARM)
@@ -339,11 +383,13 @@ def emulate_call(pc, x0=0):
 
     def mmio_read_cb(uc, offset, size, data):
         ret = int.from_bytes(fake_guest.read(offset, size), 'little') 
-        #print(f">>> read {size} from {offset:#x} => {ret:#x}")
+        if verbose and 0:
+            print(f">>> read {size} from {offset:#x} => {ret:#x}")
         return ret
 
     def mmio_write_cb(uc, offset, size, value, data):
-        #print(f">>> write {value:#x} size {size} to {offset:#x}")
+        if verbose:
+            print(f">>> write {value:#x} size {size} to {offset:#x}")
         fake_guest.write(offset, value.to_bytes(size, 'little'))
 
     ADDR = 0
@@ -352,11 +398,26 @@ def emulate_call(pc, x0=0):
     mu.mem_protect(ADDR, SIZE, unicorn.UC_PROT_READ | unicorn.UC_PROT_WRITE | unicorn.UC_PROT_EXEC)
     mu.reg_write(ac.UC_ARM64_REG_SP, 0x10000)
     mu.reg_write(ac.UC_ARM64_REG_LR, 0x1234)
-    mu.reg_write(ac.UC_ARM64_REG_X0, x0)
-    single_step = False
+    rw = RegsWrap(mu)
+    for reg, val in kwargs.items():
+        rw.set(reg, val)
+    single_step = verbose or True
     max_insns = 300
-    for step in range(max_steps if single_step else 1):
-        #print(f'pc={pc:#x}')
+    prev_reg_vals_raw = {}
+    pc = slide(pc)
+    for step in range(max_insns if single_step else 1):
+        if verbose:
+            print(f'pc={unslide(pc):#x}', end='')
+            for name, reg in rw.uregs.items():
+                val_raw = reg.read(mu)
+                prev = prev_reg_vals_raw.get(name)
+                if val_raw != prev:
+                    val = rw.get(name)
+                    if isinstance(val, int):
+                        val = hex(val)
+                    print(f' {name}={val}', end='')
+                    prev_reg_vals_raw[name] = val_raw
+            print()
         mu.emu_start(begin=pc, until=0x1234, timeout=10_000_000, count=1 if single_step else max_insns)
         pc = mu.reg_read(ac.UC_ARM64_REG_PC)
         if pc == 0x1234:
@@ -364,7 +425,10 @@ def emulate_call(pc, x0=0):
     else:
         raise Exception("took too long")
 
-    return {'guest': fake_guest, 'ret': mu.reg_read(ac.UC_ARM64_REG_X0)}
+    emu = Emu()
+    emu.guest = fake_guest
+    emu.regs = rw
+    return emu
 
 def guest_read_ptr(ty, addr):
     return ptr_to(ty)(addr).get()

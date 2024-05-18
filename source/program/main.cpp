@@ -3,6 +3,7 @@
 #include "nxworld_main.h"
 #include <vector>
 #include <algorithm>
+#include <mutex>
 namespace nn::diag::detail {
     int PrintDebugString(const char *);
 }
@@ -258,6 +259,73 @@ HOOK_DEFINE_TRAMPOLINE(Stub_gsys_ProcessMeter_measureBeginSystem) {
     }
 };
 
+struct mem_regions {
+private:
+    struct region {
+        uintptr_t start;
+        size_t size;
+        bool readable;
+        bool writable;
+    };
+    std::vector<region> cached_regions_;
+    std::mutex mutex_;
+
+    void load_cached_regions() {
+        cached_regions_.clear();
+
+        MemoryInfo meminfo{};
+        u32 pageinfo;
+
+        do {
+            R_ABORT_UNLESS(svcQueryMemory(&meminfo, &pageinfo, meminfo.addr + meminfo.size));
+
+            xprintf("addr:%lx size:%lx type:%x attr:%x perm:%x\n",
+                    meminfo.addr, meminfo.size, meminfo.type, meminfo.attr, meminfo.perm);
+        } while(meminfo.addr + meminfo.size != 0);
+    }
+
+    const region *find_cached_region(uintptr_t addr) {
+        auto it = std::lower_bound(
+            cached_regions_.begin(), cached_regions_.end(), addr,
+            [](const region &a, uintptr_t addr) {
+                return a.start < addr;
+            }
+        );
+        if (it != cached_regions_.end() &&
+            (addr - it->start) < it->size) {
+            return &*it;
+        }
+        return nullptr;
+    }
+
+public:
+    bool check(uintptr_t addr, bool want_write) {
+        mutex_.lock();
+        bool ret;
+        // Assume that mapped things are never unmapped or have their
+        // protections changed, but non-mapped things might be mapped.  It
+        // would be easier to just yolo the access and install an exception
+        // handler, but that doesn't seem to work properly with Yuzu.
+        const region *r = find_cached_region(addr);
+        if (!r) {
+            load_cached_regions();
+            r = find_cached_region(addr);
+        }
+        if (!r) {
+            ret = false;
+        } else {
+            ret = want_write ? r->writable : r->readable;
+        }
+        mutex_.unlock();
+        return ret;
+    }
+};
+
+static mem_regions s_mem_regions;
+bool check_mem_region(uintptr_t addr, bool want_write) {
+    return s_mem_regions.check(addr, want_write);
+}
+
 static Handle s_nxworld_thread_handle;
 alignas(PAGE_SIZE) static u8 s_nxworld_thread_stack[0x8000];
 
@@ -277,6 +345,7 @@ static void start_nxworld() {
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
     log_str("exl_main");
+    xprintf("%p\n", &check_mem_region);
     exl::hook::Initialize();
 
     start_nxworld();
@@ -321,69 +390,3 @@ extern "C" NORETURN void exl_exception_entry() {
 
 // tilted blocks: p/x *(int*)($slide+0x00da3ae8 ) = 0x1e2a1000
 
-struct mem_regions {
-private:
-    struct region {
-        uintptr_t start;
-        size_t size;
-        bool readable;
-        bool writable;
-    };
-    std::vector<region> cached_regions_;
-    Mutex mutex_{};
-
-    bool load_cached_regions() {
-        cached_regions_.clear();
-
-        MemoryInfo meminfo{};
-        u32 pageinfo;
-
-        do {
-            R_ABORT_UNLESS(svcQueryMemory(&meminfo, &pageinfo, meminfo.addr + meminfo.size));
-
-            xprintf("addr:%lx size:%lx type:%x attr:%x perm:%x\n",
-                    meminfo.addr, meminfo.size, meminfo.type, meminfo.attr, meminfo.perm);
-        } while(meminfo.addr + meminfo.size != 0);
-    }
-
-    const region *find_cached_region(uintptr_t addr) {
-        auto it = std::lower_bound(
-            cached_regions_.begin(), cached_regions_.end(), addr,
-            [](const region &a, uintptr_t addr) {
-                return a.start < addr;
-            }
-        );
-        if (it != cached_regions_.end() &&
-            (addr - it->start) < it->size) {
-            return &*it;
-        }
-        return nullptr;
-    }
-
-
-    bool check(uintptr_t addr, bool want_write) {
-        mutexLock(&mutex_);
-        bool ret;
-        // Assume that mapped things are never unmapped or have their
-        // protections changed, but non-mapped things might be mapped.  It
-        // would be easier to just yolo the access and install an exception
-        // handler, but that doesn't seem to work properly with Yuzu.
-        const region *r = find_cached_region(addr);
-        if (!r) {
-            load_cached_regions();
-            r = find_cached_region(addr);
-        }
-        if (!r) {
-            ret = false;
-        } else {
-            ret = want_write ? r->writable : r->readable;
-        }
-        mutexUnlock(&mutex_);
-        return ret;
-    }
-}
-
-static mem_regions s_mem_regions;
-bool check_mem_region(uintptr_t addr, bool want_write) {
-    return s_mem_regions.check(addr, want_write);
-}

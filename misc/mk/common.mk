@@ -29,7 +29,7 @@ SOURCES		:=	$(foreach module,$(MODULES),$(shell find $(module) -type d))
 SOURCES		:= 	$(foreach source,$(SOURCES),$(source:$(TOPDIR)/%=%)/)
 
 DATA		:=	data
-INCLUDES	:=	include
+INCLUDES	:=	include nxworld
 
 #---------------------------------------------------------------------------------
 # options for code generation
@@ -179,12 +179,12 @@ NXWORLD_CMD = $(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-gcc -MMD -MP -MF $(DE
 
 $(DEPSDIR)/mongoose.o: $(TOPDIR)/externals/mongoose/mongoose.c
 	$(NXWORLD_CMD)
-$(DEPSDIR)/nxworld_main.o: $(TOPDIR)/nxworld_main.c
+$(DEPSDIR)/nxworld_main.o: $(TOPDIR)/nxworld/nxworld_main.c
 	$(NXWORLD_CMD)
 
 NXWORLD_OBJS :=  $(DEPSDIR)/mongoose.o $(DEPSDIR)/nxworld_main.o
 
 $(DEPSDIR)/nxworld-linked.o: $(NXWORLD_OBJS)
 	$(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-gcc -r -o $@ $(NXWORLD_OBJS) -L$(DEVKITPATH)/libnx/lib -lnx
-$(DEPSDIR)/nxworld-linked-fixed.o: $(DEPSDIR)/nxworld-linked.o $(TOPDIR)/nxworld_main.keep
-	$(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-objcopy @$(TOPDIR)/nxworld_main.keep $< $@ --remove-section=.crt0
+$(DEPSDIR)/nxworld-linked-fixed.o: $(DEPSDIR)/nxworld-linked.o $(TOPDIR)/nxworld/nxworld_main.keep
+	$(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-objcopy @$(TOPDIR)/nxworld/nxworld_main.keep $< $@ --remove-section=.crt0

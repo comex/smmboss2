@@ -1,5 +1,6 @@
 #include "lib.hpp"
 #include <stdarg.h>
+#include "nxworld_main.h"
 
 namespace nn::diag::detail {
     int PrintDebugString(const char *);
@@ -56,13 +57,12 @@ struct statemgr {
 };
 static_assert(sizeof(struct statemgr) == 0x48);
 
-static void log_str(const char *str) {
+void log_str(const char *str) {
     nn::diag::detail::PrintDebugString(str);
-
 }
 
 __attribute__((format(printf, 1, 2)))
-static void xprintf(const char *fmt, ...) {
+void xprintf(const char *fmt, ...) {
     char buf[196];
     va_list ap;
     va_start(ap, fmt);
@@ -257,10 +257,28 @@ HOOK_DEFINE_TRAMPOLINE(Stub_gsys_ProcessMeter_measureBeginSystem) {
     }
 };
 
+static Handle nxworld_thread_handle;
+alignas(PAGE_SIZE) static u8 nxworld_thread_stack[0x8000];
+
+
+static void nxworld_thread_func(void *) {
+    nxworld_main(nxworld_thread_handle);
+    while (1) {
+        svcSleepThread(1000000000);
+    }
+}
+
+static void start_nxworld() {
+    R_ABORT_UNLESS(svcCreateThread(&nxworld_thread_handle, (void*)nxworld_thread_func, NULL, nxworld_thread_stack + sizeof(nxworld_thread_stack), 0x20, -2));
+    R_ABORT_UNLESS(svcStartThread(nxworld_thread_handle));
+}
+
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
     log_str("exl_main");
     exl::hook::Initialize();
+
+    start_nxworld();
 
     // this is for 3.0.1:
 
@@ -290,9 +308,6 @@ extern "C" void exl_main(void* x0, void* x1) {
     // Store 0 to timer instead of the normal animation length
     exl::patch::CodePatcher(0x012dcc6c).Write<uint32_t>(0xf900581f); // cPose
     exl::patch::CodePatcher(0x012dc9e8).Write<uint32_t>(0xf9005a7f); // cFall
-
-
-
 
     log_str("done hooking");
 }

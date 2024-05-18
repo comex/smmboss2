@@ -43,25 +43,3 @@ include $(MK_PATH)/$(MK_NAME)
 include $(MK_PATH)/common.mk
 include $(MK_PATH)/deploy.mk
 include $(MK_PATH)/npdm.mk
-
-NXWORLD_CFLAGS := \
-	$(filter-out -I%,$(CFLAGS) $(CPPFLAGS)) \
-	$(CFLAGS) \
-	-I$(DEVKITPATH)/libnx/include \
-	-Wno-maybe-uninitialized \
-	-Wno-error \
-	-DMG_ARCH=MG_ARCH_UNIX
-
-NXWORLD_CMD = $(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-gcc -MMD -MP -MF $(DEPSDIR)/$*.d $(NXWORLD_CFLAGS) -c $< -o $@ $(ERROR_FILTER)
-
-$(BUILD)/mongoose.o: externals/mongoose/mongoose.c Makefile
-	$(NXWORLD_CMD)
-$(BUILD)/nxworld_main.o: nxworld_main.c Makefile
-	$(NXWORLD_CMD)
-
-NXWORLD_OBJS :=  $(BUILD)/mongoose.o $(BUILD)/nxworld_main.o
-
-$(BUILD)/nxworld-linked.o: $(NXWORLD_OBJS) Makefile
-	$(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-gcc -r -o $@ $(NXWORLD_OBJS) -L$(DEVKITPATH)/libnx/lib -lnx -lsysbase -Wl,--entry=nxworld_main -Wl,--gc-sections 
-$(BUILD)/nxworld-linked-fixed.o: $(BUILD)/nxworld-linked.o Makefile
-	$(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-objcopy -G nxworld_main $< $@ --remove-section=.crt0

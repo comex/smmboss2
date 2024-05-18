@@ -13,7 +13,8 @@
 
 namespace exl::setting {
     /* How large the fake .bss heap will be. */
-    constexpr size_t HeapSize = 0x5000;
+    // need some for libnx socket buffer -c
+    constexpr size_t HeapSize = 256 * 1024;
 
     /* How large the JIT area will be for hooks. */
     constexpr size_t JitSize = 0x1000;

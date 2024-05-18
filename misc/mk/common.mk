@@ -95,7 +95,7 @@ endif
 
 export OFILES_BIN	:=	$(addsuffix .o,$(BINFILES))
 export OFILES_SRC	:=	$(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
-export OFILES 	:=	$(OFILES_BIN) $(OFILES_SRC)
+export OFILES 	:=	$(OFILES_BIN) $(OFILES_SRC) $(DEPSDIR)/nxworld-linked-fixed.o
 export HFILES_BIN	:=	$(addsuffix .h,$(subst .,_,$(BINFILES)))
 
 export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
@@ -164,3 +164,27 @@ $(OFILES_SRC)	: $(HFILES_BIN)
 #---------------------------------------------------------------------------------------
 endif
 #---------------------------------------------------------------------------------------
+
+
+NXWORLD_CFLAGS := \
+	$(filter-out -I%,$(CFLAGS) $(CPPFLAGS)) \
+	$(CFLAGS) \
+	-I$(DEVKITPATH)/libnx/include \
+	-I$(TOPDIR)/externals/mongoose \
+	-Wno-maybe-uninitialized \
+	-Wno-error \
+	-DMG_ARCH=MG_ARCH_UNIX
+
+NXWORLD_CMD = $(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-gcc -MMD -MP -MF $(DEPSDIR)/$*.d $(NXWORLD_CFLAGS) -c $< -o $@ $(ERROR_FILTER)
+
+$(DEPSDIR)/mongoose.o: $(TOPDIR)/externals/mongoose/mongoose.c
+	$(NXWORLD_CMD)
+$(DEPSDIR)/nxworld_main.o: $(TOPDIR)/nxworld_main.c
+	$(NXWORLD_CMD)
+
+NXWORLD_OBJS :=  $(DEPSDIR)/mongoose.o $(DEPSDIR)/nxworld_main.o
+
+$(DEPSDIR)/nxworld-linked.o: $(NXWORLD_OBJS)
+	$(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-gcc -r -o $@ $(NXWORLD_OBJS) -L$(DEVKITPATH)/libnx/lib -lnx
+$(DEPSDIR)/nxworld-linked-fixed.o: $(DEPSDIR)/nxworld-linked.o $(TOPDIR)/nxworld_main.keep
+	$(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-objcopy @$(TOPDIR)/nxworld_main.keep $< $@ --remove-section=.crt0

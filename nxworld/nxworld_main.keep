@@ -1,1 +1,32 @@
 -G nxworld_main
+
+# exlaunch does not provide any of these,
+# and we do share libc
+# so just make these global
+-G __syscall_exit
+-G __syscall_getreent
+-G __syscall_lock_acquire
+-G __syscall_lock_try_acquire
+-G __syscall_lock_release
+-G __syscall_lock_acquire_recursive
+-G __syscall_lock_try_acquire_recursive
+-G __syscall_lock_release_recursive
+-G __syscall_cond_signal
+-G __syscall_cond_broadcast
+-G __syscall_cond_wait
+-G __syscall_cond_wait_recursive
+-G __syscall_thread_self
+-G __syscall_thread_exit
+-G __syscall_thread_self
+-G __syscall_thread_exit
+-G __syscall_thread_create
+-G __syscall_thread_join
+-G __syscall_thread_detach
+-G __syscall_tls_create
+-G __syscall_tls_set
+-G __syscall_tls_get
+-G __syscall_tls_delete
+-G __syscall_clock_getres
+-G __syscall_clock_gettime
+-G __syscall_gettod_r
+-G __syscall_nanosleep

@@ -36,7 +36,7 @@ INCLUDES	:=	include nxworld
 #---------------------------------------------------------------------------------
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIC -fvisibility=hidden
 
-CFLAGS	:=	-g -Wall -Werror -O3 \
+CFLAGS	:=	-g -Wall -Werror -O2 \
 			-ffunction-sections \
 			-fdata-sections \
 			$(ARCH) \
@@ -165,26 +165,31 @@ $(OFILES_SRC)	: $(HFILES_BIN)
 endif
 #---------------------------------------------------------------------------------------
 
-
-NXWORLD_CFLAGS := \
-	$(filter-out -I%,$(CFLAGS) $(CPPFLAGS)) \
-	$(CFLAGS) \
+NXWORLD_EXTRA_CFLAGS := \
 	-I$(DEVKITPATH)/libnx/include \
 	-I$(TOPDIR)/externals/mongoose \
 	-Wno-maybe-uninitialized \
 	-Wno-error \
 	-DMG_ARCH=MG_ARCH_UNIX
 
-NXWORLD_CMD = $(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-gcc -MMD -MP -MF $(DEPSDIR)/$*.d $(NXWORLD_CFLAGS) -c $< -o $@ $(ERROR_FILTER)
+NXWORLD_CFLAGS := \
+	$(filter-out -I%,$(CFLAGS) $(CPPFLAGS)) \
+	$(NXWORLD_EXTRA_CFLAGS)
+
+NXWORLD_CXXFLAGS := \
+	$(filter-out -I%,$(CXXFLAGS) $(CPPFLAGS)) \
+	$(NXWORLD_EXTRA_CFLAGS)
+
+NXWORLD_CMD =
 
 $(DEPSDIR)/mongoose.o: $(TOPDIR)/externals/mongoose/mongoose.c
-	$(NXWORLD_CMD)
-$(DEPSDIR)/nxworld_main.o: $(TOPDIR)/nxworld/nxworld_main.c
-	$(NXWORLD_CMD)
+	$(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-gcc -MMD -MP -MF $(DEPSDIR)/$*.d $(NXWORLD_CFLAGS) -c $< -o $@ $(ERROR_FILTER)
+$(DEPSDIR)/nxworld_main.o: $(TOPDIR)/nxworld/nxworld_main.cpp
+	$(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-g++ -MMD -MP -MF $(DEPSDIR)/$*.d $(NXWORLD_CXXFLAGS) -c $< -o $@ $(ERROR_FILTER)
 
 NXWORLD_OBJS :=  $(DEPSDIR)/mongoose.o $(DEPSDIR)/nxworld_main.o
 
 $(DEPSDIR)/nxworld-linked.o: $(NXWORLD_OBJS)
-	$(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-gcc -r -o $@ $(NXWORLD_OBJS) -L$(DEVKITPATH)/libnx/lib -lnx
+	$(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-g++ -r -o $@ $(NXWORLD_OBJS) -L$(DEVKITPATH)/libnx/lib -lnx
 $(DEPSDIR)/nxworld-linked-fixed.o: $(DEPSDIR)/nxworld-linked.o $(TOPDIR)/nxworld/nxworld_main.keep
 	$(DEVKITPATH)/devkitA64/bin/aarch64-none-elf-objcopy @$(TOPDIR)/nxworld/nxworld_main.keep $< $@ --remove-section=.crt0

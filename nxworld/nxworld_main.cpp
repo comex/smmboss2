@@ -154,23 +154,13 @@ static size_t safe_memcpy(void *dst, bool check_dst,
 
 #include "mongoose.h"
 
-enum req_type : uint8_t {
-    REQ_READ = 1,
-    REQ_WRITE = 2,
-    REQ_SET_FILTER = 3,
+enum rpc_req_type : uint8_t {
+    RPC_REQ_READ = 1,
+    RPC_REQ_WRITE = 2,
 };
 
-enum resp_type : uint8_t {
-    RESP_OK = 1,
-    RESP_ERR = 2,
-    RESP_EVENT = 3,
-};
-
-
-#define ALREADY_SENT_RESPONSE 255
-
-struct req {
-    uint8_t what;
+struct rpc_req {
+    enum rpc_req_type type;
     union {
         struct {
             uint64_t addr;
@@ -180,14 +170,50 @@ struct req {
 
 } __attribute__((packed));
 
+#define offsetof_end(ty, what) \
+    (offsetof(ty, what) + sizeof(((ty *)0)->what)
 
-static uint8_t handle_ws_packet(const void *buf, size_t len, struct mg_connection *c) {
-    if (len < 1) {
-        return 0;
+static void handle_rpc_packet(const void *buf, size_t len, struct mg_connection *c) {
+    auto req = (struct rpc_req *)buf;
+    const char *err;
+    if (len < offsetof_end(rpc_req, type)) {
+        err = "too short for type";
+        goto err;
+    }
+    switch (req->type) {
+    case RPC_REQ_READ:
+        // ...
+        return;
+    case RPC_REQ_WRITE:
+        // ...
+        return;
+    default:
+        err = "unknown req type";
+        goto err;
     }
 
-    return 0;
+err:
+    mg_ws_send(c, err, strlen(err), WEBSOCKET_OP_TEXT);
+    c->is_draining = 1;
 }
+
+enum conn_state : uint8_t {
+    CONN_STATE_DEFAULT = 0, // mongoose zeroes out data by default
+    CONN_STATE_RPC_WEBSOCKET,
+    CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF,
+};
+
+struct __attribute__((may_alias)) conn_data {
+    conn_state state;
+    union {
+        struct {
+            uint64_t start_off;
+        } draining_before_hose_handoff;
+
+    };
+};
+
+static_assert(sizeof(conn_data) <= MG_DATA_SIZE);
 
 _Alignas(16) static char hose_buf[1048576];
 static void *hose_thread(void *cast_fd) {
@@ -195,19 +221,25 @@ static void *hose_thread(void *cast_fd) {
 }
 
 static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
+    auto cd = (conn_data *)c->data;
     if (ev == MG_EV_HTTP_MSG) {  // New HTTP request received
         struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-        if (mg_match(hm->uri, mg_str("/ws/hose"), NULL)) {
+        struct mg_str hose_start_off_s;
+        uint64_t hose_start_off;
+        if (mg_match(hm->uri, mg_str("/ws/hose/*"), &hose_start) &&
+            mg_str_to_num(hose_start_off_s, 10, &hose_start_off, sizeof(hose_start_off)) {
             mg_ws_upgrade(c, hm, NULL);
-            mg->data[0] = 'H';
+            cd->state = CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF;
+            cd->draining_before_hose_handoff.start_off = hose_start_Off;
         } else if (mg_match(hm->uri, mg_str("/ws/rpc"), NULL)) {
             mg_ws_upgrade(c, hm, NULL);
-            mg->data[0] = 'R';
+            cd->state = CONN_STATE_RPC_WEBSOCKET;
         } else {
             mg_http_reply(c, 404, "", "not found");
         }
     } else if (ev == MG_EV_WRITE) {
-        if (c->send.len == 0 && mg->data[0] == 'H') {
+        if (cd->state == CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF &&
+            c->send.len == 0) {
             // try to hand off to dedicated thread for efficiency
             pthread_attr_t attr;
             if (pthread_attr_init(&attr)) {
@@ -231,20 +263,16 @@ static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
             c->is_draining = 1;
         }
     } else if (ev == MG_EV_WS_MSG) {
-#if 0
-        if (!c->fn_data) {
-            c->fn_data = new 
+        if (cd->state != CONN_STATE_RPC_WEBSOCKET) {
+            // did we get a websocket message from a hose connection?
+            c->is_draining = 1;
+            return;
         }
-#endif
         struct mg_ws_message *wm = (struct mg_ws_message *)ev_data;
-        uint8_t rc = handle_ws_packet(wm->data.buf, wm->data.len, c);
+        handle_rpc_packet(wm->data.buf, wm->data.len, c);
         if (rc != ALREADY_SENT_RESPONSE) {
             mg_ws_send(c, &rc, sizeof(rc), WEBSOCKET_OP_BINARY);
         }
-#if 0
-    } else if (ev == MG_EV_CLOSE) {
-        delete (connection_info *)c->fn_data;
-#endif
     }
 }
 

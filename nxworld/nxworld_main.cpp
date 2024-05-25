@@ -77,7 +77,7 @@ private:
         uint32_t perm;
     };
     std::vector<region> cached_regions_;
-    Mutex mutex_{};
+    std::mutex mutex_;
 
     void load_cached_regions() {
         cached_regions_.clear();
@@ -123,7 +123,6 @@ private:
 public:
     size_t accessible_bytes_at(uintptr_t addr, bool want_write) {
         std::lock_guard lk(mutex_);
-        size_t ret = 0;
         // This assumes that mapped things are never unmapped or have their
         // protections changed, but non-mapped things might be mapped later.
         // It would be easier to just yolo the access and install an exception
@@ -209,13 +208,14 @@ constexpr static size_t add_ws_header_size(size_t size) {
     return full_size;
 }
 
-static uint8_t *fill_ws_header(uint8_t *p, size_t size) {
+static uint8_t *fill_ws_header(uint8_t *p, size_t size, size_t min_size) {
     // fill out websocket frame header.  based on mkhdr.
+    assert(size >= min_size);
     p[0] = WEBSOCKET_OP_BINARY | 128;
-    if (size < 126) {
+    if (min_size < 126) {
         p[1] = (uint8_t)size;
         return p + 2;
-    } else if (size < 65536) {
+    } else if (min_size < 65536) {
         p[1] = 126;
         p[2] = (uint8_t)(size >> 8);
         p[3] = (uint8_t)(size >> 0);
@@ -237,7 +237,7 @@ static void handle_rpc_packet(const void *buf, size_t len, struct mg_connection 
         goto err;
     }
     switch (req->type) {
-    case RPC_REQ_READ:
+    case RPC_REQ_READ: {
         if (len < offsetof_end(rpc_req, rw)) {
             err = "too short for rw";
             goto err;
@@ -256,12 +256,15 @@ static void handle_rpc_packet(const void *buf, size_t len, struct mg_connection 
             goto err;
         }
         uint8_t *header = c->send.buf + c->send.len;
-        uint8_t *past_header = fill_ws_header(header, rw_len);
-        safe_memcpy(past_header, (void *)req->rw.addr, rw_len);
-        c->send.len += full_len;
+        uint8_t *past_header = header + (full_len - rw_len);
+        size_t actual = safe_memcpy(past_header, false, (void *)req->rw.addr, true, rw_len);
+        uint8_t *ph = fill_ws_header(header, actual, rw_len);
+        assert(ph == past_header);
+        c->send.len += ph + actual - header;
         return;
+    }
 
-    case RPC_REQ_WRITE:
+    case RPC_REQ_WRITE: {
         if (len < offsetof_end(rpc_req, rw)) {
             err = "too short for rw";
             goto err;
@@ -270,9 +273,11 @@ static void handle_rpc_packet(const void *buf, size_t len, struct mg_connection 
             err = "too short for data";
             goto err;
         }
-        safe_memcpy((void *)req->rw.addr, req->rw.data, req->rw.len);
+        safe_memcpy((void *)req->rw.addr, true, req->rw.data, false, req->rw.len);
         mg_ws_send(c, NULL, 0, WEBSOCKET_OP_BINARY);
         return;
+    }
+
     default:
         err = "unknown req type";
         goto err;
@@ -304,7 +309,7 @@ struct hose {
         assert(ret != -1);
 
         // send to thread
-        int old = new_fd_.exchange(fd, memory_order_relaxed);
+        int old = new_fd_.exchange(fd, std::memory_order_relaxed);
         if (old != -1) {
             close(old);
         }
@@ -326,7 +331,7 @@ struct hose {
     void write_packet(size_t size, F &&writeout, bool for_overrun = false) {
         size_t full_size = add_ws_header_size(size);
         write_raw(full_size, [&](uint8_t *p) {
-            uint8_t *past_header = fill_ws_header(p, size);
+            uint8_t *past_header = fill_ws_header(p, size, size);
             writeout(past_header);
         }, for_overrun);
     }
@@ -336,14 +341,14 @@ private:
     struct write_info {
         uint32_t write_offset;
         uint32_t wrap_offset:31,
-                 overrun_flag:1;
+                 just_wrote_overrun:1;
     };
     static_assert(sizeof(write_info) == 8);
-    static_assert(atomic<write_info>::is_always_lock_free);
+    static_assert(std::atomic<write_info>::is_always_lock_free);
 
-    atomic<int> new_fd_{-1};
-    atomic<write_info> write_info_{};
-    atomic<uint32_t> read_offset_{0};
+    std::atomic<int> new_fd_{-1};
+    std::atomic<write_info> write_info_{};
+    std::atomic<uint32_t> read_offset_{0};
     _Alignas(16) uint8_t buf_[128 * 1024];
 
     // reader thread data:
@@ -357,7 +362,7 @@ private:
     }
     void do_iter() {
         // pick up new connection if present
-        int new_fd = new_fd_.exchange(0, memory_order_relaxed);
+        int new_fd = new_fd_.exchange(0, std::memory_order_relaxed);
         if (new_fd != -1) {
             if (cur_fd_ != -1) {
                 close(cur_fd_);
@@ -365,19 +370,19 @@ private:
             cur_fd_ = new_fd;
         }
 
-        write_info write_info = write_info_.load(memory_order_acquire);
-        uint32_t read_offset = read_offset_.load(memory_order_relaxed);
+        write_info write_info = write_info_.load(std::memory_order_acquire);
+        uint32_t read_offset = read_offset_.load(std::memory_order_relaxed);
 
-        assert(read_offset <= sizeof(buf) &&
-               write_info.write_offset <= sizeof(buf));
+        assert(read_offset <= sizeof(buf_) &&
+               write_info.write_offset <= sizeof(buf_));
         if (write_info.write_offset < read_offset) {
             assert(write_info.wrap_offset >= read_offset &&
-                   write_info.wrap_offset <= sizeof(buf));
+                   write_info.wrap_offset <= sizeof(buf_));
         }
 
         if (cur_fd_ == -1) {
             // nobody to send to
-            read_offset_.store(write_info.write_offset, memory_order_relaxed);
+            read_offset_.store(write_info.write_offset, std::memory_order_relaxed);
             return do_sleep();
         }
 
@@ -391,7 +396,7 @@ private:
             to_send = write_info.wrap_offset - read_offset;
         }
 
-        ssize_t ret = send(cur_fd_, buf_ + read_offset, to_send);
+        ssize_t ret = send(cur_fd_, buf_ + read_offset, to_send, 0);
         if (ret == -1) {
             xprintf("send() failed: %s", strerror(errno));
             close(cur_fd_);
@@ -402,17 +407,17 @@ private:
             xprintf("send() returned 0?");
         }
         read_offset += (size_t)ret;
-        assert(read_offset <= sizeof(buf));
-        if (read_offset == sizeof(buf)) {
+        assert(read_offset <= sizeof(buf_));
+        if (read_offset == sizeof(buf_)) {
             read_offset = 0;
         }
-        read_offset_.store(read_offset, memory_order_release);
+        read_offset_.store(read_offset, std::memory_order_release);
     }
     void do_sleep() {
         usleep(5000);
     }
 
-    static constexpr OVERRUN_BODY_SIZE = 9;
+    static constexpr size_t OVERRUN_BODY_SIZE = 9;
 
     // writer thread funcs:
     template <typename F>
@@ -422,13 +427,13 @@ private:
             return;
         }
         writeout(buf_ + (new_write_info.write_offset - size));
-        write_info_.store(new_write_info, memory_order_release);
+        write_info_.store(new_write_info, std::memory_order_release);
     }
 
     std::tuple<bool, write_info> reserve_space(size_t size, bool for_overrun) {
         assert_on_write_thread();
-        uint32_t read_offset = read_offset_.load(memory_order_acquire);
-        write_info write_info = write_info_.load(memory_order_relaxed);
+        uint32_t read_offset = read_offset_.load(std::memory_order_acquire);
+        write_info write_info = write_info_.load(std::memory_order_relaxed);
         size_t needed_size = size + (for_overrun ? 0 : add_ws_header_size(OVERRUN_BODY_SIZE));
         if (needed_size < size) {
             needed_size = SIZE_MAX;
@@ -441,7 +446,7 @@ private:
                 write_info.just_wrote_overrun = for_overrun;
             }
         } else {
-            if (needed_size <= sizeof(buf_) - write_offset) {
+            if (needed_size <= sizeof(buf_) - write_info.write_offset) {
                 ok = true;
                 write_info.write_offset += size;
                 write_info.just_wrote_overrun = for_overrun;
@@ -469,7 +474,12 @@ private:
             memcpy(p + 1, &size, 8);
         }, /*for_overrun*/ true);
     }
-}
+
+    void assert_on_write_thread() {
+        // ...
+        #warning TODO
+    }
+};
 
 static hose s_hose;
 
@@ -484,8 +494,6 @@ static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
     auto cd = (conn_data *)c->data;
     if (ev == MG_EV_HTTP_MSG) {  // New HTTP request received
         struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-        struct mg_str hose_start_off_s;
-        uint64_t hose_start_off;
         if (mg_match(hm->uri, mg_str("/ws/hose"), NULL)) {
             mg_ws_upgrade(c, hm, NULL);
             cd->state = CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF;

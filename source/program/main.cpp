@@ -1,6 +1,6 @@
 #include "lib.hpp"
 #include <stdarg.h>
-#include "nxworld_main.h"
+#include "nxworld_main.hpp"
 #include "nn/os/os_thread_api.hpp"
 
 namespace nn::diag::detail {

@@ -1,7 +1,8 @@
 #include <stdint.h>
 #include <sys/cdefs.h>
 __BEGIN_DECLS
-void nxworld_main(uint32_t main_thread_handle);
+void nxworld_early_init(uint32_t main_thread_handle);
+void nxworld_main();
 
 // calls back into exl world
 void log_str(const char *str);

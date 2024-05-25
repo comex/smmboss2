@@ -1,5 +1,5 @@
 #include <switch.h>
-#include "nxworld_main.h"
+#include "nxworld_main.hpp"
 #include <vector>
 #include <algorithm>
 #include <string.h>
@@ -48,7 +48,7 @@ static const SocketInitConfig s_socket_init_config = {
     .bsd_service_type       = BsdServiceType_User,
 };
 
-static void early_init(Handle nxworld_thread) {
+void nxworld_early_init(Handle nxworld_thread) {
     log_str("before init");
     envSetup(NULL, nxworld_thread, NULL);
     newlibSetup();
@@ -536,7 +536,6 @@ static void serve_mongoose() {
 }
 
 void nxworld_main(Handle nxworld_thread) {
-    early_init(nxworld_thread);
     s_hose.start_thread();
     serve_mongoose();
 }

@@ -180,6 +180,7 @@ struct rpc_req {
         struct {
             uint64_t addr;
             uint64_t len;
+            char data[0];
         } __attribute__((packed)) rw;
     };
 
@@ -192,6 +193,42 @@ enum hose_packet_type : uint8_t {
 #define offsetof_end(ty, what) \
     (offsetof(ty, what) + sizeof(((ty *)0)->what))
 
+constexpr static size_t add_ws_header_size(size_t size) {
+    size_t header_size;
+    if (size < 126) {
+        header_size = 2;
+    } else if (size < 65536) {
+        header_size = 4;
+    } else {
+        header_size = 10;
+    }
+    size_t full_size = size + header_size;
+    if (full_size < size) {
+        return SIZE_MAX;
+    }
+    return full_size;
+}
+
+static uint8_t *fill_ws_header(uint8_t *p, size_t size) {
+    // fill out websocket frame header.  based on mkhdr.
+    p[0] = WEBSOCKET_OP_BINARY | 128;
+    if (size < 126) {
+        p[1] = (uint8_t)size;
+        return p + 2;
+    } else if (size < 65536) {
+        p[1] = 126;
+        p[2] = (uint8_t)(size >> 8);
+        p[3] = (uint8_t)(size >> 0);
+        return p + 4;
+    } else {
+        p[1] = 127;
+        uint64_t swapped = __builtin_bswap64(size);
+        memcpy(&p[2], &swapped, 8);
+        return p + 10;
+    }
+}
+
+
 static void handle_rpc_packet(const void *buf, size_t len, struct mg_connection *c) {
     auto req = (struct rpc_req *)buf;
     const char *err;
@@ -201,10 +238,40 @@ static void handle_rpc_packet(const void *buf, size_t len, struct mg_connection 
     }
     switch (req->type) {
     case RPC_REQ_READ:
-        // ...
+        if (len < offsetof_end(rpc_req, rw)) {
+            err = "too short for rw";
+            goto err;
+        }
+        size_t rw_len = req->rw.len;
+        size_t limit = 65536;
+        if (c->send.size < limit) {
+            if (!mg_iobuf_resize(&c->send, limit)) {
+                err = "mg_iobuf_resize failed";
+                goto err;
+            }
+        }
+        size_t full_len = add_ws_header_size(rw_len);
+        if (full_len > c->send.size - c->send.len) {
+            err = "i'm overstuffed";
+            goto err;
+        }
+        uint8_t *header = c->send.buf + c->send.len;
+        uint8_t *past_header = fill_ws_header(header, rw_len);
+        safe_memcpy(past_header, (void *)req->rw.addr, rw_len);
+        c->send.len += full_len;
         return;
+
     case RPC_REQ_WRITE:
-        // ...
+        if (len < offsetof_end(rpc_req, rw)) {
+            err = "too short for rw";
+            goto err;
+        }
+        if (offsetof_end(rpc_req, rw) - len < req->rw.len) {
+            err = "too short for data";
+            goto err;
+        }
+        safe_memcpy((void *)req->rw.addr, req->rw.data, req->rw.len);
+        mg_ws_send(c, NULL, 0, WEBSOCKET_OP_BINARY);
         return;
     default:
         err = "unknown req type";
@@ -226,18 +293,6 @@ __attribute__((constructor))
 static void ctor_test() {
     log_str("i should be kept");
 }
-
-struct __attribute__((may_alias)) conn_data {
-    conn_state state;
-    union {
-        struct {
-            uint64_t start_off;
-        } draining_before_hose_handoff;
-
-    };
-};
-
-static_assert(sizeof(conn_data) <= MG_DATA_SIZE);
 
 struct hose {
     void push_fd(int fd) {
@@ -269,10 +324,10 @@ struct hose {
     // writer thread func:
     template <typename F>
     void write_packet(size_t size, F &&writeout, bool for_overrun = false) {
-        size_t full_size = add_header_size(size);
+        size_t full_size = add_ws_header_size(size);
         write_raw(full_size, [&](uint8_t *p) {
-            fill_header(p, size);
-            writeout(p + header_size);
+            uint8_t *past_header = fill_ws_header(p, size);
+            writeout(past_header);
         }, for_overrun);
     }
 
@@ -374,7 +429,7 @@ private:
         assert_on_write_thread();
         uint32_t read_offset = read_offset_.load(memory_order_acquire);
         write_info write_info = write_info_.load(memory_order_relaxed);
-        size_t needed_size = size + (for_overrun ? 0 : add_header_size(OVERRUN_BODY_SIZE));
+        size_t needed_size = size + (for_overrun ? 0 : add_ws_header_size(OVERRUN_BODY_SIZE));
         if (needed_size < size) {
             needed_size = SIZE_MAX;
         }
@@ -414,42 +469,16 @@ private:
             memcpy(p + 1, &size, 8);
         }, /*for_overrun*/ true);
     }
-
-    constexpr size_t add_header_size(size_t size) {
-        size_t header_size;
-        if (size < 126) {
-            header_size = 2;
-        } else if (size < 65536) {
-            header_size = 4;
-        } else {
-            header_size = 10;
-        }
-        size_t full_size = size + header_size;
-        if (full_size < size) {
-            return SIZE_MAX;
-        }
-        return full_size;
-    }
-
-    static void fill_header(uint8_t *p, size_t size) {
-        // fill out websocket frame header.  based on mkhdr.
-        p[0] = WEBSOCKET_OP_BINARY | 128;
-        if (size < 126) {
-            p[1] = (uint8_t)size;
-        } else if (size < 65536) {
-            p[1] = 126;
-            p[2] = (uint8_t)(size >> 8);
-            p[3] = (uint8_t)(size >> 0);
-        } else {
-            p[1] = 127;
-            uint64_t swapped = __builtin_bswap64(size);
-            memcpy(&p[2], &swapped, 8);
-        }
-    }
-
 }
 
 static hose s_hose;
+
+struct __attribute__((may_alias)) conn_data {
+    conn_state state;
+        // ...
+};
+
+static_assert(sizeof(conn_data) <= MG_DATA_SIZE);
 
 static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
     auto cd = (conn_data *)c->data;
@@ -457,11 +486,9 @@ static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
         struct mg_http_message *hm = (struct mg_http_message *) ev_data;
         struct mg_str hose_start_off_s;
         uint64_t hose_start_off;
-        if (mg_match(hm->uri, mg_str("/ws/hose/*"), &hose_start_off_s) &&
-            mg_str_to_num(hose_start_off_s, 10, &hose_start_off, sizeof(hose_start_off))) {
+        if (mg_match(hm->uri, mg_str("/ws/hose"), NULL)) {
             mg_ws_upgrade(c, hm, NULL);
             cd->state = CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF;
-            cd->draining_before_hose_handoff.start_off = hose_start_off;
         } else if (mg_match(hm->uri, mg_str("/ws/rpc"), NULL)) {
             mg_ws_upgrade(c, hm, NULL);
             cd->state = CONN_STATE_RPC_WEBSOCKET;

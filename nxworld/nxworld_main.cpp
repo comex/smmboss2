@@ -50,7 +50,7 @@ static const SocketInitConfig s_socket_init_config = {
 
 static void early_init(Handle nxworld_thread) {
     log_str("before init");
-    envSetup(NULL, nxworld_thread, NULL); 
+    envSetup(NULL, nxworld_thread, NULL);
     newlibSetup();
     virtmemSetup();
     __libnx_init_thread();
@@ -476,8 +476,7 @@ private:
     }
 
     void assert_on_write_thread() {
-        // ...
-        #warning TODO
+        xprintf("TODO: thread id %lu\n", cur_thread_id());
     }
 };
 

@@ -1,6 +1,8 @@
 #include "lib.hpp"
 #include <stdarg.h>
 #include "nxworld_main.h"
+#include "nn/os/os_thread_api.hpp"
+
 namespace nn::diag::detail {
     int PrintDebugString(const char *);
 }
@@ -68,6 +70,10 @@ void xprintf(const char *fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     log_str(buf);
+}
+
+uint64_t cur_thread_id() {
+    return nn::os::GetThreadId(nn::os::GetCurrentThread());
 }
 
 static const char *get_state_name(struct statemgr *smgr, int state) {
@@ -241,7 +247,7 @@ HOOK_DEFINE_TRAMPOLINE(StubBgUnitGroupInitSpecific) {
     }
 };
 
-// this stretches blocks' visual appearance 
+// this stretches blocks' visual appearance
 HOOK_DEFINE_TRAMPOLINE(StubBgRendererXX) {
     static void Callback(void *self, int w1, float *xyz, void *w3, float *wh_in_blocks, int x5, void *x6) {
         float new_wh_in_blocks[2] = {wh_in_blocks[0] / 2, wh_in_blocks[1] * 2};

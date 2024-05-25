@@ -3,6 +3,8 @@
 #include <vector>
 #include <algorithm>
 #include <string.h>
+#include <pthread.h>
+#include <mutex>
 
 extern "C" {
     void virtmemSetup(void);
@@ -18,7 +20,7 @@ extern "C" {
     }
 }
 
-static const SocketInitConfig socket_init_config = {
+static const SocketInitConfig s_socket_init_config = {
     .tcp_tx_buf_size        = 0x10000,
     .tcp_rx_buf_size        = 0x10000,
     .tcp_tx_buf_max_size    = 0x10000,
@@ -46,7 +48,7 @@ static void early_init(Handle nxworld_thread) {
         log_str("smInitialize failed");
         diagAbortWithResult(rc);
     }
-    rc = socketInitialize(&socket_init_config);
+    rc = socketInitialize(&s_socket_init_config);
     if (R_FAILED(rc)) {
         log_str("socketInitialize failed");
         diagAbortWithResult(rc);
@@ -107,7 +109,7 @@ private:
 
 public:
     size_t accessible_bytes_at(uintptr_t addr, bool want_write) {
-        mutexLock(&mutex_);
+        std::lock_guard lk(mutex_);
         size_t ret = 0;
         // This assumes that mapped things are never unmapped or have their
         // protections changed, but non-mapped things might be mapped later.
@@ -124,8 +126,7 @@ public:
                 return r->size - (addr - r->start);
             }
         }
-        mutexUnlock(&mutex_);
-        return ret;
+        return 0;
     }
 };
 
@@ -171,7 +172,7 @@ struct rpc_req {
 } __attribute__((packed));
 
 #define offsetof_end(ty, what) \
-    (offsetof(ty, what) + sizeof(((ty *)0)->what)
+    (offsetof(ty, what) + sizeof(((ty *)0)->what))
 
 static void handle_rpc_packet(const void *buf, size_t len, struct mg_connection *c) {
     auto req = (struct rpc_req *)buf;
@@ -203,6 +204,11 @@ enum conn_state : uint8_t {
     CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF,
 };
 
+__attribute__((constructor))
+static void ctor_test() {
+    log_str("i should be kept");
+}
+
 struct __attribute__((may_alias)) conn_data {
     conn_state state;
     union {
@@ -215,9 +221,28 @@ struct __attribute__((may_alias)) conn_data {
 
 static_assert(sizeof(conn_data) <= MG_DATA_SIZE);
 
-_Alignas(16) static char hose_buf[1048576];
-static void *hose_thread(void *cast_fd) {
-    int fd = (int)(uintptr_t)cast_fd;
+struct hose {
+    _Alignas(16) static char buf_[1048576];
+    static atomic<int> fd_{-1};
+    static atomic<uint64_t> write_offset_{0};
+    static atomic<uint64_t> read_offset_{0};
+
+    static void thread_func() {
+        int new_fd = -1;
+        while (1) {
+            if (new_fd == -1) {
+                usleep(5000);
+                new_fd = s_hose_fd.swap(-1);
+                continue;
+            }
+            int my_fd = new_fd;
+            new_fd = -1;
+
+
+            
+
+        }
+    }
 }
 
 static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
@@ -226,11 +251,11 @@ static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
         struct mg_http_message *hm = (struct mg_http_message *) ev_data;
         struct mg_str hose_start_off_s;
         uint64_t hose_start_off;
-        if (mg_match(hm->uri, mg_str("/ws/hose/*"), &hose_start) &&
-            mg_str_to_num(hose_start_off_s, 10, &hose_start_off, sizeof(hose_start_off)) {
+        if (mg_match(hm->uri, mg_str("/ws/hose/*"), &hose_start_off_s) &&
+            mg_str_to_num(hose_start_off_s, 10, &hose_start_off, sizeof(hose_start_off))) {
             mg_ws_upgrade(c, hm, NULL);
             cd->state = CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF;
-            cd->draining_before_hose_handoff.start_off = hose_start_Off;
+            cd->draining_before_hose_handoff.start_off = hose_start_off;
         } else if (mg_match(hm->uri, mg_str("/ws/rpc"), NULL)) {
             mg_ws_upgrade(c, hm, NULL);
             cd->state = CONN_STATE_RPC_WEBSOCKET;
@@ -241,17 +266,7 @@ static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
         if (cd->state == CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF &&
             c->send.len == 0) {
             // try to hand off to dedicated thread for efficiency
-            pthread_attr_t attr;
-            if (pthread_attr_init(&attr)) {
-                goto tcfail;
-            }
-            if (pthread_attr_setstacksize(&attr, 0x4000)) {
-                goto tcfail_attr;
-            }
-            pthread_t pt;
-            if (pthread_create(&pt, &attr, hose_thread, c->fd) {
-                goto tcfail_attr;
-            }
+            XXX
             c->fd = nullptr;
             mg_close_conn(c);
             return;
@@ -270,32 +285,44 @@ static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
         }
         struct mg_ws_message *wm = (struct mg_ws_message *)ev_data;
         handle_rpc_packet(wm->data.buf, wm->data.len, c);
-        if (rc != ALREADY_SENT_RESPONSE) {
-            mg_ws_send(c, &rc, sizeof(rc), WEBSOCKET_OP_BINARY);
-        }
     }
 }
+
+#define panic(...) do { \
+    xprintf(__VA_ARGS__); \
+    diagAbortWithResult(MAKERESULT(444, 444)); \
+} while (0)
 
 static void serve() {
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
     if (!mg_http_listen(&mgr, "http://0.0.0.0:8000", mongoose_callback, NULL)) {
-        log_str("mg_http_listen failed");
-        diagAbortWithResult(MAKERESULT(444, 444));
+        panic("mg_http_listen failed");
     }
     if (!mg_wakeup_init(&mgr)) {
-        log_str("mg_wakeup_init failed");
-        diagAbortWithResult(MAKERESULT(444, 444));
+        panic("mg_wakeup_init failed");
     }
     while (1) {
         mg_mgr_poll(&mgr, 1000000);
     }
 }
 
+static void make_hose_thread() {
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr)) {
+        panic("pthread_attr_init failed");
+    }
+    if (pthread_attr_setstacksize(&attr, 0x4000)) {
+        panic("pthread_attr_setstacksize failed");
+    }
+    pthread_t pt;
+    if (pthread_create(&pt, &attr, hose_thread, NULL)) {
+        panic("pthread_create failed");
+    }
+}
+
 void nxworld_main(Handle nxworld_thread) {
     early_init(nxworld_thread);
-    xprintf("%p\n", &safe_memcpy);
-    char c;
-    safe_memcpy(&c, true, &c, true, 1);
+    make_hose_thread();
     serve();
 }

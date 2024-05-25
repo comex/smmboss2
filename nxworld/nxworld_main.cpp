@@ -144,6 +144,7 @@ public:
 };
 
 static mem_regions s_mem_regions;
+
 static size_t safe_memcpy(void *dst, bool check_dst,
                           const void *src, bool check_src,
                           size_t size) {
@@ -183,6 +184,10 @@ struct rpc_req {
     };
 
 } __attribute__((packed));
+
+enum hose_packet_type : uint8_t {
+    HOSE_PACKET_OVERRUN = 1,
+};
 
 #define offsetof_end(ty, what) \
     (offsetof(ty, what) + sizeof(((ty *)0)->what))
@@ -236,6 +241,7 @@ static_assert(sizeof(conn_data) <= MG_DATA_SIZE);
 
 struct hose {
     void push_fd(int fd) {
+        xprintf("hose::push_fd(%d)", fd);
         // disable nonblock
         int fl = fcntl(fd, F_GETFL, 0);
         assert(fl != -1);
@@ -260,37 +266,29 @@ struct hose {
         assert(!create_ret);
     }
 
+    // writer thread func:
     template <typename F>
-    void write_packet(size_t size, F &&writeout) {
+    void write_packet(size_t size, F &&writeout, bool for_overrun = false) {
         size_t full_size = add_header_size(size);
-        if (!full_size) {
-            return;
-        }
         write_raw(full_size, [&](uint8_t *p) {
             fill_header(p, size);
             writeout(p + header_size);
-        });
-    }
-
-
-    // writer thread func:
-    template <typename F>
-    void write_raw(size_t size, F &&writeout) {
-        auto [ok, write_to, new_wrap_offset] = reserve_space(size);
-        if (!ok) {
-            return;
-        }
-        writeout(buf_ + write_to);
-        wrap_offset_.store(new_wrap_offset, memory_order_relaxed);
-        write_offset_.store(write_to + size, memory_order_release);
+        }, for_overrun);
     }
 
 private:
     // shared data:
+    struct write_info {
+        uint32_t write_offset;
+        uint32_t wrap_offset:31,
+                 overrun_flag:1;
+    };
+    static_assert(sizeof(write_info) == 8);
+    static_assert(atomic<write_info>::is_always_lock_free);
+
     atomic<int> new_fd_{-1};
-    atomic<uint32_t> write_offset_{0};
+    atomic<write_info> write_info_{};
     atomic<uint32_t> read_offset_{0};
-    atomic<uint32_t> wrap_offset_{0};
     _Alignas(16) uint8_t buf_[128 * 1024];
 
     // reader thread data:
@@ -312,29 +310,30 @@ private:
             cur_fd_ = new_fd;
         }
 
-        uint64_t write_offset = write_offset_.load(memory_order_acquire);
-        uint64_t wrap_offset = wrap_offset_.load(memory_order_relaxed);
-        uint64_t read_offset = read_offset_.load(memory_order_relaxed);
+        write_info write_info = write_info_.load(memory_order_acquire);
+        uint32_t read_offset = read_offset_.load(memory_order_relaxed);
 
-        assert(read_offset <= sizeof(buf) && write_offset <= sizeof(buf));
-        if (write_offset < read_offset) {
-            assert(wrap_offset >= read_offset && wrap_offset <= sizeof(buf));
+        assert(read_offset <= sizeof(buf) &&
+               write_info.write_offset <= sizeof(buf));
+        if (write_info.write_offset < read_offset) {
+            assert(write_info.wrap_offset >= read_offset &&
+                   write_info.wrap_offset <= sizeof(buf));
         }
 
         if (cur_fd_ == -1) {
             // nobody to send to
-            read_offset_.store(write_offset, memory_order_relaxed);
+            read_offset_.store(write_info.write_offset, memory_order_relaxed);
             return do_sleep();
         }
 
         size_t to_send;
-        if (read_offset == write_offset) {
+        if (read_offset == write_info.write_offset) {
             // no data to send
             return do_sleep();
-        } else if (read_offset < write_offset) {
-            to_send = write_offset - read_offset;
+        } else if (read_offset < write_info.write_offset) {
+            to_send = write_info.write_offset - read_offset;
         } else { // read_offset > write_offset
-            to_send = wrap_offset - read_offset;
+            to_send = write_info.wrap_offset - read_offset;
         }
 
         ssize_t ret = send(cur_fd_, buf_ + read_offset, to_send);
@@ -358,41 +357,65 @@ private:
         usleep(5000);
     }
 
+    static constexpr OVERRUN_BODY_SIZE = 9;
+
     // writer thread funcs:
-    std::tuple<bool, uint32_t, uint32_t> reserve_space(size_t size) {
-        uint32_t wrap_offset = wrap_offset_.load(memory_order_relaxed);
-        uint32_t write_offset = write_offset_.load(memory_order_relaxed);
+    template <typename F>
+    void write_raw(size_t size, F &&writeout, bool for_overrun) {
+        auto [ok, new_write_info] = reserve_space(size, for_overrun);
+        if (!ok) {
+            return;
+        }
+        writeout(buf_ + (new_write_info.write_offset - size));
+        write_info_.store(new_write_info, memory_order_release);
+    }
+
+    std::tuple<bool, write_info> reserve_space(size_t size, bool for_overrun) {
+        assert_on_write_thread();
         uint32_t read_offset = read_offset_.load(memory_order_acquire);
-        uint32_t write_to;
-        uint32_t new_wrap_offset = wrap_offset;
+        write_info write_info = write_info_.load(memory_order_relaxed);
+        size_t needed_size = size + (for_overrun ? 0 : add_header_size(OVERRUN_BODY_SIZE));
+        if (needed_size < size) {
+            needed_size = SIZE_MAX;
+        }
         bool ok = false;
-        if (write_offset < read_offset) {
-            if (size < read_offset - write_offset) { // not <=
+        if (write_info.write_offset < read_offset) {
+            if (needed_size < read_offset - write_info.write_offset) { // not <=
                 ok = true;
-                write_to = write_offset;
+                write_info.write_offset += size;
+                write_info.just_wrote_overrun = for_overrun;
             }
         } else {
-            if (size <= sizeof(buf_) - write_offset) {
+            if (needed_size <= sizeof(buf_) - write_offset) {
                 ok = true;
-                write_to = write_offset;
-            } else if (size < read_offset) {
+                write_info.write_offset += size;
+                write_info.just_wrote_overrun = for_overrun;
+            } else if (needed_size < read_offset) {
                 ok = true;
-                write_to = 0;
-                new_wrap_offset = write_offset;
+                write_info.wrap_offset = write_info.write_offset;
+                write_info.write_offset = size;
+                write_info.just_wrote_overrun = for_overrun;
             }
         }
         if (!ok) {
-            write_overrun();
+            assert(!for_overrun);
+            if (!write_info.just_wrote_overrun) {
+                write_overrun(size);
+            }
         }
-        return std::make_tuple(ok, write_to, new_wrap_offset);
+        return std::make_tuple(ok, write_info);
     }
 
-    void write_overrun() {
-        // xxx
-        xprintf("write overrun");
+    void write_overrun(size_t size) {
+        xprintf("write_overrun size=%zu", size);
+        write_packet(OVERRUN_BODY_SIZE, [&](uint8_t *p) {
+            p[0] = HOSE_PACKET_OVERRUN;
+            static_assert(sizeof(size) == 8);
+            memcpy(p + 1, &size, 8);
+        }, /*for_overrun*/ true);
     }
 
-    size_t add_header_size(size_t size) {
+    constexpr size_t add_header_size(size_t size) {
         size_t header_size;
         if (size < 126) {
             header_size = 2;
@@ -403,11 +426,11 @@ private:
         }
         size_t full_size = size + header_size;
         if (full_size < size) {
-            write_overrun();
-            return 0;
+            return SIZE_MAX;
         }
         return full_size;
     }
+
     static void fill_header(uint8_t *p, size_t size) {
         // fill out websocket frame header.  based on mkhdr.
         p[0] = WEBSOCKET_OP_BINARY | 128;
@@ -425,6 +448,8 @@ private:
     }
 
 }
+
+static hose s_hose;
 
 static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
     auto cd = (conn_data *)c->data;
@@ -446,18 +471,10 @@ static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
     } else if (ev == MG_EV_WRITE) {
         if (cd->state == CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF &&
             c->send.len == 0) {
-            // try to hand off to dedicated thread, because mongoose is kind of
-            // inefficient for sending large amounts of data
-            XXX
+            s_hose.push_fd((int)(uintptr_t)c->fd);
             c->fd = nullptr;
             mg_close_conn(c);
             return;
-        tcfail_attr:
-            pthread_attr_destroy(&attr);
-        tcfail:
-            static const char err[] = "thread creation fail";
-            mg_ws_send(c, err, sizeof(err), WEBSOCKET_OP_TEXT);
-            c->is_draining = 1;
         }
     } else if (ev == MG_EV_WS_MSG) {
         if (cd->state != CONN_STATE_RPC_WEBSOCKET) {
@@ -470,7 +487,7 @@ static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
     }
 }
 
-static void serve() {
+static void serve_mongoose() {
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
     if (!mg_http_listen(&mgr, "http://0.0.0.0:8000", mongoose_callback, NULL)) {
@@ -484,11 +501,8 @@ static void serve() {
     }
 }
 
-static void make_hose_thread() {
-}
-
 void nxworld_main(Handle nxworld_thread) {
     early_init(nxworld_thread);
-    make_hose_thread();
-    serve();
+    s_hose.start_thread();
+    serve_mongoose();
 }

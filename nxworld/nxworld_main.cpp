@@ -6,6 +6,19 @@
 #include <pthread.h>
 #include <mutex>
 
+#undef assert
+
+#define panic(...) do { \
+    xprintf(__VA_ARGS__); \
+    diagAbortWithResult(MAKERESULT(444, 444)); \
+} while (0)
+
+#define assert(expr) do { \
+    if (!(expr)) { \
+        panic("assertion failed: %s", #expr); \
+    } \
+} while (0)
+
 extern "C" {
     void virtmemSetup(void);
     void newlibSetup(void);
@@ -222,26 +235,91 @@ struct __attribute__((may_alias)) conn_data {
 static_assert(sizeof(conn_data) <= MG_DATA_SIZE);
 
 struct hose {
-    _Alignas(16) static char buf_[1048576];
-    static atomic<int> fd_{-1};
-    static atomic<uint64_t> write_offset_{0};
-    static atomic<uint64_t> read_offset_{0};
+    void send_fd(int fd) {
+        // disable nonblock
+        int fl = fcntl(fd, F_GETFL, 0);
+        assert(fl != -1);
+        int ret = fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+        assert(ret != -1);
 
-    static void thread_func() {
-        int new_fd = -1;
-        while (1) {
-            if (new_fd == -1) {
-                usleep(5000);
-                new_fd = s_hose_fd.swap(-1);
-                continue;
-            }
-            int my_fd = new_fd;
-            new_fd = -1;
-
-
-            
-
+        // send to thread
+        int old = new_fd_.exchange(fd, memory_order_relaxed);
+        if (old != -1) {
+            close(old);
         }
+    }
+    void start_thread() {
+        pthread_attr_t attr;
+        assert(!pthread_attr_init(&attr));
+        assert(!pthread_attr_setstacksize(&attr, 0x4000));
+        pthread_t pt;
+        int create_ret = pthread_create(&pt, &attr, [](void *self) -> void * {
+            ((hose *)self)->thread_func();
+            return nullptr;
+        }, this);
+        assert(!create_ret);
+    }
+
+private:
+    // shared data:
+    atomic<int> new_fd_{-1};
+    atomic<uint64_t> write_offset_{0};
+    atomic<uint64_t> read_offset_{0};
+    _Alignas(16) char buf_[128 * 1024];
+
+    // thread-private data:
+    int cur_fd_{-1};
+
+    void thread_func() {
+        while (1) {
+            do_iter();
+        }
+    }
+    void do_iter() {
+        // pick up new connection if present
+        int new_fd = new_fd_.exchange(0, memory_order_relaxed);
+        if (new_fd != -1) {
+            if (cur_fd_ != -1) {
+                close(cur_fd_);
+            }
+            cur_fd_ = new_fd;
+        }
+
+        uint64_t write_offset = write_offset_.load(memory_order_acquire);
+        uint64_t read_offset = read_offset_.load(memory_order_relaxed);
+
+        assert(read_offset <= write_offset &&
+               write_offset - read_offset <= sizeof(buf));
+
+        if (read_offset == write_offset) {
+            // no data to send
+            return do_sleep();
+        }
+
+        if (cur_fd_ == -1) {
+            // nobody to send to
+            read_offset_.store(write_offset, memory_order_relaxed);
+            return do_sleep();
+        }
+
+        size_t to_send = std::min(write_offset - read_offset,
+                                  sizeof(buf_) - (read_offset % sizeof(buf_)));
+
+        ssize_t ret = send(cur_fd_,buf_ + (read_offset % sizeof(buf_)), to_send);
+        if (ret == -1) {
+            xprintf("send() failed: %s", strerror(errno));
+            close(cur_fd_);
+            cur_fd_ = -1;
+            return;
+        }
+        if (ret == 0) {
+            xprintf("send() returned 0?");
+        }
+        read_offset_.store(read_offset + ret);
+
+    }
+    void do_sleep() {
+        usleep(5000);
     }
 }
 
@@ -265,7 +343,8 @@ static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
     } else if (ev == MG_EV_WRITE) {
         if (cd->state == CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF &&
             c->send.len == 0) {
-            // try to hand off to dedicated thread for efficiency
+            // try to hand off to dedicated thread, because mongoose is kind of
+            // inefficient for sending large amounts of data
             XXX
             c->fd = nullptr;
             mg_close_conn(c);
@@ -288,11 +367,6 @@ static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
     }
 }
 
-#define panic(...) do { \
-    xprintf(__VA_ARGS__); \
-    diagAbortWithResult(MAKERESULT(444, 444)); \
-} while (0)
-
 static void serve() {
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
@@ -308,17 +382,6 @@ static void serve() {
 }
 
 static void make_hose_thread() {
-    pthread_attr_t attr;
-    if (pthread_attr_init(&attr)) {
-        panic("pthread_attr_init failed");
-    }
-    if (pthread_attr_setstacksize(&attr, 0x4000)) {
-        panic("pthread_attr_setstacksize failed");
-    }
-    pthread_t pt;
-    if (pthread_create(&pt, &attr, hose_thread, NULL)) {
-        panic("pthread_create failed");
-    }
 }
 
 void nxworld_main(Handle nxworld_thread) {

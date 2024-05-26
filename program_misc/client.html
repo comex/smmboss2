@@ -1,0 +1,158 @@
+<script>
+function assert(x) {
+  if (!(x)) {
+    throw 'assertion failed';
+  }
+}
+function sleep(n) {
+  let { promise, resolve, reject } = Promise.withResolvers();
+  setTimeout(resolve, n);
+  return promise;
+}
+
+class Cond {
+  constructor() {
+    this.waiters = [];
+  }
+  broadcast() {
+    for (let waiter of this.waiters) {
+      waiter();
+    }
+  }
+  wait() {
+    let { promise, resolve, reject } = Promise.withResolvers();
+    this.waiters.push(resolve);
+    return promise;
+  }
+  then(f, r) {
+    return this.wait().then(f, r);
+  }
+}
+
+class Lock {
+  constructor() {
+    this.locked = false;
+    this.waiters = [];
+  };
+  lock() {
+    if (!this.locked) {
+      this.locked = true;
+      return Promise.resolve(undefined);
+    } else {
+      let { promise, resolve, reject } = Promise.withResolvers();
+      this.waiters.push(resolve);
+      return promise;
+    }
+  }
+  unlock() {
+    assert(this.locked);
+    this.locked = false;
+    let resolve = this.waiters.shift();
+    if (resolve !== undefined) {
+      resolve();
+    }
+  }
+  async with(cb) {
+    console.log('with entry');
+    await this.lock();
+    console.log('with got lock');
+    let isUnlocked = false;
+    let unlock = () => {
+      if (!isUnlocked) {
+        isUnlocked = true;
+        this.unlock();
+      }
+    };
+    try {
+      return await cb(unlock);
+    } finally {
+      unlock();
+    }
+  }
+}
+
+class WSWrapper {
+  constructor() {
+    this.reopenDelay = 1;
+    this.openWS();
+  }
+  openWS() {
+    let ws = new WebSocket('ws://127.0.0.1:8002/ws/rpc');
+    this.ws = ws;
+    ws.onopen = (e) => {
+      assert(this.ws === ws);
+      this.onOpen(e);
+    };
+    ws.onmessage = (e) => {
+      assert(this.ws === ws);
+      this.onMessage(e);
+    };
+    ws.onclose = (e) => {
+      this.onClose(e);
+      assert(this.ws === ws);
+      setTimeout(() => {
+        assert(this.ws === ws);
+        this.openWS();
+      }, this.reopenDelay);
+      this.reopenDelay *= 2;
+    };
+  }
+}
+class RPCConn extends WSWrapper {
+  constructor() {
+    super();
+    this.requestLock = new Lock;
+    this.responseHandler = null;
+    this.isOpen = false;
+    this.openCond = new Cond;
+  }
+  onOpen(e) {
+    console.log(`onOpen: ${e}`);
+    this.isOpen = true;
+    this.openCond.broadcast();
+  }
+  onMessage(e) {
+    console.log(`onMessage: ${e}`);
+    if (this.responseHandler === null) {
+      console.log(`unexpected message: ${e}`);
+    } else {
+      this.responseHandler(e);
+    }
+  }
+  onClose(e) {
+    console.log(`onClose: ${e}`);
+    this.isOpen = false;
+  }
+  async rawRequest(data) {
+    let cont = true;
+    while (cont) {
+      await this.requestLock.lock();
+      cont = false;
+      await this.requestLock.with(async (dropRequestLock) => {
+        if (!this.isOpen) {
+          console.log('RPC waiting for open');
+          dropRequestLock();
+          await this.openCond;
+          cont = true;
+          return;
+        }
+
+        let { promise, resolve, reject } = Promise.withResolvers();
+        assert(this.responseHandler === null);
+        this.responseHandler = resolve;
+        try {
+          await promise;
+        } finally {
+          this.responseHandler = null;
+        }
+      });
+    }
+  }
+}
+
+async function go() {
+  let conn = new RPCConn();
+  conn.rawRequest(32);
+}
+go();
+</script>

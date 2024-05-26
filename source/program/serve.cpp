@@ -15,6 +15,8 @@ static void start_thread(void *(*f)(void *), void *ctx) {
     assert(!create_ret);
 }
 
+static pthread_t s_main_thread;
+
 struct mem_regions {
 private:
     struct region {
@@ -331,7 +333,12 @@ private:
     }
 
     void assert_on_write_thread() {
-        xprintf("TODO: thread id");// %lu\n", cur_thread_id());
+        // the game logic that needs to write runs on the main thread, which is
+        // also the thread we are initialized on
+        pthread_t self = pthread_self();
+        if (self != s_main_thread) {
+            panic("assert_on_write_thread failed");
+        }
     }
 };
 
@@ -484,6 +491,7 @@ private:
 static mongoose_server s_mongoose_server;
 
 void serve_main() {
+    s_main_thread = pthread_self();
     start_thread([](void *ignored) -> void * {
         s_hose.thread_func();
         return nullptr;

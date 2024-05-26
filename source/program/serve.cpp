@@ -1,60 +1,18 @@
-#include <switch.h>
-#include "nxworld_main.hpp"
+#include "common.hpp"
+#include "stuff.hpp"
 #include <vector>
 #include <algorithm>
 #include <string.h>
 #include <pthread.h>
 #include <mutex>
-#include "stuff.hpp
 
-extern "C" {
-    void virtmemSetup(void);
-    void newlibSetup(void);
-    void __libnx_init_thread(void);
-
-    int __nx_applet_type = -2;
-
-    void __nx_exit() {
-        // shouldn't be called
-        log_str("__nx_exit");
-        while (1) {}
-    }
-}
-
-static const SocketInitConfig s_socket_init_config = {
-    .tcp_tx_buf_size        = 0x10000,
-    .tcp_rx_buf_size        = 0x10000,
-    .tcp_tx_buf_max_size    = 0x10000,
-    .tcp_rx_buf_max_size    = 0x10000,
-
-    .udp_tx_buf_size        = 256,
-    .udp_rx_buf_size        = 256,
-
-    .sb_efficiency          = 2,
-
-    .num_bsd_sessions       = 3,
-    .bsd_service_type       = BsdServiceType_User,
-};
-
-void nxworld_early_init(Handle nxworld_thread) {
-    log_str("before init");
-    envSetup(NULL, nxworld_thread, NULL);
-    newlibSetup();
-    virtmemSetup();
-    __libnx_init_thread();
-    log_str("after init");
-    Result rc;
-    rc = smInitialize();
-    if (R_FAILED(rc)) {
-        log_str("smInitialize failed");
-        diagAbortWithResult(rc);
-    }
-    rc = socketInitialize(&s_socket_init_config);
-    if (R_FAILED(rc)) {
-        log_str("socketInitialize failed");
-        diagAbortWithResult(rc);
-    }
-    log_str("early_init done");
+static void start_thread(void *(*f)(void *), void *ctx) {
+    pthread_attr_t attr;
+    assert(!pthread_attr_init(&attr));
+    assert(!pthread_attr_setstacksize(&attr, 0x4000));
+    pthread_t pt;
+    int create_ret = pthread_create(&pt, &attr, f, ctx);
+    assert(!create_ret);
 }
 
 struct mem_regions {
@@ -76,8 +34,7 @@ private:
         do {
             Result rc = svcQueryMemory(&meminfo, &pageinfo, meminfo.addr + meminfo.size);
             if (R_FAILED(rc)) {
-                log_str("svcQueryMemory failed");
-                diagAbortWithResult(rc);
+                panic("svcQueryMemory failed");
             }
 
             if (meminfo.type != MemType_Unmapped) {
@@ -154,7 +111,7 @@ static size_t safe_memcpy(void *dst, bool check_dst,
     return orig_size - size;
 }
 
-#include "mongoose.h"
+#include "../../externals/mongoose/mongoose.h"
 
 enum rpc_req_type : uint8_t {
     RPC_REQ_READ = 1,
@@ -302,16 +259,12 @@ struct hose {
             close(old);
         }
     }
-    void start_thread() {
-        pthread_attr_t attr;
-        assert(!pthread_attr_init(&attr));
-        assert(!pthread_attr_setstacksize(&attr, 0x4000));
-        pthread_t pt;
-        int create_ret = pthread_create(&pt, &attr, [](void *self) -> void * {
-            ((hose *)self)->thread_func();
-            return nullptr;
-        }, this);
-        assert(!create_ret);
+
+    // reader thread func:
+    void thread_func() {
+        while (1) {
+            do_iter();
+        }
     }
 
     // writer thread func:
@@ -343,11 +296,6 @@ private:
     int cur_fd_{-1};
 
     // reader thread funcs:
-    void thread_func() {
-        while (1) {
-            do_iter();
-        }
-    }
     void do_iter() {
         // pick up new connection if present
         int new_fd = new_fd_.exchange(0, std::memory_order_relaxed);
@@ -464,7 +412,7 @@ private:
     }
 
     void assert_on_write_thread() {
-        xprintf("TODO: thread id %lu\n", cur_thread_id());
+        xprintf("TODO: thread id");// %lu\n", cur_thread_id());
     }
 };
 
@@ -523,7 +471,13 @@ static void serve_mongoose() {
     }
 }
 
-void nxworld_main(Handle nxworld_thread) {
-    s_hose.start_thread();
-    serve_mongoose();
+void serve_main() {
+    start_thread([](void *ignored) -> void * {
+        s_hose.thread_func();
+        return nullptr;
+    }, nullptr);
+    start_thread([](void *ignored) -> void * {
+        serve_mongoose();
+        return nullptr;
+    }, nullptr);
 }

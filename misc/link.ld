@@ -170,4 +170,5 @@ SECTIONS
     /* No need of the interpreter */
     *(.interp)
   }
+
 }

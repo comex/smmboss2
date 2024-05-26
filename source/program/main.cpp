@@ -261,20 +261,8 @@ HOOK_DEFINE_TRAMPOLINE(Stub_gsys_ProcessMeter_measureBeginSystem) {
     }
 };
 
-static Handle s_nxworld_thread_handle;
-alignas(PAGE_SIZE) static u8 s_nxworld_thread_stack[0x8000];
-
-
-static void nxworld_thread_func(void *) {
-    //nxworld_main(s_nxworld_thread_handle);
-    while (1) {
-        svcSleepThread(1000000000);
-    }
-}
-
 static void start_nxworld() {
-    R_ABORT_UNLESS(svcCreateThread(&s_nxworld_thread_handle, (void*)nxworld_thread_func, nullptr, s_nxworld_thread_stack + sizeof(s_nxworld_thread_stack), 0x20, -2));
-    R_ABORT_UNLESS(svcStartThread(s_nxworld_thread_handle));
+    xprintf("%p", pthread_self());
 }
 
 extern "C" void exl_main(void* x0, void* x1) {

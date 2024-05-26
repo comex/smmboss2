@@ -113,27 +113,6 @@ static size_t safe_memcpy(void *dst, bool check_dst,
 
 #include "../../externals/mongoose/mongoose.h"
 
-enum rpc_req_type : uint8_t {
-    RPC_REQ_READ = 1,
-    RPC_REQ_WRITE = 2,
-};
-
-struct rpc_req {
-    enum rpc_req_type type;
-    union {
-        struct {
-            uint64_t addr;
-            uint64_t len;
-            char data[0];
-        } __attribute__((packed)) rw;
-    };
-
-} __attribute__((packed));
-
-enum hose_packet_type : uint8_t {
-    HOSE_PACKET_OVERRUN = 1,
-};
-
 #define offsetof_end(ty, what) \
     (offsetof(ty, what) + sizeof(((ty *)0)->what))
 
@@ -174,71 +153,6 @@ static uint8_t *fill_ws_header(uint8_t *p, size_t size, size_t min_size) {
 }
 
 
-static void handle_rpc_packet(const void *buf, size_t len, struct mg_connection *c) {
-    auto req = (struct rpc_req *)buf;
-    const char *err;
-    if (len < offsetof_end(rpc_req, type)) {
-        err = "too short for type";
-        goto err;
-    }
-    switch (req->type) {
-    case RPC_REQ_READ: {
-        if (len < offsetof_end(rpc_req, rw)) {
-            err = "too short for rw";
-            goto err;
-        }
-        size_t rw_len = req->rw.len;
-        size_t limit = 65536;
-        if (c->send.size < limit) {
-            if (!mg_iobuf_resize(&c->send, limit)) {
-                err = "mg_iobuf_resize failed";
-                goto err;
-            }
-        }
-        size_t full_len = add_ws_header_size(rw_len);
-        if (full_len > c->send.size - c->send.len) {
-            err = "i'm overstuffed";
-            goto err;
-        }
-        uint8_t *header = c->send.buf + c->send.len;
-        uint8_t *past_header = header + (full_len - rw_len);
-        size_t actual = safe_memcpy(past_header, false, (void *)req->rw.addr, true, rw_len);
-        uint8_t *ph = fill_ws_header(header, actual, rw_len);
-        assert(ph == past_header);
-        c->send.len += ph + actual - header;
-        return;
-    }
-
-    case RPC_REQ_WRITE: {
-        if (len < offsetof_end(rpc_req, rw)) {
-            err = "too short for rw";
-            goto err;
-        }
-        if (offsetof_end(rpc_req, rw) - len < req->rw.len) {
-            err = "too short for data";
-            goto err;
-        }
-        safe_memcpy((void *)req->rw.addr, true, req->rw.data, false, req->rw.len);
-        mg_ws_send(c, NULL, 0, WEBSOCKET_OP_BINARY);
-        return;
-    }
-
-    default:
-        err = "unknown req type";
-        goto err;
-    }
-
-err:
-    mg_ws_send(c, err, strlen(err), WEBSOCKET_OP_TEXT);
-    c->is_draining = 1;
-}
-
-enum conn_state : uint8_t {
-    CONN_STATE_DEFAULT = 0, // mongoose zeroes out data by default
-    CONN_STATE_RPC_WEBSOCKET,
-    CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF,
-};
-
 __attribute__((constructor))
 static void ctor_test() {
     log_str("i should be kept");
@@ -278,6 +192,11 @@ struct hose {
     }
 
 private:
+    // protocol:
+    enum hose_packet_type : uint8_t {
+        HOSE_PACKET_OVERRUN = 1,
+    };
+
     // shared data:
     struct write_info {
         uint32_t write_offset;
@@ -418,58 +337,151 @@ private:
 
 static hose s_hose;
 
-struct __attribute__((may_alias)) conn_data {
-    conn_state state;
-        // ...
+struct mongoose_server {
+    void serve() {
+        struct mg_mgr mgr;
+        mg_mgr_init(&mgr);
+        if (!mg_http_listen(&mgr, "http://0.0.0.0:8000", mongoose_callback, this)) {
+            panic("mg_http_listen failed");
+        }
+        if (!mg_wakeup_init(&mgr)) {
+            panic("mg_wakeup_init failed");
+        }
+        while (1) {
+            mg_mgr_poll(&mgr, 1000000);
+        }
+    }
+
+private:
+    enum conn_state : uint8_t {
+        CONN_STATE_DEFAULT = 0, // mongoose zeroes out data by default
+        CONN_STATE_RPC_WEBSOCKET,
+        CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF,
+    };
+
+    struct __attribute__((may_alias)) conn_data {
+        conn_state state;
+        // no more state for now
+    };
+
+    // protocol:
+    enum rpc_req_type : uint8_t {
+        RPC_REQ_READ = 1,
+        RPC_REQ_WRITE = 2,
+    };
+
+    struct rpc_req {
+        enum rpc_req_type type;
+        union {
+            struct {
+                uint64_t addr;
+                uint64_t len;
+                char data[0];
+            } __attribute__((packed)) rw;
+        };
+
+    } __attribute__((packed));
+    // end protocol
+
+    void handle_rpc_packet(const void *buf, size_t len, struct mg_connection *c) {
+        auto req = (struct rpc_req *)buf;
+        const char *err;
+        if (len < offsetof_end(rpc_req, type)) {
+            err = "too short for type";
+            goto err;
+        }
+        switch (req->type) {
+        case RPC_REQ_READ: {
+            if (len < offsetof_end(rpc_req, rw)) {
+                err = "too short for rw";
+                goto err;
+            }
+            size_t rw_len = req->rw.len;
+            size_t limit = 65536;
+            if (c->send.size < limit) {
+                if (!mg_iobuf_resize(&c->send, limit)) {
+                    err = "mg_iobuf_resize failed";
+                    goto err;
+                }
+            }
+            size_t full_len = add_ws_header_size(rw_len);
+            if (full_len > c->send.size - c->send.len) {
+                err = "i'm overstuffed";
+                goto err;
+            }
+            uint8_t *header = c->send.buf + c->send.len;
+            uint8_t *past_header = header + (full_len - rw_len);
+            size_t actual = safe_memcpy(past_header, false, (void *)req->rw.addr, true, rw_len);
+            uint8_t *ph = fill_ws_header(header, actual, rw_len);
+            assert(ph == past_header);
+            c->send.len += ph + actual - header;
+            return;
+        }
+
+        case RPC_REQ_WRITE: {
+            if (len < offsetof_end(rpc_req, rw)) {
+                err = "too short for rw";
+                goto err;
+            }
+            if (offsetof_end(rpc_req, rw) - len < req->rw.len) {
+                err = "too short for data";
+                goto err;
+            }
+            safe_memcpy((void *)req->rw.addr, true, req->rw.data, false, req->rw.len);
+            mg_ws_send(c, NULL, 0, WEBSOCKET_OP_BINARY);
+            return;
+        }
+
+        default:
+            err = "unknown req type";
+            goto err;
+        }
+
+    err:
+        mg_ws_send(c, err, strlen(err), WEBSOCKET_OP_TEXT);
+        c->is_draining = 1;
+    }
+
+    static_assert(sizeof(conn_data) <= MG_DATA_SIZE);
+
+    static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
+        auto self = (mongoose_server *)c->fn_data;
+        self->mongoose_callback_impl(c, ev, ev_data);
+    }
+    void mongoose_callback_impl(struct mg_connection *c, int ev, void *ev_data) {
+        auto cd = (conn_data *)c->data;
+        if (ev == MG_EV_HTTP_MSG) {  // New HTTP request received
+            struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+            if (mg_match(hm->uri, mg_str("/ws/hose"), NULL)) {
+                mg_ws_upgrade(c, hm, NULL);
+                cd->state = CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF;
+            } else if (mg_match(hm->uri, mg_str("/ws/rpc"), NULL)) {
+                mg_ws_upgrade(c, hm, NULL);
+                cd->state = CONN_STATE_RPC_WEBSOCKET;
+            } else {
+                mg_http_reply(c, 404, "", "not found");
+            }
+        } else if (ev == MG_EV_WRITE) {
+            if (cd->state == CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF &&
+                c->send.len == 0) {
+                s_hose.push_fd((int)(uintptr_t)c->fd);
+                c->fd = nullptr;
+                mg_close_conn(c);
+                return;
+            }
+        } else if (ev == MG_EV_WS_MSG) {
+            if (cd->state != CONN_STATE_RPC_WEBSOCKET) {
+                // did we get a websocket message from a hose connection?
+                c->is_draining = 1;
+                return;
+            }
+            struct mg_ws_message *wm = (struct mg_ws_message *)ev_data;
+            handle_rpc_packet(wm->data.buf, wm->data.len, c);
+        }
+    }
 };
 
-static_assert(sizeof(conn_data) <= MG_DATA_SIZE);
-
-static void mongoose_callback(struct mg_connection *c, int ev, void *ev_data) {
-    auto cd = (conn_data *)c->data;
-    if (ev == MG_EV_HTTP_MSG) {  // New HTTP request received
-        struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-        if (mg_match(hm->uri, mg_str("/ws/hose"), NULL)) {
-            mg_ws_upgrade(c, hm, NULL);
-            cd->state = CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF;
-        } else if (mg_match(hm->uri, mg_str("/ws/rpc"), NULL)) {
-            mg_ws_upgrade(c, hm, NULL);
-            cd->state = CONN_STATE_RPC_WEBSOCKET;
-        } else {
-            mg_http_reply(c, 404, "", "not found");
-        }
-    } else if (ev == MG_EV_WRITE) {
-        if (cd->state == CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF &&
-            c->send.len == 0) {
-            s_hose.push_fd((int)(uintptr_t)c->fd);
-            c->fd = nullptr;
-            mg_close_conn(c);
-            return;
-        }
-    } else if (ev == MG_EV_WS_MSG) {
-        if (cd->state != CONN_STATE_RPC_WEBSOCKET) {
-            // did we get a websocket message from a hose connection?
-            c->is_draining = 1;
-            return;
-        }
-        struct mg_ws_message *wm = (struct mg_ws_message *)ev_data;
-        handle_rpc_packet(wm->data.buf, wm->data.len, c);
-    }
-}
-
-static void serve_mongoose() {
-    struct mg_mgr mgr;
-    mg_mgr_init(&mgr);
-    if (!mg_http_listen(&mgr, "http://0.0.0.0:8000", mongoose_callback, NULL)) {
-        panic("mg_http_listen failed");
-    }
-    if (!mg_wakeup_init(&mgr)) {
-        panic("mg_wakeup_init failed");
-    }
-    while (1) {
-        mg_mgr_poll(&mgr, 1000000);
-    }
-}
+static mongoose_server s_mongoose_server;
 
 void serve_main() {
     start_thread([](void *ignored) -> void * {
@@ -477,7 +489,7 @@ void serve_main() {
         return nullptr;
     }, nullptr);
     start_thread([](void *ignored) -> void * {
-        serve_mongoose();
+        s_mongoose_server.serve();
         return nullptr;
     }, nullptr);
 }

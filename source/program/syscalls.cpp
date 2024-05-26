@@ -2,6 +2,38 @@
 #include <sys/lock.h>
 #include <sys/iosupport.h>
 
+namespace nn {
+    namespace os {
+        namespace detail {
+            struct InternalCriticalSection;
+            struct InternalCriticalSectionImplByHorizon : public InternalCriticalSection {
+                void Enter();
+                bool TryEnter();
+                void Leave();
+
+                _LOCK_T lock;
+                static inline InternalCriticalSectionImplByHorizon *_from_lock(_LOCK_T *lock) {
+                    return (InternalCriticalSectionImplByHorizon *)lock;
+                }
+            };
+            struct TimeoutHelper {
+            };
+            struct InternalConditionVariableImplByHorizon {
+                void Signal();
+                void Broadcast();
+                void Wait(InternalCriticalSection *);
+                bool TimedWait(InternalCriticalSection *, const TimeoutHelper &);
+                
+                _COND_T cond;
+                static inline InternalConditionVariableImplByHorizon *_from_cond(_COND_T *cond) {
+                    return (InternalConditionVariableImplByHorizon *)cond;
+                }
+            };
+        }
+    }
+}
+                
+
 extern "C" {
 
 struct sdk_pthread_t;
@@ -23,42 +55,43 @@ int sdk_pthread_detach(sdk_pthread_t *);
 int sdk_pthread_attr_init(sdk_pthread_t *);
 int sdk_pthread_attr_setstack(sdk_pthread_t *, void *, size_t);
 
-int sdk_pthread_mutex_init(sdk_pthread_mutex_t *, const sdk_pthread_mutexattr_t *);
-
 void __syscall_exit(int rc) {
     sdk_exit(rc);
 }
 struct _reent* __syscall_getreent(void) {
     panic("TODO");
 }
-void __syscall_lock_acquire(sdk_pthread_mutex_t *lock) {
+void __syscall_lock_acquire(_LOCK_T *lock) {
+    nn::os::detail::InternalCriticalSectionImplByHorizon::_from_lock(lock).Enter();
+}
+int __syscall_lock_try_acquire(_LOCK_T *lock) {
+    return !nn::os::detail::InternalCriticalSectionImplByHorizon::_from_lock(lock).TryEnter();
+}
+void __syscall_lock_release(_LOCK_T *lock) {
+    nn::os::detail::InternalCriticalSectionImplByHorizon::_from_lock(lock).Leave();
+}
+void __syscall_lock_acquire_recursive(_LOCK_T *lock) {
     panic("TODO");
 }
-int __syscall_lock_try_acquire(sdk_pthread_mutex_t *lock) {
+int __syscall_lock_try_acquire_recursive(_LOCK_T *lock) {
     panic("TODO");
 }
-void __syscall_lock_release(sdk_pthread_mutex_t *lock) {
+void __syscall_lock_release_recursive(_LOCK_T *lock) {
     panic("TODO");
 }
-void __syscall_lock_acquire_recursive(sdk_pthread_mutex_t *lock) {
-    panic("TODO");
+int __syscall_cond_signal(_COND_T *cond) {
+    nn::os::detail::InternalConditionVariableImplByHorizon::_from_cond(cond).Signal();
+    return 0;
 }
-int __syscall_lock_try_acquire_recursive(sdk_pthread_mutex_t *lock) {
-    panic("TODO");
+int __syscall_cond_broadcast(_COND_T *cond) {
+    nn::os::detail::InternalConditionVariableImplByHorizon::_from_cond(cond).Broadcast();
+    return 0;
 }
-void __syscall_lock_release_recursive(sdk_pthread_mutex_t *lock) {
-    panic("TODO");
+int __syscall_cond_wait(_COND_T *cond, _LOCK_T *lock, uint64_t timeout_ns) {
+    nn::os::detail::InternalConditionVariableImplByHorizon::_from_cond(cond).Wait();
+    return 0;
 }
-int __syscall_cond_signal(sdk_pthread_cond_t *cond) {
-    panic("TODO");
-}
-int __syscall_cond_broadcast(sdk_pthread_cond_t *cond) {
-    panic("TODO");
-}
-int __syscall_cond_wait(sdk_pthread_cond_t *cond, sdk_pthread_mutex_t *lock, uint64_t timeout_ns) {
-    panic("TODO");
-}
-int __syscall_cond_wait_recursive(sdk_pthread_cond_t *cond, sdk_pthread_mutex_t *lock, uint64_t timeout_ns) {
+int __syscall_cond_wait_recursive(_COND_T *cond, _LOCK_T *lock, uint64_t timeout_ns) {
     panic("TODO");
 }
 sdk_pthread_t *__syscall_thread_self(void) {

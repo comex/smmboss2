@@ -63,6 +63,9 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) asm("nns
 int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) asm("nnsocketAccept");
 int setsockopt(int sockfd, int level, int optname, const void *optval, socklen_t optlen) asm("nnsocketSetSockOpt");
 
+int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *errorfds, struct timeval *timeout) asm("nnsocketSelect");
+_Static_assert(sizeof(struct fd_set) == 0x80, "did -DFD_SETSIZE=1024 not work?");
+
 int *___errno_location();
 #define MG_SOCKET_ERRNO *___errno_location()
 

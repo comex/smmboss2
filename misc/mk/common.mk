@@ -42,7 +42,7 @@ CFLAGS	:=	-g -Wall -Werror -O3 \
 			$(ARCH) \
 			$(DEFINES)
 
-CFLAGS	+=	$(INCLUDE) -D__SWITCH__ -D__RTLD_6XX__
+CFLAGS	+=	$(INCLUDE) -D__SWITCH__ -D__RTLD_6XX__ -DFD_SETSIZE=1024
 
 CFLAGS	+= $(EXL_CFLAGS) -I"$(DEVKITPRO)/libnx/include" -I$(ROOT_SOURCE) $(addprefix -I,$(MODULES))
 

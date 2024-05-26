@@ -5,19 +5,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <mutex>
-
-#undef assert
-
-#define panic(...) do { \
-    xprintf(__VA_ARGS__); \
-    diagAbortWithResult(MAKERESULT(444, 444)); \
-} while (0)
-
-#define assert(expr) do { \
-    if (!(expr)) { \
-        panic("assertion failed: %s", #expr); \
-    } \
-} while (0)
+#include "stuff.hpp
 
 extern "C" {
     void virtmemSetup(void);

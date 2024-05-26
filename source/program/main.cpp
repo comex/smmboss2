@@ -1,6 +1,5 @@
 #include "lib.hpp"
 #include <stdarg.h>
-#include "nxworld_main.hpp"
 #include "nn/os/os_thread_api.hpp"
 
 namespace nn::diag::detail {
@@ -267,7 +266,7 @@ alignas(PAGE_SIZE) static u8 s_nxworld_thread_stack[0x8000];
 
 
 static void nxworld_thread_func(void *) {
-    nxworld_main(s_nxworld_thread_handle);
+    //nxworld_main(s_nxworld_thread_handle);
     while (1) {
         svcSleepThread(1000000000);
     }

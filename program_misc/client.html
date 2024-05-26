@@ -71,17 +71,41 @@ class Lock {
   }
 }
 
+class Throttle {
+  constructor(name, defaultDelay = 100) {
+    this.defaultDelay = defaultDelay;
+    this.name = name;
+    this.reset();
+  }
+  reset() {
+    this.delay = this.defaultDelay;
+  }
+  then(f, r) {
+    let delay = this.delay;
+    this.delay *= 2;
+    console.log(`Throttle "${this.name}" waiting for ${delay} ms`);
+    return sleep(delay).then(f, r);
+  }
+}
+
 class WSWrapper {
   constructor() {
-    this.reopenDelay = 1;
+    this.openThrottle = new Throttle('open');
     this.openWS();
   }
   openWS() {
     let ws = new WebSocket('ws://127.0.0.1:8002/ws/rpc');
     this.ws = ws;
+    ws.binaryType = 'arraybuffer';
     ws.onopen = (e) => {
       assert(this.ws === ws);
       this.onOpen(e);
+      // if it doesn't close quickly, then reset throttle
+      setTimeout(() => {
+        if (this.ws === ws) {
+          this.openThrottle.reset();
+        }
+      }, 1000);
     };
     ws.onmessage = (e) => {
       assert(this.ws === ws);
@@ -90,11 +114,11 @@ class WSWrapper {
     ws.onclose = (e) => {
       this.onClose(e);
       assert(this.ws === ws);
-      setTimeout(() => {
-        assert(this.ws === ws);
+      this.ws = null;
+      (async () => {
+        await this.openThrottle;
         this.openWS();
-      }, this.reopenDelay);
-      this.reopenDelay *= 2;
+      })();
     };
   }
 }
@@ -105,6 +129,9 @@ class RPCConn extends WSWrapper {
     this.responseHandler = null;
     this.isOpen = false;
     this.openCond = new Cond;
+    this.pendingResponse = null;
+    this.pendingResponseCond = new Cond;
+    this.rpcThrottle = new Throttle('rpc');
   }
   onOpen(e) {
     console.log(`onOpen: ${e}`);
@@ -113,46 +140,76 @@ class RPCConn extends WSWrapper {
   }
   onMessage(e) {
     console.log(`onMessage: ${e}`);
-    if (this.responseHandler === null) {
-      console.log(`unexpected message: ${e}`);
-    } else {
-      this.responseHandler(e);
-    }
+    assert(this.requestLock.locked);
+    this.pendingResponse = e;
+    this.pendingResponseCond.broadcast();
   }
   onClose(e) {
     console.log(`onClose: ${e}`);
     this.isOpen = false;
+    this.pendingResponseCond.broadcast();
   }
-  async rawRequest(data) {
-    let cont = true;
-    while (cont) {
-      await this.requestLock.lock();
-      cont = false;
-      await this.requestLock.with(async (dropRequestLock) => {
+  async rawRequest(req) {
+    let resp = null;
+    while (1) {
+      await this.requestLock.with(async () => {
         if (!this.isOpen) {
           console.log('RPC waiting for open');
-          dropRequestLock();
-          await this.openCond;
-          cont = true;
           return;
         }
 
-        let { promise, resolve, reject } = Promise.withResolvers();
-        assert(this.responseHandler === null);
-        this.responseHandler = resolve;
-        try {
-          await promise;
-        } finally {
-          this.responseHandler = null;
+        this.ws.send(req);
+        this.pendingResponse = null;
+        while (this.isOpen && this.pendingResponse === null) {
+          await this.pendingResponseCond;
         }
+        if (!this.isOpen) {
+          console.log('RPC waiting for re-open');
+          return;
+        }
+
+        resp = this.pendingResponse.data;
+        assert(resp !== null);
+        if (typeof resp == 'string') {
+          console.log(`RPC got error: '${resp}'`);
+          await this.rpcThrottle;
+          return;
+        }
+        this.rpcThrottle.reset();
+        console.log(`RPC got good response: ${resp}`);
       });
+      if (resp instanceof ArrayBuffer) {
+        return resp.data;
+      }
+      if (!this.isOpen) {
+        await this.openCond;
+      }
     }
+  }
+  async reqRead(addr, len) {
+    let dv = new DataView(new ArrayBuffer(17));
+    dv.setInt8(0, 1); // RPC_REQ_READ
+    dv.setBigUint64(1, addr, true);
+    dv.setBigUint64(9, BigInt(len), true);
+    return await this.rawRequest(dv);
+  }
+  async reqWrite(addr, data) {
+    assert(ArrayBuffer.isView(data));
+    let headerLen = 17;
+    let ab = new ArrayBuffer(headerLen + data.byteLength);
+    new Uint8Array(ab, headerLen).set(new Uint8Array(data));
+    let dv = new DataView(ab);
+    dv.setInt8(0, 2); // RPC_REQ_WRITE
+    dv.setBigUint64(1, addr, true);
+    dv.setBigUint64(9, BigInt(data.length), true);
+    return await this.rawRequest(ab);
   }
 }
 
 async function go() {
   let conn = new RPCConn();
-  conn.rawRequest(32);
+  let data = await conn.reqRead(0x1234n, 40);
+  console.log(data);
 }
 go();
 </script>

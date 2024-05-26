@@ -28,7 +28,7 @@ struct sdk_pthread_attr_t {
 };
 typedef uint32_t sdk_pthread_key_t;
 
-SDK_ALIAS(pthread_exit);
+SDK_ALIAS(exit);
 void sdk_exit(int rc);
 
 SDK_ALIAS(pthread_self);

@@ -1,6 +1,6 @@
 #include "lib.hpp"
+#include "serve.hpp"
 #include <stdarg.h>
-#include "nn/os/os_thread_api.hpp"
 
 namespace nn::diag::detail {
     int PrintDebugString(const char *);
@@ -69,10 +69,6 @@ void xprintf(const char *fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     log_str(buf);
-}
-
-uint64_t cur_thread_id() {
-    return nn::os::GetThreadId(nn::os::GetCurrentThread());
 }
 
 static const char *get_state_name(struct statemgr *smgr, int state) {
@@ -261,16 +257,12 @@ HOOK_DEFINE_TRAMPOLINE(Stub_gsys_ProcessMeter_measureBeginSystem) {
     }
 };
 
-static void start_nxworld() {
-    xprintf("%p", pthread_self());
-}
-
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
     log_str("exl_main");
     exl::hook::Initialize();
 
-    start_nxworld();
+    serve_main();
 
     // this is for 3.0.1:
 

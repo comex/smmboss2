@@ -11,6 +11,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/fcntl.h>
+#include <sys/cdefs.h>
+
+__BEGIN_DECLS
 
 typedef uint32_t socklen_t; // check
 typedef uint8_t sa_family_t; // check
@@ -69,3 +72,5 @@ _Static_assert(sizeof(struct fd_set) == 0x80, "did -DFD_SETSIZE=1024 not work?")
 int *___errno_location();
 #define MG_SOCKET_ERRNO *___errno_location()
 
+
+__END_DECLS

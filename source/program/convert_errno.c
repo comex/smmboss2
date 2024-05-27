@@ -1,4 +1,4 @@
-// Copied from libnx.
+// Copied from libnx, but modified to translate 0 to 0.
 
 #define __LINUX_ERRNO_EXTENSIONS__
 #include <errno.h>
@@ -160,7 +160,7 @@ static unsigned char _error_code_map[] = {
 int _convert_errno(int bsdErrno)
 {
 
-    if (bsdErrno < 0 || bsdErrno >= sizeof(_error_code_map) || _error_code_map[bsdErrno] == 0)
+    if (bsdErrno < 0 || bsdErrno >= sizeof(_error_code_map))
 		return _UNKNOWN_ERROR_OFFSET + bsdErrno;
 
 	return _error_code_map[bsdErrno];

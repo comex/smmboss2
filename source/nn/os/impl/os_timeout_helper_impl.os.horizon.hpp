@@ -21,7 +21,7 @@ namespace nn::os::detail {
 
     using TargetTimeSpan = ::nn::TimeSpan;
 
-    class TimeoutHelperImpl {
+    class TimeoutHelperImplByHorizon {
         public:
             static TargetTimeSpan ConvertToImplTime(Tick tick) {
                 return detail::GetTickManager().ConvertToTimeSpan(tick);

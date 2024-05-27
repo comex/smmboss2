@@ -491,18 +491,32 @@ private:
             handle_rpc_packet(wm->data.buf, wm->data.len, c);
         } else if (ev == MG_EV_WS_OPEN) {
             if (cd->state == CONN_STATE_RPC_WEBSOCKET) {
-                rpc_hello_resp hello = {
-                    .target_start = exl::util::modules::GetTargetStart(),
-                };
-                mg_ws_send(c, &hello, sizeof(hello), WEBSOCKET_OP_BINARY);
+                send_hello(c);
             }
         }
+    }
+    void send_hello(struct mg_connection *c) {
+        std::vector<uint64_t> info;
+        for (int i = 0; i < exl::util::mem_layout::s_ModuleCount; i++) {
+            const exl::util::ModuleInfo &mod_info = exl::util::GetModuleInfo(i);
+            auto do_range = [&](exl::util::Range range) {
+                info.push_back(range.m_Start);
+                info.push_back(range.m_Size);
+            };
+            do_range(mod_info.m_Total);
+            do_range(mod_info.m_Text);
+            do_range(mod_info.m_Rodata);
+            do_range(mod_info.m_Data);
+        }
+        mg_ws_send(c, info.data(), info.size() * sizeof(info[0]), WEBSOCKET_OP_BINARY);
     }
 };
 
 static mongoose_server s_mongoose_server;
 
 void serve_main() {
+    return;
+    assert(!nnsocketInitialize());
     s_main_thread = pthread_self();
     start_thread([](void *ignored) -> void * {
         s_hose.thread_func();

@@ -259,7 +259,7 @@ HOOK_DEFINE_TRAMPOLINE(Stub_gsys_ProcessMeter_measureBeginSystem) {
 
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
-    log_str("exl_main");
+    xprintf("exl_main, TS=%lx", exl::util::modules::GetTargetStart());
     exl::hook::Initialize();
 
     serve_main();

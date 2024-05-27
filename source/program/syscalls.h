@@ -23,19 +23,16 @@ typedef uint8_t sa_family_t;
 #define SOL_SOCKET 0xffff
 #define SO_KEEPALIVE 0x0008
 
-// check
 struct in_addr {
     uint32_t s_addr;
 };
 
-// check
 struct sockaddr {
     unsigned char   sa_len;
     sa_family_t sa_family;
     char        sa_data[14];
 };
 
-// check
 struct sockaddr_in {
     uint8_t sin_len;
     sa_family_t sin_family;
@@ -97,5 +94,7 @@ ERRNO_WRAPPER(static inline, int, accept, nnsocketAccept,
               int, struct sockaddr *, socklen_t *);
 ERRNO_WRAPPER(static inline, int, setsockopt, nnsocketSetSockOpt,
               int, int, int, const void *, socklen_t);
+
+int nnsocketInitialize();
 
 __END_DECLS

@@ -1,3 +1,9 @@
+extern "C" {
+    // This should be the first include!
+    // Work around newlib bug where timespec2nsec is missing
+    // __BEGIN_DECLS/__END_DECLS.
+    #include <sys/_timespec.h>
+}
 #include "stuff.hpp"
 #include "syscalls.h"
 #include <sys/lock.h>
@@ -5,7 +11,6 @@
 #include <sys/fcntl.h>
 #include <unistd.h>
 #include <stdarg.h>
-#include <atomic>
 #include "nn/os/os_condition_variable_common.hpp"
 #include "nn/os/os_thread_type.hpp"
 
@@ -19,6 +24,11 @@ extern "C" {
     asm(".symver sdk_" #sym "," #sym "@")
 
 int *___errno_location();
+
+SDK_ALIAS(calloc);
+void *sdk_calloc(size_t, size_t);
+SDK_ALIAS(free);
+void sdk_free(void *);
 
 SDK_ALIAS(clock_getres);
 int sdk_clock_getres(int clock_id, struct timespec *tp);
@@ -74,24 +84,22 @@ void __syscall_exit(int rc) {
     sdk_exit(rc);
 }
 
-static _LOCK_T _reent_lock;
-static std::atomic<sdk_pthread_key_t> _reent_key;
+static sdk_pthread_key_t _reent_key;
 struct _reent* __syscall_getreent(void) {
-    sdk_pthread_key_t key = _reent_key.load(std::memory_order_acquire);
+    sdk_pthread_key_t key = _reent_key;
     if (!key) {
-        __syscall_lock_acquire(&_reent_lock);
-        key = _reent_key.load(std::memory_order_relaxed);
-        if (!key) {
-            if (__syscall_tls_create(&key, free)) {
-                abort();
-            }
-            _reent_key.store(key, std::memory_order_release);
+        // We haven't initialized yet.  This should be called indirectly from
+        // one of the memory allocations in exl_module_init, so this should be
+        // guaranteed to run on the main thread and not race.
+        if (__syscall_tls_create(&key, sdk_free)) {
+            abort();
         }
-        __syscall_lock_release(&_reent_lock);
+        _reent_key = key;
     }
     auto reent = (struct _reent *)__syscall_tls_get(key);
     if (!reent) {
-        reent = (struct _reent *)calloc(1, sizeof(struct _reent));
+        // Use SDK allocator to avoid infinite recursion.
+        reent = (struct _reent *)sdk_calloc(1, sizeof(struct _reent));
         if (!reent || __syscall_tls_set(key, reent)) {
             abort();
         }
@@ -186,13 +194,10 @@ void __syscall_thread_exit(void *value) {
     sdk_pthread_exit(value);
 }
 int __syscall_thread_create(sdk_pthread_t *thread, void* (*func)(void*), void *arg, void *stack_addr, size_t stack_size) {
-    assert(!!stack_addr == !!stack_size);
     sdk_pthread_attr_t attr;
     assert(!sdk_pthread_attr_init(&attr));
-    if (stack_addr) {
-        assert(!sdk_pthread_attr_setstack(&attr, stack_addr, stack_size));
-    }
-    // no need for attr_destroy
+    assert(!sdk_pthread_attr_setstack(&attr, stack_addr, stack_size));
+    // no need for attr_destroy; it's a no-op
     return _convert_errno(sdk_pthread_create(thread, &attr, func, arg));
 }
 void* __syscall_thread_join(sdk_pthread_t thread) {

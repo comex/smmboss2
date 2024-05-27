@@ -44,7 +44,7 @@ namespace nn::os::detail {
             }
 
             static void Sleep(TimeSpan tm) {
-                TimeoutHelperImpl::Sleep(tm);
+                TimeoutHelperImplByHorizon::Sleep(tm);
             }
 
             bool TimedOut() const {

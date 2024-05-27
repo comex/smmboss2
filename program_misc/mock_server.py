@@ -14,7 +14,7 @@ async def serve_rpc(websocket):
         header_fmt = '<BQQ'
         header_len = struct.calcsize(header_fmt)
         assert len(message) >= header_len
-        ty, rw_addr, rw_len = struct.unpack(header_fmt, message)
+        ty, rw_addr, rw_len = struct.unpack(header_fmt, message[:header_len])
         if ty == 1: # RPC_REQ_READ
             assert len(message) == header_len
             print(f'...read addr={rw_addr:#x} len={rw_len:#x}')
@@ -28,7 +28,7 @@ async def serve_rpc(websocket):
             assert len(message) == header_len + rw_len
             body = message[header_len:]
             print(f'...write addr={rw_addr:#x} content={body}')
-            await websocket.send(b'');
+            await websocket.send(struct.pack('<Q', len(body)))
 
 async def serve_hose(websocket):
     while True:

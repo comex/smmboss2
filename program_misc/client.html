@@ -10,11 +10,18 @@ function sleep(n) {
   return promise;
 }
 
-function doRead(addr, len) {
-  return theRPCConn.reqRead(addr, len);
+async function doRead(addr, len) {
+  let resp = await theRPCConn.reqRead(addr, len);
+  if (resp.byteLength < len) {
+    throw new Error(`short read addr=${addr} len=${len} actual=${resp.byteLength}`);
+  }
+  return resp;
 }
-function doWrite(addr, data) {
-  return theRPCConn.reqWrite(addr, data);
+async function doWrite(addr, data) {
+  let [actual, len] = await theRPCConn.reqWrite(addr, data);
+  if (actual < len) {
+    throw new Error(`short write addr=${addr} len=${len} actual=${actual}`);
+  }
 }
 
 class BaseType {}
@@ -39,7 +46,7 @@ class IntBaseType extends BaseType {
       return getLocal(dv, 0);
     };
     let setRemote = (addr, val) => {
-      let dv = new DataView(size);
+      let dv = new DataView(new ArrayBuffer(size));
       setLocal(dv, 0, val);
       return doWrite(addr, dv);
     };
@@ -126,8 +133,8 @@ class Struct {
         argVals.push(ty.getRemote, ty.setRemote);
         let setterName = 'set' + fieldName[0].toUpperCase() + fieldName.slice(1);
         code += `
-          ${fieldName}() { return getRemote_${fieldName}(this.addr + ${off}); }
-          ${setterName}(val) { return setRemote_${fieldName}(this.addr + ${off}, val); }
+          ${fieldName}() { return getRemote_${fieldName}(this.addr + ${off}n); }
+          ${setterName}(val) { return setRemote_${fieldName}(this.addr + ${off}n, val); }
         `
       } else {
         assert(false);
@@ -332,6 +339,7 @@ class RPCConn {
         }
       }
 
+      console.log(`sending ${req.byteLength} ${req}`);
       this.wsw.ws.send(req);
       let haveResponse = false;
       let response = null;
@@ -365,21 +373,25 @@ class RPCConn {
   async reqRead(addr, len) {
     let dv = new DataView(new ArrayBuffer(17));
     dv.setInt8(0, 1); // RPC_REQ_READ
-    dv.setBigUint64(1, BigInt(addr), true);
+    dv.setBigUint64(1, addr, true);
     dv.setBigUint64(9, BigInt(len), true);
     return await this.rawRequest(dv);
-
   }
   async reqWrite(addr, data) {
     assert(ArrayBuffer.isView(data));
     let headerLen = 17;
-    let ab = new ArrayBuffer(headerLen + data.byteLength);
-    new Uint8Array(ab, headerLen).set(new Uint8Array(data));
+    let len = data.byteLength;
+    let ab = new ArrayBuffer(headerLen + len);
+    new Uint8Array(ab, headerLen).set(new Uint8Array(data.buffer, data.byteOffset, len));
     let dv = new DataView(ab);
     dv.setInt8(0, 2); // RPC_REQ_WRITE
     dv.setBigUint64(1, addr, true);
-    dv.setBigUint64(9, BigInt(data.length), true);
-    return await this.rawRequest(ab);
+    dv.setBigUint64(9, BigInt(len), true);
+    let resp = await this.rawRequest(dv);
+    assert(resp.byteLength == 8);
+    let actual = resp.getBigUint64(0, true);
+    assert(actual <= len);
+    return [actual, len];
   }
 }
 
@@ -426,8 +438,10 @@ async function test() {
   rl.rw_addr = 0x41414141;
   console.log(rl.rw_addr);
   console.log(rl.dummy);
-  let rr = new rpc_req.Remote(0x1000);
+  let rr = new rpc_req.Remote(0x1000n);
   console.log(await rr.rw_len());
+  await rr.setRw_len(99);
+  console.log('all done');
 }
 test();
 </script>

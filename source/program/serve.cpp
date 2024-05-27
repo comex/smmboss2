@@ -380,7 +380,6 @@ private:
 
     struct rpc_hello_resp {
         uint64_t target_start;
-
     } __attribute__((packed));
 
     struct rpc_req {
@@ -440,8 +439,8 @@ private:
                 err = "too short for data";
                 goto err;
             }
-            safe_memcpy((void *)req->rw.addr, true, req->rw.data, false, req->rw.len);
-            mg_ws_send(c, NULL, 0, WEBSOCKET_OP_BINARY);
+            size_t actual = safe_memcpy((void *)req->rw.addr, true, req->rw.data, false, req->rw.len);
+            mg_ws_send(c, &actual, sizeof(actual), WEBSOCKET_OP_BINARY);
             return;
         }
 

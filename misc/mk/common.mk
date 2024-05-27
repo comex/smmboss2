@@ -42,13 +42,16 @@ CFLAGS	:=	-g -Wall -Werror -O3 \
 			$(ARCH) \
 			$(DEFINES)
 
-CFLAGS	+=	$(INCLUDE) -D__SWITCH__ -D__RTLD_6XX__ -DFD_SETSIZE=1024
+# note (comex): added -gdwarf-4 to use an earlier DWARF version, because
+# otherwise I get a bad backtrace in GDB for some reason :(
+
+CFLAGS	+=	$(INCLUDE) -D__SWITCH__ -D__RTLD_6XX__ -gdwarf-4
 
 CFLAGS	+= $(EXL_CFLAGS) -I"$(DEVKITPRO)/libnx/include" -I$(ROOT_SOURCE) $(addprefix -I,$(MODULES))
 
 CXXFLAGS	:= $(CFLAGS) $(EXL_CXXFLAGS) -fno-rtti -fno-exceptions -fno-asynchronous-unwind-tables -fno-unwind-tables -std=gnu++20
 
-ASFLAGS	:=	-g $(ARCH)
+ASFLAGS	:=	-g $(ARCH) -gdwarf-4
 LDFLAGS	:=  -specs=$(SPECS_PATH)/$(SPECS_NAME) -g $(ARCH) -Wl,-Map,$(notdir $*.map) -nostartfiles
 
 LIBS	:=

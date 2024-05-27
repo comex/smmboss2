@@ -1,5 +1,7 @@
 #pragma once
 #define MG_ARCH MG_ARCH_CUSTOM
+#define MG_ENABLE_POLL 1
+#define MG_ENABLE_LOG 0
 
 #include "syscalls.h"
 #include <stdint.h>

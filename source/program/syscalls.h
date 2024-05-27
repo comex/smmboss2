@@ -1,7 +1,6 @@
 #pragma once
 #include "convert_errno.h"
 #include <sys/cdefs.h>
-#include <sys/select.h>
 #include <sys/types.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -21,6 +20,7 @@ typedef uint8_t sa_family_t;
 #define TCP_NODELAY 1
 
 #define SOL_SOCKET 0xffff
+#define SO_REUSEADDR 0x0004
 #define SO_KEEPALIVE 0x0008
 
 struct in_addr {
@@ -40,6 +40,26 @@ struct sockaddr_in {
     struct  in_addr sin_addr;
     char    sin_zero[8];
 };
+
+typedef unsigned int nfds_t;
+
+struct pollfd {
+    int fd;
+    short   events;
+    short   revents;
+};
+
+#define POLLIN      0x0001
+#define POLLPRI     0x0002
+#define POLLOUT     0x0004
+#define POLLRDNORM  0x0040
+#define POLLWRNORM  POLLOUT
+#define POLLRDBAND  0x0080
+#define POLLWRBAND  0x0100
+#define POLLERR     0x0008
+#define POLLHUP     0x0010
+#define POLLNVAL    0x0020
+
 
 int *___errno_location();
 
@@ -70,6 +90,7 @@ int *___errno_location();
 
 
 // Wrappers for functions that devkitA64 headers do not define:
+// TODO: might want to switch to a custom implementation
 ERRNO_WRAPPER(static inline, int, getsockname, nnsocketGetSockName,
               int, struct sockaddr *, socklen_t *);
 ERRNO_WRAPPER(static inline, ssize_t, send, nnsocketSend,
@@ -94,7 +115,9 @@ ERRNO_WRAPPER(static inline, int, accept, nnsocketAccept,
               int, struct sockaddr *, socklen_t *);
 ERRNO_WRAPPER(static inline, int, setsockopt, nnsocketSetSockOpt,
               int, int, int, const void *, socklen_t);
+ERRNO_WRAPPER(static inline, int, poll, nnsocketPoll,
+              struct pollfd *, nfds_t, int);
 
-int nnsocketInitialize();
+int nnsocketInitialize(void *tmem, uint64_t tmem_end_offset, uint64_t tmem_start_offset, int max_sess);
 
 __END_DECLS

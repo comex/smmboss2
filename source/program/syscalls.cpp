@@ -259,10 +259,6 @@ int __syscall_nanosleep(const struct timespec *req, struct timespec *rem) {
 }
 
 // Wrappers for functions that devkitA64 headers do define:
-_Static_assert(sizeof(struct fd_set) == 0x80, "did -DFD_SETSIZE=1024 not work?");
-ERRNO_WRAPPER(, int, select, nnsocketSelect,
-              int, fd_set *, fd_set *, fd_set *, struct timeval *);
-
 ERRNO_WRAPPER(, int, close, nnsocketClose,
               int);
 

@@ -33,6 +33,7 @@ private:
 
         MemoryInfo meminfo{};
         u32 pageinfo;
+        constexpr bool debug = false;
 
         do {
             Result rc = svcQueryMemory(&meminfo, &pageinfo, meminfo.addr + meminfo.size);
@@ -40,17 +41,32 @@ private:
                 panic("svcQueryMemory failed");
             }
 
-            if (meminfo.type != MemType_Unmapped) {
-                cached_regions_.push_back(region{
-                    .start = meminfo.addr,
-                    .size = meminfo.size,
-                    .perm = meminfo.perm,
-                });
-            }
-            if (0) {
+            if (debug) {
                 xprintf("addr:%lx size:%lx type:%x attr:%x perm:%x\n",
                         meminfo.addr, meminfo.size, meminfo.type, meminfo.attr, meminfo.perm);
             }
+            if (meminfo.type == MemType_Unmapped) {
+                if (debug) {
+                    xprintf("    ...ignoring");
+                }
+                continue;
+            }
+            if (!cached_regions_.empty()) {
+                auto &last = cached_regions_.back();
+                if (last.perm == meminfo.perm &&
+                    last.start + last.size == meminfo.addr) {
+                    last.size += meminfo.size;
+                    if (debug) {
+                        xprintf("    ...absorbing");
+                    }
+                    continue;
+                }
+            }
+            cached_regions_.push_back(region{
+                .start = meminfo.addr,
+                .size = meminfo.size,
+                .perm = meminfo.perm,
+            });
         } while(meminfo.addr + meminfo.size != 0);
     }
 
@@ -58,7 +74,7 @@ private:
         auto it = std::lower_bound(
             cached_regions_.begin(), cached_regions_.end(), addr,
             [](const region &a, uintptr_t addr) {
-                return a.start < addr;
+                return a.start + a.size <= addr;
             }
         );
         if (it != cached_regions_.end() &&
@@ -110,6 +126,7 @@ static size_t safe_memcpy(void *dst, bool check_dst,
         memcpy(dst, src, cur_size);
         dst = (char *)dst + cur_size;
         src = (const char *)src + cur_size;
+        size -= cur_size;
     }
     return orig_size - size;
 }
@@ -137,7 +154,7 @@ constexpr static size_t add_ws_header_size(size_t size) {
 
 static uint8_t *fill_ws_header(uint8_t *p, size_t size, size_t min_size) {
     // fill out websocket frame header.  based on mkhdr.
-    assert(size >= min_size);
+    assert(size <= min_size);
     p[0] = WEBSOCKET_OP_BINARY | 128;
     if (min_size < 126) {
         p[1] = (uint8_t)size;
@@ -220,7 +237,7 @@ private:
     // reader thread funcs:
     void do_iter() {
         // pick up new connection if present
-        int new_fd = new_fd_.exchange(0, std::memory_order_relaxed);
+        int new_fd = new_fd_.exchange(-1, std::memory_order_relaxed);
         if (new_fd != -1) {
             if (cur_fd_ != -1) {
                 close(cur_fd_);
@@ -347,6 +364,10 @@ static hose s_hose;
 
 struct mongoose_server {
     void serve() {
+#if MG_ENABLE_LOG
+        setup_log();
+#endif
+
         struct mg_mgr mgr;
         mg_mgr_init(&mgr);
         if (!mg_http_listen(&mgr, "http://0.0.0.0:8000", mongoose_callback, this)) {
@@ -377,10 +398,6 @@ private:
         RPC_REQ_READ = 1,
         RPC_REQ_WRITE = 2,
     };
-
-    struct rpc_hello_resp {
-        uint64_t target_start;
-    } __attribute__((packed));
 
     struct rpc_req {
         enum rpc_req_type type;
@@ -435,8 +452,8 @@ private:
                 err = "too short for rw";
                 goto err;
             }
-            if (offsetof_end(rpc_req, rw) - len < req->rw.len) {
-                err = "too short for data";
+            if (offsetof_end(rpc_req, rw) - len != req->rw.len) {
+                err = "wrong size for data";
                 goto err;
             }
             size_t actual = safe_memcpy((void *)req->rw.addr, true, req->rw.data, false, req->rw.len);
@@ -510,13 +527,29 @@ private:
         }
         mg_ws_send(c, info.data(), info.size() * sizeof(info[0]), WEBSOCKET_OP_BINARY);
     }
+
+    void setup_log() {
+        mg_log_set(MG_LL_DEBUG);
+        mg_log_set_fn([](char c, void *) {
+            static std::string line;
+            if (c == '\n') {
+                log_str(line.c_str());
+                line.clear();
+            } else {
+                line.push_back(c);
+            }
+        }, nullptr);
+    }
 };
 
 static mongoose_server s_mongoose_server;
 
+static char s_socket_heap[0x600000] alignas(0x1000);
 void serve_main() {
-    return;
-    assert(!nnsocketInitialize());
+    int e = nnsocketInitialize(s_socket_heap, sizeof(s_socket_heap), 0x20000, 0xe);
+    if (e) {
+        panic("nnsocketInitialize failed: %x", e);
+    }
     s_main_thread = pthread_self();
     start_thread([](void *ignored) -> void * {
         s_hose.thread_func();

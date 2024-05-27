@@ -10,6 +10,172 @@ function sleep(n) {
   return promise;
 }
 
+class BaseType {
+  constructor(name, dataViewName, {needBigWrap} = {}) {
+    this.name = name;
+    let getLocal = new Function('dv', 'off', `return dv.get${dataViewName}(off, true);`);
+    let xval = needBigWrap ? 'BigInt(val)' : 'val';
+    let setLocal = new Function('dv', 'off', 'val', `return dv.set${dataViewName}(off, {xval}, true);`);
+
+    let size = parseInt(name.slice(1)) / 8;
+    let getRemote = async (addr) => {
+      let dv = await doRead(addr, size);
+      return getLocal(dv, 0);
+    };
+    let setRemote = (addr, val) => {
+      let dv = new DataView(size);
+      setLocal(dv, 0, val);
+      return doWrite(addr, dv);
+    };
+
+    this.getLocal = getLocal;
+    this.getRemote = getRemote;
+    this.setLocal = setLocal;
+    this.setRemote = setRemote;
+
+    this.getLocalBinder = function(offset) {
+      return getLocal(this.dv, offset);
+    }
+    this.setLocalBinder = function(offset, val) {
+      return setLocal(this.dv, offset, val);
+    }
+    this.getRemoteBinder = function(offset) {
+      return getRemote(this.addr + offset);
+    }
+    this.setRemoteBinder = function(offset, val) {
+      return setRemote(this.addr + offset, val);
+    }
+  }
+}
+
+let u8  = new BaseType('u8',  'Uint8');
+let u16 = new BaseType('u16', 'Uint16');
+let u32 = new BaseType('u32', 'Uint32');
+let u64 = new BaseType('u64', 'BigUint64', {needBigWrap: true});
+let s8  = new BaseType('s8',  'Int8');
+let s16 = new BaseType('s16', 'Int16');
+let s32 = new BaseType('s32', 'Int32');
+let s64 = new BaseType('s64', 'BigInt64', {needBigWrap: true});
+let f32 = new BaseType('f32', 'Float32');
+let f64 = new BaseType('f64', 'Float64');
+
+class Struct {
+  constructor(name, sizeof, fields) {
+    this.name = name;
+    this.sizeof = sizeof;
+    this.fields = fields;
+    this.Local = this.makeLocalClass();
+    this.Remote = this.makeRemoteClass();
+  }
+  makeLocalClass() {
+    
+    let argNames = [];
+    let argVals = [];
+    let code = `
+      class ${name}_Local {
+        constructor(dv) {
+          this.dv = (dv instanceof DataView) ? dv : new DataView(dv);
+        }
+    `;
+    for (let [fieldName, off, ty] of this.fields) {
+      assert(typeof off == 'number');
+      if (typeof ty == 'string') {
+        let mapped = this.baseTypeMap[ty];
+        if (!mapped) {
+          throw new Error(`invalid base type ${ty}`);
+        }
+        let xval = 'val';
+        if (ty == 'u64' || ty == 'u32') {
+          // setBig[U]int64 requires it to actually be big
+          xval = 'BigInt(val)';
+        }
+        code += `
+          get ${fieldName}() { return this.dv.get${mapped}(${off}, true); }
+          set ${fieldName}(val) { this.dv.set${mapped}(${xval}, true); }
+        `;
+      } else {
+        assert(ty instanceof Struct);
+        argNames.push(`_typeof_${fieldName}`);
+        argVals.push(ty);
+        code += `
+          get ${fieldName}() {
+            let ret = this._cached_${fieldName};
+            if (typeof ret === 'undefined') {
+              ret = this._cached_${fieldName} = new _typeof_${fieldName}(new DataView(this.dv, ${off}));
+            }
+            return ret;
+          }
+        `;
+
+      }
+
+    }
+
+    code += `
+      }
+      ${name}_Local.isLocalClass = true;
+      return ${name}_Local;
+    `;
+    return new Function(...argNames, code)(...argVals);
+  }
+  makeRemoteClass() {
+    let argNames = [];
+    let argVals = [];
+    let code = `
+      class ${name}_Remote {
+        constructor(addr) {
+          this.addr = addr;
+        }
+    `;
+    for (let [fieldName, off, ty] of this.fields) {
+      assert(typeof off == 'number');
+      if (typeof ty == 'string') {
+        let mapped = this.baseTypeMap[ty];
+        if (!mapped) {
+          throw new Error(`invalid base type ${ty}`);
+        }
+        let fieldSize = parseInt(ty.slice(1)) / 8;
+        let xval = 'val';
+        if (ty == 'u64' || ty == 'u32') {
+          // setBig[U]int64 requires it to actually be big
+          xval = 'BigInt(val)';
+        }
+        let setterName = 'set' + fieldName[0].toUpperCase() + fieldName.slice(1);
+        argNames.push(`getRemote_${fieldName}`);
+        argNames.push(`setRemote_${fieldName}`);
+        argVals.push(
+        code += `
+          ${fieldName}() { return getRemote_${fieldName}(this.addr, off); }
+          ${setterName}(val) { return setRemote_${fieldName}(this.addr, off, val); }
+        `;
+      } else {
+        assert(ty instanceof Struct);
+        argNames.push(`_typeof_${fieldName}`);
+        argVals.push(ty);
+        code += `
+          get ${fieldName}() {
+            let ret = this._cached_${fieldName};
+            if (typeof ret === 'undefined') {
+              ret = this._cached_${fieldName} = new _typeof_${fieldName}(new DataView(this.dv, ${off}));
+            }
+            return ret;
+          }
+        `;
+
+      }
+
+    }
+
+    code += `
+      }
+      ${name}_Remote.isRemoteClass = true;
+      return ${name}_Remote;
+    `;
+    return new Function(...argNames, code)(...argVals);
+  }
+}
+*/
+
 class Cond {
   constructor() {
     this.waiters = [];
@@ -252,6 +418,7 @@ class HoseConn {
   }
 }
 
+/*
 async function go() {
   let baseURL = 'ws://127.0.0.1:8002';
   let rpcConn = new RPCConn(baseURL);
@@ -264,4 +431,17 @@ async function go() {
 
 }
 go();
+*/
+
+/*
+function test() {
+  let rpc_req = new Struct('rpc_req', 17, [
+    ['type', 0, 'u8'],
+    ['rw_addr', 1, 'u64'],
+    ['rw_len', 9, 'u64'],
+  ]);
+}
+test();
+*/
+console.log(f64.get(new DataView(new Uint32Array([0xdeadbeef, 0xdeadbeef]).buffer), 0));
 </script>

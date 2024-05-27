@@ -1,7 +1,7 @@
 <script>
 function assert(x) {
   if (!(x)) {
-    throw 'assertion failed';
+    throw new Error('assertion failed');
   }
 }
 function sleep(n) {
@@ -89,17 +89,39 @@ class Throttle {
 }
 
 class WSWrapper {
-  constructor() {
+  constructor(url, delegate) {
+    this.wsURL = url;
+    this.delegate = delegate;
     this.openThrottle = new Throttle('open');
-    this.openWS();
+    this.state = 'idle';
+    this.ws = null;
+    this.wantOpen = false;
+  }
+  setWantOpen(wantOpen) {
+    this.wantOpen = wantOpen;
+    this.openCloseWSAsNeeded();
+  }
+  openCloseWSAsNeeded() {
+    if (this.state == 'idle' && this.wantOpen) {
+      this.openWS();
+    } else if (this.state == 'open' && !this.wantOpen) {
+      console.log(`closing ${this.wsURL}`);
+      this.ws.close();
+    }
   }
   openWS() {
-    let ws = new WebSocket('ws://127.0.0.1:8002/ws/rpc');
+    assert(this.ws === null);
+    assert(this.state == 'idle');
+    console.log(`connecting to ${this.wsURL}`);
+    let ws = new WebSocket(this.wsURL);
     this.ws = ws;
+    this.state = 'connecting';
     ws.binaryType = 'arraybuffer';
     ws.onopen = (e) => {
       assert(this.ws === ws);
-      this.onOpen(e);
+      this.state = 'open';
+      console.log(`opened connection to ${this.wsURL}`);
+      this.delegate.onOpen(e);
       // if it doesn't close quickly, then reset throttle
       setTimeout(() => {
         if (this.ws === ws) {
@@ -109,45 +131,53 @@ class WSWrapper {
     };
     ws.onmessage = (e) => {
       assert(this.ws === ws);
-      this.onMessage(e);
+      this.delegate.onMessage(e);
     };
     ws.onclose = (e) => {
-      this.onClose(e);
       assert(this.ws === ws);
+      console.log(`closed connection to ${this.wsURL}`);
       this.ws = null;
-      (async () => {
-        await this.openThrottle;
-        this.openWS();
-      })();
+      if (this.wantOpen) {
+        this.state = 'openThrottle';
+        (async () => {
+          await this.openThrottle;
+          this.state = 'idle';
+          this.openCloseWSAsNeeded();
+        })();
+      } else {
+        this.state = 'idle';
+      }
+      this.delegate.onClose(e);
     };
   }
 }
-class RPCConn extends WSWrapper {
-  constructor() {
-    super();
+
+class RPCConn {
+  constructor(baseURL) {
+    this.wsw = new WSWrapper(`${baseURL}/ws/rpc`, this);
+    this.wsw.setWantOpen(true);
     this.requestLock = new Lock;
     this.responseHandler = null;
-    this.isOpen = false;
     this.openCond = new Cond;
     this.pendingResponse = null;
     this.pendingResponseCond = new Cond;
     this.rpcThrottle = new Throttle('rpc');
   }
   onOpen(e) {
-    console.log(`onOpen: ${e}`);
     this.isOpen = true;
     this.openCond.broadcast();
   }
   onMessage(e) {
-    console.log(`onMessage: ${e}`);
     assert(this.requestLock.locked);
     this.pendingResponse = e;
     this.pendingResponseCond.broadcast();
   }
   onClose(e) {
-    console.log(`onClose: ${e}`);
     this.isOpen = false;
     this.pendingResponseCond.broadcast();
+  }
+  shouldAutoReopen() {
+    return true;
   }
   async rawRequest(req) {
     let resp = null;
@@ -158,7 +188,7 @@ class RPCConn extends WSWrapper {
           return;
         }
 
-        this.ws.send(req);
+        this.wsw.ws.send(req);
         this.pendingResponse = null;
         while (this.isOpen && this.pendingResponse === null) {
           await this.pendingResponseCond;
@@ -206,10 +236,32 @@ class RPCConn extends WSWrapper {
   }
 }
 
+class HoseConn {
+  constructor(baseURL) {
+    this.wsw = new WSWrapper(`${baseURL}/ws/hose`, this);
+  }
+  setWantOpen(wantOpen) {
+    this.wsw.setWantOpen(wantOpen);
+  }
+  onOpen(e) {
+  }
+  onMessage(e) {
+    console.log(`hose message ${e.data}`);
+  }
+  onClose(e) {
+  }
+}
+
 async function go() {
-  let conn = new RPCConn();
-  let data = await conn.reqRead(0x1234n, 40);
+  let baseURL = 'ws://127.0.0.1:8002';
+  let rpcConn = new RPCConn(baseURL);
+  let data = await rpcConn.reqRead(0x1238n, 40);
   console.log(data);
+  rpcConn.wsw.setWantOpen(false);
+
+  let hoseConn = new HoseConn(baseURL);
+  hoseConn.setWantOpen(true);
+
 }
 go();
 </script>

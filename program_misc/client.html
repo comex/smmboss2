@@ -10,14 +10,30 @@ function sleep(n) {
   return promise;
 }
 
-class BaseType {
+function doRead(addr, len) {
+  return theRPCConn.reqRead(addr, len);
+}
+function doWrite(addr, data) {
+  return theRPCConn.reqWrite(addr, data);
+}
+
+class BaseType {}
+class IntBaseType extends BaseType {
   constructor(name, dataViewName, {needBigWrap} = {}) {
+    super();
     this.name = name;
-    let getLocal = new Function('dv', 'off', `return dv.get${dataViewName}(off, true);`);
+    let getLocal = new Function(
+      'dv', 'off',
+      `return dv.get${dataViewName}(off, true);`
+    );
     let xval = needBigWrap ? 'BigInt(val)' : 'val';
-    let setLocal = new Function('dv', 'off', 'val', `return dv.set${dataViewName}(off, {xval}, true);`);
+    let setLocal = new Function(
+      'dv', 'off', 'val',
+      `return dv.set${dataViewName}(off, ${xval}, true);`
+    );
 
     let size = parseInt(name.slice(1)) / 8;
+    // TODO: this kinda sucks, would be better to have a way to aggregate what's needed.  probably we don't even want this at all.  too slow and not synchronized. 
     let getRemote = async (addr) => {
       let dv = await doRead(addr, size);
       return getLocal(dv, 0);
@@ -33,31 +49,32 @@ class BaseType {
     this.setLocal = setLocal;
     this.setRemote = setRemote;
 
-    this.getLocalBinder = function(offset) {
-      return getLocal(this.dv, offset);
-    }
-    this.setLocalBinder = function(offset, val) {
-      return setLocal(this.dv, offset, val);
-    }
-    this.getRemoteBinder = function(offset) {
-      return getRemote(this.addr + offset);
-    }
-    this.setRemoteBinder = function(offset, val) {
-      return setRemote(this.addr + offset, val);
-    }
   }
 }
 
-let u8  = new BaseType('u8',  'Uint8');
-let u16 = new BaseType('u16', 'Uint16');
-let u32 = new BaseType('u32', 'Uint32');
-let u64 = new BaseType('u64', 'BigUint64', {needBigWrap: true});
-let s8  = new BaseType('s8',  'Int8');
-let s16 = new BaseType('s16', 'Int16');
-let s32 = new BaseType('s32', 'Int32');
-let s64 = new BaseType('s64', 'BigInt64', {needBigWrap: true});
-let f32 = new BaseType('f32', 'Float32');
-let f64 = new BaseType('f64', 'Float64');
+let u8  = new IntBaseType('u8',  'Uint8');
+let u16 = new IntBaseType('u16', 'Uint16');
+let u32 = new IntBaseType('u32', 'Uint32');
+let u64 = new IntBaseType('u64', 'BigUint64', {needBigWrap: true});
+let s8  = new IntBaseType('s8',  'Int8');
+let s16 = new IntBaseType('s16', 'Int16');
+let s32 = new IntBaseType('s32', 'Int32');
+let s64 = new IntBaseType('s64', 'BigInt64', {needBigWrap: true});
+let f32 = new IntBaseType('f32', 'Float32');
+let f64 = new IntBaseType('f64', 'Float64');
+
+
+let utf8Decoder = new TextDecoder();
+let CString = new BaseType;
+CString.getLocal = (dv, off) => {
+  let maxLen = Math.min(0x1000, dv.byteLength - off);
+  let len = 0;
+  while (len < maxLen && dv.getInt8(off + len) != 0) {
+    len++;
+  }
+  let u8 = new Uint8Array(dv.buffer, dv.byteOffset + off, len);
+  return utf8Decoder.decode(u8);
+};
 
 class Struct {
   constructor(name, sizeof, fields) {
@@ -68,53 +85,29 @@ class Struct {
     this.Remote = this.makeRemoteClass();
   }
   makeLocalClass() {
-    
     let argNames = [];
     let argVals = [];
     let code = `
-      class ${name}_Local {
+      class ${this.name}_Local {
         constructor(dv) {
           this.dv = (dv instanceof DataView) ? dv : new DataView(dv);
         }
     `;
     for (let [fieldName, off, ty] of this.fields) {
-      assert(typeof off == 'number');
-      if (typeof ty == 'string') {
-        let mapped = this.baseTypeMap[ty];
-        if (!mapped) {
-          throw new Error(`invalid base type ${ty}`);
-        }
-        let xval = 'val';
-        if (ty == 'u64' || ty == 'u32') {
-          // setBig[U]int64 requires it to actually be big
-          xval = 'BigInt(val)';
-        }
+      if (ty instanceof BaseType) {
+        argNames.push(`getLocal_${fieldName}`, `setLocal_${fieldName}`);
+        argVals.push(ty.getLocal, ty.setLocal);
         code += `
-          get ${fieldName}() { return this.dv.get${mapped}(${off}, true); }
-          set ${fieldName}(val) { this.dv.set${mapped}(${xval}, true); }
-        `;
+          get ${fieldName}() { return getLocal_${fieldName}(this.dv, ${off}); }
+          set ${fieldName}(val) { return setLocal_${fieldName}(this.dv, ${off}, val); }
+        `
       } else {
-        assert(ty instanceof Struct);
-        argNames.push(`_typeof_${fieldName}`);
-        argVals.push(ty);
-        code += `
-          get ${fieldName}() {
-            let ret = this._cached_${fieldName};
-            if (typeof ret === 'undefined') {
-              ret = this._cached_${fieldName} = new _typeof_${fieldName}(new DataView(this.dv, ${off}));
-            }
-            return ret;
-          }
-        `;
-
+        assert(false);
       }
-
     }
-
     code += `
       }
-      ${name}_Local.isLocalClass = true;
-      return ${name}_Local;
+      return ${this.name}_Local;
     `;
     return new Function(...argNames, code)(...argVals);
   }
@@ -122,59 +115,31 @@ class Struct {
     let argNames = [];
     let argVals = [];
     let code = `
-      class ${name}_Remote {
+      class ${this.name}_Remote {
         constructor(addr) {
           this.addr = addr;
         }
     `;
     for (let [fieldName, off, ty] of this.fields) {
-      assert(typeof off == 'number');
-      if (typeof ty == 'string') {
-        let mapped = this.baseTypeMap[ty];
-        if (!mapped) {
-          throw new Error(`invalid base type ${ty}`);
-        }
-        let fieldSize = parseInt(ty.slice(1)) / 8;
-        let xval = 'val';
-        if (ty == 'u64' || ty == 'u32') {
-          // setBig[U]int64 requires it to actually be big
-          xval = 'BigInt(val)';
-        }
+      if (ty instanceof BaseType) {
+        argNames.push(`getRemote_${fieldName}`, `setRemote_${fieldName}`);
+        argVals.push(ty.getRemote, ty.setRemote);
         let setterName = 'set' + fieldName[0].toUpperCase() + fieldName.slice(1);
-        argNames.push(`getRemote_${fieldName}`);
-        argNames.push(`setRemote_${fieldName}`);
-        argVals.push(
         code += `
-          ${fieldName}() { return getRemote_${fieldName}(this.addr, off); }
-          ${setterName}(val) { return setRemote_${fieldName}(this.addr, off, val); }
-        `;
+          ${fieldName}() { return getRemote_${fieldName}(this.addr + ${off}); }
+          ${setterName}(val) { return setRemote_${fieldName}(this.addr + ${off}, val); }
+        `
       } else {
-        assert(ty instanceof Struct);
-        argNames.push(`_typeof_${fieldName}`);
-        argVals.push(ty);
-        code += `
-          get ${fieldName}() {
-            let ret = this._cached_${fieldName};
-            if (typeof ret === 'undefined') {
-              ret = this._cached_${fieldName} = new _typeof_${fieldName}(new DataView(this.dv, ${off}));
-            }
-            return ret;
-          }
-        `;
-
+        assert(false);
       }
-
     }
-
     code += `
       }
-      ${name}_Remote.isRemoteClass = true;
-      return ${name}_Remote;
+      return ${this.name}_Remote;
     `;
     return new Function(...argNames, code)(...argVals);
   }
 }
-*/
 
 class Cond {
   constructor() {
@@ -375,7 +340,7 @@ class RPCConn {
         console.log(`RPC got good response: ${resp}`);
       });
       if (resp instanceof ArrayBuffer) {
-        return resp.data;
+        return resp;
       }
       if (!this.isOpen) {
         await this.openCond;
@@ -385,9 +350,10 @@ class RPCConn {
   async reqRead(addr, len) {
     let dv = new DataView(new ArrayBuffer(17));
     dv.setInt8(0, 1); // RPC_REQ_READ
-    dv.setBigUint64(1, addr, true);
+    dv.setBigUint64(1, BigInt(addr), true);
     dv.setBigUint64(9, BigInt(len), true);
-    return await this.rawRequest(dv);
+    return new DataView(await this.rawRequest(dv));
+
   }
   async reqWrite(addr, data) {
     assert(ArrayBuffer.isView(data));
@@ -433,15 +399,20 @@ async function go() {
 go();
 */
 
-/*
-function test() {
+async function test() {
+  //theRPCConn = new RPCConn('ws://127.0.0.1:8002');
   let rpc_req = new Struct('rpc_req', 17, [
-    ['type', 0, 'u8'],
-    ['rw_addr', 1, 'u64'],
-    ['rw_len', 9, 'u64'],
+    ['type', 0, u8],
+    ['rw_addr', 1, u64],
+    ['dummy', 1, CString],
+    ['rw_len', 9, u64],
   ]);
+  let rl = new rpc_req.Local(new ArrayBuffer(17));
+  rl.rw_addr = 0x41414141;
+  console.log(rl.rw_addr);
+  console.log(rl.dummy);
+  let rr = new rpc_req.Remote(0x1000);
+  console.log(await rr.rw_len());
 }
 test();
-*/
-console.log(f64.get(new DataView(new Uint32Array([0xdeadbeef, 0xdeadbeef]).buffer), 0));
 </script>

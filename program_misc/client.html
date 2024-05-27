@@ -287,64 +287,79 @@ class RPCConn {
   constructor(baseURL) {
     this.wsw = new WSWrapper(`${baseURL}/ws/rpc`, this);
     this.wsw.setWantOpen(true);
-    this.requestLock = new Lock;
     this.responseHandler = null;
-    this.openCond = new Cond;
-    this.pendingResponse = null;
+    this.updateCond = new Cond;
+    this.pendingResponses = [];
     this.pendingResponseCond = new Cond;
     this.rpcThrottle = new Throttle('rpc');
+    this.helloData = null;
   }
   onOpen(e) {
     this.isOpen = true;
-    this.openCond.broadcast();
+    this.updateCond.broadcast();
+    this.pendingResponseCallbacks = [(data) => {
+      if (typeof data == 'string') {
+        console.log(`early error! ${data}`);
+        return;
+      }
+      assert(data instanceof ArrayBuffer);
+      let dv = new DataView(data);
+      this.helloData = {
+        targetStart: dv.getBigUint64(0, true),
+      };
+      console.log('hello', this.helloData);
+      this.updateCond.broadcast();
+    }];
   }
   onMessage(e) {
-    assert(this.requestLock.locked);
-    this.pendingResponse = e;
-    this.pendingResponseCond.broadcast();
+    let cb = this.pendingResponseCallbacks.shift(1);
+    if (!cb) {
+      throw new Error('got unsolicited packet');
+    }
+    cb(e.data);
   }
   onClose(e) {
     this.isOpen = false;
-    this.pendingResponseCond.broadcast();
-  }
-  shouldAutoReopen() {
-    return true;
+    this.updateCond.broadcast();
   }
   async rawRequest(req) {
     let resp = null;
-    while (1) {
-      await this.requestLock.with(async () => {
-        if (!this.isOpen) {
-          console.log('RPC waiting for open');
-          return;
+    outerLoop: while (1) {
+      if (!this.isOpen) {
+        console.log('RPC waiting for open');
+        while (!this.isOpen) {
+          await this.updateCond;
         }
+      }
 
-        this.wsw.ws.send(req);
-        this.pendingResponse = null;
-        while (this.isOpen && this.pendingResponse === null) {
-          await this.pendingResponseCond;
-        }
+      this.wsw.ws.send(req);
+      let haveResponse = false;
+      let response = null;
+      this.pendingResponseCallbacks.push((resp) => {
+        response = resp;
+        haveResponse = true;
+        this.updateCond.broadcast();
+      });
+
+      while (!haveResponse) {
         if (!this.isOpen) {
           console.log('RPC waiting for re-open');
-          return;
+          continue outerLoop;
         }
+        await this.updateCond;
+      }
 
-        resp = this.pendingResponse.data;
-        assert(resp !== null);
-        if (typeof resp == 'string') {
-          console.log(`RPC got error: '${resp}'`);
-          await this.rpcThrottle;
-          return;
-        }
-        this.rpcThrottle.reset();
-        console.log(`RPC got good response: ${resp}`);
-      });
-      if (resp instanceof ArrayBuffer) {
-        return resp;
+      if (typeof response == 'string') {
+        console.log(`RPC got error: '${resp}'`);
+        await this.rpcThrottle;
+        continue outerLoop;
       }
-      if (!this.isOpen) {
-        await this.openCond;
-      }
+
+      assert(response instanceof ArrayBuffer);
+      this.rpcThrottle.reset();
+      console.log(`RPC got good response: ${response}`);
+
+      return new DataView(response);
     }
   }
   async reqRead(addr, len) {
@@ -352,7 +367,7 @@ class RPCConn {
     dv.setInt8(0, 1); // RPC_REQ_READ
     dv.setBigUint64(1, BigInt(addr), true);
     dv.setBigUint64(9, BigInt(len), true);
-    return new DataView(await this.rawRequest(dv));
+    return await this.rawRequest(dv);
 
   }
   async reqWrite(addr, data) {
@@ -400,7 +415,7 @@ go();
 */
 
 async function test() {
-  //theRPCConn = new RPCConn('ws://127.0.0.1:8002');
+  theRPCConn = new RPCConn('ws://127.0.0.1:8002');
   let rpc_req = new Struct('rpc_req', 17, [
     ['type', 0, u8],
     ['rw_addr', 1, u64],

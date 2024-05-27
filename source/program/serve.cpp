@@ -5,6 +5,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <mutex>
+#include "util/modules.hpp"
 
 static void start_thread(void *(*f)(void *), void *ctx) {
     pthread_attr_t attr;
@@ -377,6 +378,11 @@ private:
         RPC_REQ_WRITE = 2,
     };
 
+    struct rpc_hello_resp {
+        uint64_t target_start;
+
+    } __attribute__((packed));
+
     struct rpc_req {
         enum rpc_req_type type;
         union {
@@ -460,11 +466,11 @@ private:
         if (ev == MG_EV_HTTP_MSG) {  // New HTTP request received
             struct mg_http_message *hm = (struct mg_http_message *) ev_data;
             if (mg_match(hm->uri, mg_str("/ws/hose"), NULL)) {
-                mg_ws_upgrade(c, hm, NULL);
                 cd->state = CONN_STATE_DRAINING_BEFORE_HOSE_HANDOFF;
-            } else if (mg_match(hm->uri, mg_str("/ws/rpc"), NULL)) {
                 mg_ws_upgrade(c, hm, NULL);
+            } else if (mg_match(hm->uri, mg_str("/ws/rpc"), NULL)) {
                 cd->state = CONN_STATE_RPC_WEBSOCKET;
+                mg_ws_upgrade(c, hm, NULL);
             } else {
                 mg_http_reply(c, 404, "", "not found");
             }
@@ -484,6 +490,13 @@ private:
             }
             struct mg_ws_message *wm = (struct mg_ws_message *)ev_data;
             handle_rpc_packet(wm->data.buf, wm->data.len, c);
+        } else if (ev == MG_EV_WS_OPEN) {
+            if (cd->state == CONN_STATE_RPC_WEBSOCKET) {
+                rpc_hello_resp hello = {
+                    .target_start = exl::util::modules::GetTargetStart(),
+                };
+                mg_ws_send(c, &hello, sizeof(hello), WEBSOCKET_OP_BINARY);
+            }
         }
     }
 };

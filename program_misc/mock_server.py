@@ -5,6 +5,10 @@ import websockets.server
 import struct
 
 async def serve_rpc(websocket):
+    hello = struct.pack('<Q',
+        0x12340000 # target_start
+    )
+    await websocket.send(hello)
     async for message in websocket:
         assert isinstance(message, bytes)
         header_fmt = '<BQQ'

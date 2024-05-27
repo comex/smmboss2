@@ -1,6 +1,10 @@
 #include "stuff.hpp"
+#include "syscalls.h"
 #include <sys/lock.h>
 #include <sys/iosupport.h>
+#include <sys/fcntl.h>
+#include <unistd.h>
+#include <stdarg.h>
 #include <atomic>
 #include "nn/os/os_condition_variable_common.hpp"
 #include "nn/os/os_thread_type.hpp"
@@ -189,7 +193,7 @@ int __syscall_thread_create(sdk_pthread_t *thread, void* (*func)(void*), void *a
         assert(!sdk_pthread_attr_setstack(&attr, stack_addr, stack_size));
     }
     // no need for attr_destroy
-    return sdk_pthread_create(thread, &attr, func, arg);
+    return _convert_errno(sdk_pthread_create(thread, &attr, func, arg));
 }
 void* __syscall_thread_join(sdk_pthread_t thread) {
     void *val;
@@ -200,31 +204,31 @@ void* __syscall_thread_join(sdk_pthread_t thread) {
     }
 }
 int __syscall_thread_detach(sdk_pthread_t thread) {
-    return sdk_pthread_detach(thread);
+    return _convert_errno(sdk_pthread_detach(thread));
 }
 int __syscall_tls_create(uint32_t *key, void (*destructor)(void*)) {
-    return sdk_pthread_key_create(key, destructor);
+    return _convert_errno(sdk_pthread_key_create(key, destructor));
 }
 int __syscall_tls_set(uint32_t key, const void *value) {
-    return sdk_pthread_setspecific(key, value);
+    return _convert_errno(sdk_pthread_setspecific(key, value));
 }
 void* __syscall_tls_get(uint32_t key) {
     return sdk_pthread_getspecific(key);
 }
 int __syscall_tls_delete(uint32_t key) {
-    return sdk_pthread_key_delete(key);
+    return _convert_errno(sdk_pthread_key_delete(key));
 }
 
 static constexpr u64 nsec_clockres =  1000000000ULL / 19200000ULL;
 
 int __syscall_clock_getres(clockid_t clock_id, struct timespec *tp) {
     int ret = sdk_clock_getres(0, tp);
-    errno = *___errno_location();
+    errno = _convert_errno(*___errno_location());
     return ret;
 }
 int __syscall_clock_gettime(clockid_t clock_id, struct timespec *tp) {
     int ret = sdk_clock_gettime(0, tp);
-    errno = *___errno_location();
+    errno = _convert_errno(*___errno_location());
     return ret;
 }
 int __syscall_gettod_r(struct _reent *ptr, struct timeval *tv, struct timezone *tz) {
@@ -247,6 +251,31 @@ int __syscall_nanosleep(const struct timespec *req, struct timespec *rem) {
         rem->tv_sec = 0;
     }
     return 0;
+}
+
+// Wrappers for functions that devkitA64 headers do define:
+_Static_assert(sizeof(struct fd_set) == 0x80, "did -DFD_SETSIZE=1024 not work?");
+ERRNO_WRAPPER(, int, select, nnsocketSelect,
+              int, fd_set *, fd_set *, fd_set *, struct timeval *);
+
+ERRNO_WRAPPER(, int, close, nnsocketClose,
+              int);
+
+// This is like ERRNO_WRAPPER but manual due to the variadic argument:
+extern int nnsocketFcntl(int, int, int);
+int fcntl(int fd, int cmd, ...) {
+    int *sdk_errno_p = ___errno_location();
+    *sdk_errno_p = 0; 
+
+    int ret;
+    va_list ap;
+    va_start(ap, cmd);
+    int arg = va_arg(ap, int);
+    ret = nnsocketFcntl(fd, cmd, arg);
+    va_end(ap);
+
+    errno = _convert_errno(*sdk_errno_p);
+    return ret;
 }
 
 }  // extern "C"

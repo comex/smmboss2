@@ -21,49 +21,24 @@ class GDBGuest(smmboss.Guest):
             return 0
 
     def extract_image_info(self):
-        build_id = None
-        kind = 'yuzu'
-        if kind == 'yuzu':
-            stuff = gdb.execute('maint packet qXfer:libraries:read::0,10000', to_string=True)
-            m = re.search(r'received: "l(<\?xml.*</library-list>)"', stuff)
-            assert m, "invalid response to libraries:read"
-            xml = m.group(1)
-            m = re.search('<library name="(?:main|Slope.nss)"><segment address="(.*?)"', xml)
-            assert m, "couldn't find main by hackily running a regex on the xml"
-            slide = int(m.group(1), 16)
-        elif kind == 'yuzu-info-shared':
-            # note(2023-3-4): why does this not work?
-            stuff = gdb.execute('info shared', to_string=True)
-            m = re.search(r'^(0x\w+)\s+0x\w+\s+.*\bmain$', stuff, re.M)
-            if not m:
-                raise Exception("couldn't find slide using `info shared`")
-            slide = int(m.group(1), 16)
-        elif kind == 'twili':
-            stuff = gdb.execute('maint packet qOffsets', to_string=True)
-            m = re.search(r'received: "TextSeg=([^"]+)"', stuff)
-            if not m:
-                raise Exception("couldn't find slide using qOffsets")
-            slide = int(m.group(1), 16)
-            pid = self.inf.pid
-            stuff = gdb.execute(f'maint packet qXfer:exec-file:read:{pid:x}:0,999', to_string=True)
-            m = re.search(r'received: "l([^"]+)"', stuff)
-            if not m:
-                raise Exception("couldn't find build id using qXfer:exec-file")
-            build_id = m.group(1)
-        else:
-            assert kind == 'atmosphere'
-            # Atmosphere GDB stub
-            stuff = gdb.execute('monitor get info', to_string=True)
-            if stuff == 'Not attached.\n':
-                raise Exception("not attached!")
-            m = re.search(r'\n  (0x[0-9a-f]+) - 0x[0-9a-f]+ Slope\.nss', stuff)
-            if not m:
-                raise Exception("couldn't find slide using monitor get info")
-            slide = int(m.group(1), 16)
-
-        if build_id is not None and len(build_id) != 64:
-            raise Exception(f"build_id is {build_id!r}, which is not length 64")
-        return build_id, slide
+        stuff = gdb.execute('maint packet qXfer:libraries:read::0,10000', to_string=True)
+        m = re.search(r'received: "l(.*)"', stuff)
+        if not m:
+            raise Exception("Strange response to qXfer:libraries:read: {stuff!r}")
+        content = m.group(1)
+        if not content:
+            raise Exception("Empty response to qXfer:libraries:read")
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(content)
+        for library in root:
+            if library.tag == 'library':
+                segs = [child for child in library if child.tag == 'segment' and 'address' in child.attrib]
+                if not segs:
+                    print(f'Warning: Found library tag without segment: {ET.tostring(library)!r} in {stuff!r}')
+                yield {
+                    'name': library.attrib.get('name'),
+                    'text_start': int(segs[0].attrib['address'], 16),
+                }
 
 
 def reg(name):
@@ -83,11 +58,12 @@ class MyBT(gdb.Command):
                 break
             # TODO make this nicer
             new_f, fpc = struct.unpack('<QQ', gdb.selected_inferior().read_memory(f, 16))
-            self.print_frame(f'f{i}', fpc, f' [{f:#x}]')
+            self.print_frame(f'f{i}', fpc, f' [{fpc:#x}; {f:#x}]')
             f = new_f
     def print_frame(self, idx, addr, extra):
-        addr = self.mm.unslide(addr) if addr else addr
-        gdb.write(f'{idx:5}: 0x{addr:016x}{extra}\n')
+        image_info, addr_rel = self.mm.unslide_ex(addr)
+        name = str(image_info.get('name')) if image_info else 'None'
+        gdb.write(f'{idx:5}: {name} + 0x{addr_rel:016x}{extra}\n')
 
 class SomeCommand(gdb.Command):
     def __init__(self, name, func, guest):

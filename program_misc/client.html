@@ -1,4 +1,17 @@
+<style>
+#diagram {
+  border: 1px solid grey;
+}
+</style>
+
+<svg width="500" height="500" id="diagram">
+<g id="diagram_hitboxes"/>
+</svg>
+
 <script>
+function hex(n) {
+  return '0x'+n.toString(16);
+}
 function assert(x) {
   if (!(x)) {
     throw new Error('assertion failed');
@@ -83,6 +96,27 @@ CString.getLocal = (dv, off) => {
   return utf8Decoder.decode(u8);
 };
 
+class StructLocal {
+  constructor(struct, dv, off) {
+    this.struct = struct;
+    this.dv = (dv instanceof DataView) ? dv : new DataView(dv);
+    assert(this.dv.byteLength >= off + struct.sizeof);
+    this.off = off;
+  }
+  serialize() {
+    let ret = {};
+    for (let [fieldName, ..._] of this.struct.fields) {
+      let val = this[fieldName];
+      if (val.serialize !== undefined) {
+        val = val.serialize();
+      }
+      ret[fieldName] = val;
+    }
+    return ret;
+  }
+
+}
+
 class Struct {
   constructor(name, sizeof, fields) {
     this.name = name;
@@ -92,12 +126,21 @@ class Struct {
     this.Remote = this.makeRemoteClass();
   }
   makeLocalClass() {
-    let argNames = [];
-    let argVals = [];
+    let argNames = ['struct'];
+    let argVals = [this];
     let code = `
-      class ${this.name}_Local {
-        constructor(dv) {
-          this.dv = (dv instanceof DataView) ? dv : new DataView(dv);
+      class ${this.name}_Local extends StructLocal {
+        constructor(dv, off = 0) {
+          super(struct, dv, off);
+    `
+    for (let [fieldName, off, ty] of this.fields) {
+      if (ty instanceof Struct) {
+        code += `
+          this._${fieldName} = undefined;
+        `;
+      }
+    }
+    code += `
         }
     `;
     for (let [fieldName, off, ty] of this.fields) {
@@ -105,11 +148,22 @@ class Struct {
         argNames.push(`getLocal_${fieldName}`, `setLocal_${fieldName}`);
         argVals.push(ty.getLocal, ty.setLocal);
         code += `
-          get ${fieldName}() { return getLocal_${fieldName}(this.dv, ${off}); }
-          set ${fieldName}(val) { return setLocal_${fieldName}(this.dv, ${off}, val); }
+          get ${fieldName}() { return getLocal_${fieldName}(this.dv, this.off + ${off}); }
+          set ${fieldName}(val) { return setLocal_${fieldName}(this.dv, this.off + ${off}, val); }
         `
       } else {
-        assert(false);
+        assert(ty instanceof Struct);
+        argNames.push(`ty_${fieldName}_Local`);
+        argVals.push(ty.Local);
+        // todo: cache
+        code += `
+          get ${fieldName}() {
+            if (this._${fieldName} === undefined) {
+              this._${fieldName} = new ty_${fieldName}_Local(this.dv, this.off + ${off});
+            }
+            return this._${fieldName};
+          }
+        `
       }
     }
     code += `
@@ -137,7 +191,12 @@ class Struct {
           ${setterName}(val) { return setRemote_${fieldName}(this.addr + ${off}n, val); }
         `
       } else {
-        assert(false);
+        assert(ty instanceof Struct);
+        argNames.push(`ty_${fieldName}`);
+        argVals.push(ty);
+        code += `
+          ${fieldName}() { return new ty_${fieldName}(this.addr + ${off}n); }
+        `
       }
     }
     code += `
@@ -310,11 +369,19 @@ class RPCConn {
         return;
       }
       assert(data instanceof ArrayBuffer);
-      let dv = new DataView(data);
-      this.helloData = {
-        targetStart: dv.getBigUint64(0, true),
-      };
-      console.log('hello', this.helloData);
+      let u64 = new BigUint64Array(data);
+      let i = 0;
+      let images = [];
+      while (i < u64.length) {
+        let image = {};
+        for (let prefix of ['image', 'text', 'rodata', 'data']) {
+          image[`${prefix}Start`] = u64[i++];
+          image[`${prefix}Size`] = u64[i++];
+        };
+        assert(i <= u64.length);
+        images.push(image);
+      }
+      console.log('hello', images);
       this.updateCond.broadcast();
     }];
   }
@@ -395,9 +462,134 @@ class RPCConn {
   }
 }
 
+
+// --
+let Point2D = new Struct('Point2D', 8, [
+  ['x', 0x0, f32],
+  ['y', 0x4, f32],
+]);
+
+let Size2D = new Struct('Size2D', 8, [
+  ['w', 0x0, f32],
+  ['h', 0x4, f32],
+]);
+
+
+let Rect = new Struct('Rect', 0x10, [
+  ['min', 0x0, Point2D],
+  ['max', 0x8, Point2D],
+]);
+Rect.Local.prototype.width = function() {
+  return this.max.x - this.min.x;
+}
+Rect.Local.prototype.height = function() {
+  return this.max.y - this.min.y;
+}
+
+let HitboxParams = new Struct('Hitbox', 0x40, [
+  ['pos', 0x0, Point2D],
+  ['radius', 0x8, Size2D],
+  ['isCircle', 0x10, u32],
+  ['whichList', 0x14, u32],
+  ['f18', 0x18, u32],
+  ['f20', 0x20, u64],
+  ['f28', 0x28, u64],
+  ['flags', 0x30, u64],
+  ['callback', 0x38, u64],
+]);
+
+let Hitbox = new Struct('Hitbox', 0x1c8, [
+  ['params', 0x60, HitboxParams],
+  ['owner', 0xa8, u64],
+  ['didCollide', 0x1b5, u8],
+  ['rect', 0x1b8, Rect],
+]);
+
+// --
+
+let svgNS = 'http://www.w3.org/2000/svg';
+class Diagram {
+  constructor() {
+    this.hitboxesGroup = document.getElementById('diagram_hitboxes');
+    this.hitboxElms = new Map();
+  }
+  renderFrame(frame) {
+    this.curFrame = frame;
+    this.renderHitboxes(frame);
+    this.curFrame = null;
+  }
+  renderHitboxes(frame) {
+    let seen = new Set();
+    for (let [ptr, hitbox] of frame.hitboxes.entries()) {
+      let elm = this.renderHitbox(ptr, hitbox);
+      seen.add(elm);
+    }
+    for (let elm of Array.from(this.hitboxesGroup.children)) {
+      if (!seen.has(elm)) {
+        console.log(`${this.curFrame.number}/${this.curFrame.worldID} removing stale ${elm} at ${elm.ptr} from ${elm.frameN}`);
+        elm.parentNode.removeChild(elm);
+        this.hitboxElms.delete(elm.ptr);
+      }
+    }
+  }
+  renderHitbox(ptr, hitbox) {
+    let params = hitbox.params;
+    let isCircle = params.isCircle;
+    let wantedTag = isCircle ? 'circle' : 'rect';
+    let elm = this.hitboxElms.get(ptr);
+    if (elm && elm.tag != wantedTag) {
+      elm.parentNode.removeChild(elm);
+      this.hitboxElms.delete(ptr);
+      elm = null;
+    }
+    if (!elm) {
+      elm = document.createElementNS(svgNS, wantedTag);
+      elm.ptr = ptr;
+      this.hitboxesGroup.appendChild(elm);
+      this.hitboxElms.set(ptr, elm);
+    }
+    if (isCircle) {
+      elm.setAttribute('cx', this.transformX(params.pos.x));
+      elm.setAttribute('cy', this.transformY(params.pos.y));
+      assert(params.radius.w == params.radius.h);
+      elm.setAttribute('r', this.transformSize(params.radius.w));
+    } else {
+      elm.setAttribute('x', this.transformX(hitbox.rect.min.x));
+      elm.setAttribute('y', this.transformY(hitbox.rect.min.y));
+      elm.setAttribute('width', this.transformSize(hitbox.rect.width()));
+      elm.setAttribute('height', this.transformSize(hitbox.rect.height()));
+    }
+    elm.setAttribute('stroke', 'green');
+    elm.setAttribute('stroke-width', 4);
+    elm.setAttribute('fill', 'yellow');
+    elm.frameN = this.curFrame.number;
+    return elm;
+  }
+  transformX(x) {
+    return this.transformSize(x);
+  }
+  transformY(y) {
+    return 400 - this.transformSize(y);
+  }
+  transformSize(size) {
+    return size; // todo: match camera
+  }
+};
+let diagram = new Diagram;
+
+class HoseFrame {
+  constructor(number, worldID) {
+    this.number = number;
+    this.worldID = worldID;
+    this.hitboxes = new Map();
+    this.collisions = [];
+  }
+};
+
 class HoseConn {
   constructor(baseURL) {
     this.wsw = new WSWrapper(`${baseURL}/ws/hose`, this);
+    this.prevFrameByWorldID = new Map();
   }
   setWantOpen(wantOpen) {
     this.wsw.setWantOpen(wantOpen);
@@ -405,29 +597,80 @@ class HoseConn {
   onOpen(e) {
   }
   onMessage(e) {
-    console.log(`hose message ${e.data}`);
+    assert(e.data instanceof ArrayBuffer);
+    let ab = e.data;
+    assert(ab.byteLength >= 8);
+    let tag = utf8Decoder.decode(new Uint8Array(ab, 0, 8));
+    switch (tag) {
+    case 'collisi\0':
+      this.parseCollision(ab);
+      break;
+    case 'do_many\0':
+      this.parseDoMany(ab);
+      break;
+    case 'hitbox\0\0':
+      this.parseHitbox(ab);
+      break;
+    default:
+      console.log(`hose message with unknown tag ${JSON.stringify(tag)}`);
+    }
+
+    //console.log(`hose message ${new BigUint64Array(e.data)}`);
   }
   onClose(e) {
   }
+
+  parseDoMany(ab) {
+    let u64 = new BigUint64Array(ab);
+    let worldID = u64[2];
+    if (this.curFrame) {
+      this.prevFrameByWorldID.set(this.curFrame.worldID, this.curFrame);
+      if (this.curFrame.worldID == 0) {
+        diagram.renderFrame(this.curFrame);
+      }
+    }
+    let prev = this.prevFrameByWorldID.get(worldID);
+    let number = prev ? prev.number + 1 : 0; // TODO: replace
+    this.curFrame = new HoseFrame(number, worldID);
+  }
+  parseCollision(ab) {
+    let u64 = new BigUint64Array(ab);
+    assert(u64.length == 4);
+    if (!this.curFrame) {
+      return;
+    }
+    this.curFrame.collisions.push({
+      hb1: u64[0],
+      hb2: u64[1],
+      ret: u64[2],
+    });
+  }
+  parseHitbox(ab) {
+    let ptr = new BigUint64Array(ab)[1];
+    if (!this.curFrame) {
+      return;
+    }
+    this.curFrame.hitboxes.set(ptr, new Hitbox.Local(new DataView(ab, 0x10)));
+  }
 }
 
-/*
+let theBaseURL = 'ws://neb-solidus:8000';
+
 async function go() {
-  let baseURL = 'ws://127.0.0.1:8002';
-  let rpcConn = new RPCConn(baseURL);
+  let rpcConn = new RPCConn(theBaseURL);
   let data = await rpcConn.reqRead(0x1238n, 40);
   console.log(data);
   rpcConn.wsw.setWantOpen(false);
 
-  let hoseConn = new HoseConn(baseURL);
-  hoseConn.setWantOpen(true);
+  g_hoseConn = new HoseConn(theBaseURL);
+  g_hoseConn.setWantOpen(true);
 
 }
 go();
-*/
 
+/*
 async function test() {
-  theRPCConn = new RPCConn('ws://127.0.0.1:8002');
+  theRPCConn = new RPCConn(theBaseURL);
   let rpc_req = new Struct('rpc_req', 17, [
     ['type', 0, u8],
     ['rw_addr', 1, u64],
@@ -439,9 +682,9 @@ async function test() {
   console.log(rl.rw_addr);
   console.log(rl.dummy);
   let rr = new rpc_req.Remote(0x1000n);
-  console.log(await rr.rw_len());
-  await rr.setRw_len(99);
+  //console.log(await rr.rw_len());
   console.log('all done');
 }
 test();
+*/
 </script>

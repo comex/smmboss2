@@ -1,9 +1,9 @@
 #include "common.hpp"
 #include "stuff.hpp"
+#include "serve.hpp"
 #include <vector>
 #include <algorithm>
 #include <string.h>
-#include <pthread.h>
 #include <mutex>
 #include "util/modules.hpp"
 
@@ -136,7 +136,7 @@ static size_t safe_memcpy(void *dst, bool check_dst,
 #define offsetof_end(ty, what) \
     (offsetof(ty, what) + sizeof(((ty *)0)->what))
 
-constexpr static size_t add_ws_header_size(size_t size) {
+size_t add_ws_header_size(size_t size) {
     size_t header_size;
     if (size < 126) {
         header_size = 2;
@@ -152,7 +152,7 @@ constexpr static size_t add_ws_header_size(size_t size) {
     return full_size;
 }
 
-static uint8_t *fill_ws_header(uint8_t *p, size_t size, size_t min_size) {
+uint8_t *fill_ws_header(uint8_t *p, size_t size, size_t min_size) {
     // fill out websocket frame header.  based on mkhdr.
     assert(size <= min_size);
     p[0] = WEBSOCKET_OP_BINARY | 128;
@@ -178,189 +178,136 @@ static void ctor_test() {
     log_str("i should be kept");
 }
 
-struct hose {
-    void push_fd(int fd) {
-        xprintf("hose::push_fd(%d)", fd);
-        // disable nonblock
-        int fl = fcntl(fd, F_GETFL, 0);
-        assert(fl != -1);
-        int ret = fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
-        assert(ret != -1);
+void hose::push_fd(int fd) {
+    xprintf("hose::push_fd(%d)", fd);
+    // disable nonblock
+    int fl = fcntl(fd, F_GETFL, 0);
+    assert(fl != -1);
+    int ret = fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+    assert(ret != -1);
 
-        // send to thread
-        int old = new_fd_.exchange(fd, std::memory_order_relaxed);
-        if (old != -1) {
-            close(old);
-        }
+    // send to thread
+    int old = new_fd_.exchange(fd, std::memory_order_relaxed);
+    if (old != -1) {
+        close(old);
     }
+}
 
-    // reader thread func:
-    void thread_func() {
-        while (1) {
-            do_iter();
-        }
+void hose::thread_func() {
+    while (1) {
+        do_iter();
     }
+}
 
-    // writer thread func:
-    template <typename F>
-    void write_packet(size_t size, F &&writeout, bool for_overrun = false) {
-        size_t full_size = add_ws_header_size(size);
-        write_raw(full_size, [&](uint8_t *p) {
-            uint8_t *past_header = fill_ws_header(p, size, size);
-            writeout(past_header);
-        }, for_overrun);
-    }
-
-private:
-    // protocol:
-    enum hose_packet_type : uint8_t {
-        HOSE_PACKET_OVERRUN = 1,
-    };
-
-    // shared data:
-    struct write_info {
-        uint32_t write_offset;
-        uint32_t wrap_offset:31,
-                 just_wrote_overrun:1;
-    };
-    static_assert(sizeof(write_info) == 8);
-    static_assert(std::atomic<write_info>::is_always_lock_free);
-
-    std::atomic<int> new_fd_{-1};
-    std::atomic<write_info> write_info_{};
-    std::atomic<uint32_t> read_offset_{0};
-    _Alignas(16) uint8_t buf_[128 * 1024];
-
-    // reader thread data:
-    int cur_fd_{-1};
-
-    // reader thread funcs:
-    void do_iter() {
-        // pick up new connection if present
-        int new_fd = new_fd_.exchange(-1, std::memory_order_relaxed);
-        if (new_fd != -1) {
-            if (cur_fd_ != -1) {
-                close(cur_fd_);
-            }
-            cur_fd_ = new_fd;
-        }
-
-        write_info write_info = write_info_.load(std::memory_order_acquire);
-        uint32_t read_offset = read_offset_.load(std::memory_order_relaxed);
-
-        assert(read_offset <= sizeof(buf_) &&
-               write_info.write_offset <= sizeof(buf_));
-        if (write_info.write_offset < read_offset) {
-            assert(write_info.wrap_offset >= read_offset &&
-                   write_info.wrap_offset <= sizeof(buf_));
-        }
-
-        if (cur_fd_ == -1) {
-            // nobody to send to
-            read_offset_.store(write_info.write_offset, std::memory_order_relaxed);
-            return do_sleep();
-        }
-
-        size_t to_send;
-        if (read_offset == write_info.write_offset) {
-            // no data to send
-            return do_sleep();
-        } else if (read_offset < write_info.write_offset) {
-            to_send = write_info.write_offset - read_offset;
-        } else { // read_offset > write_offset
-            to_send = write_info.wrap_offset - read_offset;
-        }
-
-        ssize_t ret = send(cur_fd_, buf_ + read_offset, to_send, 0);
-        if (ret == -1) {
-            xprintf("send() failed: %s", strerror(errno));
+void hose::do_iter() {
+    // pick up new connection if present
+    int new_fd = new_fd_.exchange(-1, std::memory_order_relaxed);
+    if (new_fd != -1) {
+        if (cur_fd_ != -1) {
             close(cur_fd_);
-            cur_fd_ = -1;
-            return;
         }
-        if (ret == 0) {
-            xprintf("send() returned 0?");
-        }
-        read_offset += (size_t)ret;
-        assert(read_offset <= sizeof(buf_));
-        if (read_offset == sizeof(buf_)) {
-            read_offset = 0;
-        }
-        read_offset_.store(read_offset, std::memory_order_release);
-    }
-    void do_sleep() {
-        usleep(5000);
+        cur_fd_ = new_fd;
     }
 
-    static constexpr size_t OVERRUN_BODY_SIZE = 9;
+    write_info write_info = write_info_.load(std::memory_order_acquire);
+    uint32_t read_offset = read_offset_.load(std::memory_order_relaxed);
 
-    // writer thread funcs:
-    template <typename F>
-    void write_raw(size_t size, F &&writeout, bool for_overrun) {
-        auto [ok, new_write_info] = reserve_space(size, for_overrun);
-        if (!ok) {
-            return;
-        }
-        writeout(buf_ + (new_write_info.write_offset - size));
-        write_info_.store(new_write_info, std::memory_order_release);
+    assert(read_offset <= write_info.wrap_offset &&
+           write_info.write_offset <= write_info.wrap_offset &&
+           write_info.wrap_offset <= sizeof(buf_));
+
+    if (cur_fd_ == -1) {
+        // nobody to send to
+        read_offset_.store(write_info.write_offset, std::memory_order_relaxed);
+        return do_sleep();
     }
 
-    std::tuple<bool, write_info> reserve_space(size_t size, bool for_overrun) {
-        assert_on_write_thread();
-        uint32_t read_offset = read_offset_.load(std::memory_order_acquire);
-        write_info write_info = write_info_.load(std::memory_order_relaxed);
-        size_t needed_size = size + (for_overrun ? 0 : add_ws_header_size(OVERRUN_BODY_SIZE));
-        if (needed_size < size) {
-            needed_size = SIZE_MAX;
-        }
-        bool ok = false;
-        if (write_info.write_offset < read_offset) {
-            if (needed_size < read_offset - write_info.write_offset) { // not <=
-                ok = true;
-                write_info.write_offset += size;
-                write_info.just_wrote_overrun = for_overrun;
-            }
-        } else {
-            if (needed_size <= sizeof(buf_) - write_info.write_offset) {
-                ok = true;
-                write_info.write_offset += size;
-                write_info.just_wrote_overrun = for_overrun;
-            } else if (needed_size < read_offset) {
-                ok = true;
-                write_info.wrap_offset = write_info.write_offset;
-                write_info.write_offset = size;
-                write_info.just_wrote_overrun = for_overrun;
-            }
-        }
-        if (!ok) {
-            assert(!for_overrun);
-            if (!write_info.just_wrote_overrun) {
-                write_overrun(size);
-            }
-        }
-        return std::make_tuple(ok, write_info);
+    if (read_offset == write_info.wrap_offset) {
+        read_offset = 0;
     }
 
-    void write_overrun(size_t size) {
-        xprintf("write_overrun size=%zu", size);
-        write_packet(OVERRUN_BODY_SIZE, [&](uint8_t *p) {
-            p[0] = HOSE_PACKET_OVERRUN;
-            static_assert(sizeof(size) == 8);
-            memcpy(p + 1, &size, 8);
-        }, /*for_overrun*/ true);
+    size_t to_send;
+    if (read_offset == write_info.write_offset) {
+        // no data to send
+        return do_sleep();
+    } else if (read_offset < write_info.write_offset) {
+        to_send = write_info.write_offset - read_offset;
+    } else { // read_offset > write_offset
+        to_send = write_info.wrap_offset - read_offset;
     }
 
-    void assert_on_write_thread() {
-        // the game logic that needs to write runs on the main thread, which is
-        // also the thread we are initialized on
-        pthread_t self = pthread_self();
-        if (self != s_main_thread) {
-            panic("assert_on_write_thread failed");
+    ssize_t ret = send(cur_fd_, buf_ + read_offset, to_send, 0);
+    if (ret == -1) {
+        xprintf("send() failed: %s", strerror(errno));
+        close(cur_fd_);
+        cur_fd_ = -1;
+        return;
+    }
+    if (ret == 0) {
+        xprintf("send() returned 0?");
+    }
+    read_offset += (size_t)ret;
+    assert(read_offset <= sizeof(buf_));
+    read_offset_.store(read_offset, std::memory_order_release);
+}
+
+void hose::do_sleep() {
+    usleep(5000);
+}
+
+std::tuple<bool, hose::write_info> hose::reserve_space(size_t size, bool for_overrun) {
+    assert_on_write_thread();
+    uint32_t read_offset = read_offset_.load(std::memory_order_acquire);
+    write_info write_info = write_info_.load(std::memory_order_relaxed);
+    size_t needed_size = size + (for_overrun ? 0 : add_ws_header_size(OVERRUN_BODY_SIZE));
+    if (needed_size < size) {
+        needed_size = SIZE_MAX;
+    }
+    bool ok = false;
+    if (write_info.write_offset < read_offset) {
+        if (needed_size < read_offset - write_info.write_offset) { // not <=
+            ok = true;
+        }
+    } else {
+        if (needed_size <= sizeof(buf_) - write_info.write_offset) {
+            ok = true;
+        } else if (needed_size < read_offset) {
+            ok = true;
+            write_info.wrap_offset = write_info.write_offset;
+            write_info.write_offset = 0;
         }
     }
-};
+    if (!ok) {
+        assert(!for_overrun);
+        if (!write_info.just_wrote_overrun) {
+            write_overrun(size);
+        }
+    }
+    write_info.write_offset += size;
+    write_info.just_wrote_overrun = for_overrun;
+    write_info.wrap_offset = std::max(write_info.wrap_offset, write_info.write_offset);
+    return std::make_tuple(ok, write_info);
+}
 
-static hose s_hose;
+void hose::write_overrun(size_t size) {
+    xprintf("write_overrun size=%zu", size);
+    write_packet(OVERRUN_BODY_SIZE, [&](uint8_t *p) {
+        p[0] = HOSE_PACKET_OVERRUN;
+        static_assert(sizeof(size) == 8);
+        memcpy(p + 1, &size, 8);
+    }, /*for_overrun*/ true);
+}
+
+void hose::assert_on_write_thread() {
+    // the game logic that needs to write runs on the main thread, which is
+    // also the thread we are initialized on
+    pthread_t self = pthread_self();
+    if (self != s_main_thread) {
+        panic("assert_on_write_thread failed");
+    }
+}
+
+hose s_hose;
 
 struct mongoose_server {
     void serve() {

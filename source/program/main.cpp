@@ -1,6 +1,17 @@
 #include "lib.hpp"
 #include "serve.hpp"
+#include "stuff.hpp"
 #include <stdarg.h>
+#include <array>
+
+#define PROP(name, offset, ty) \
+    using typeof_##name = ty; \
+    typeof_##name &name() { \
+        return *(typeof_##name *)((char *)this + (offset)); \
+    } \
+    const typeof_##name &name() const { \
+        return *(typeof_##name *)((char *)this + (offset)); \
+    }
 
 namespace nn::diag::detail {
     int PrintDebugString(const char *);
@@ -257,6 +268,120 @@ HOOK_DEFINE_TRAMPOLINE(Stub_gsys_ProcessMeter_measureBeginSystem) {
     }
 };
 
+struct SeenCache {
+    struct Entry {
+        uintptr_t object:48,
+                  frame:16;
+    };
+
+    bool test_and_set(void *object) {
+        auto [entry, found] = find_entry(object);
+        if (!found) {
+            if (count_ >= MAX_COUNT) {
+                xprintf("hash was full");
+                return true;
+            }
+            entry->frame = cur_frame_ % (1 << 16);
+            entry->object = (uintptr_t)object;
+            return false;
+        }
+        return true;
+    }
+
+    std::tuple<Entry *, bool> find_entry(void *object) {
+        assert(object != nullptr);
+        uintptr_t object_up = (uintptr_t)object;
+        assert(object_up < ((uintptr_t)1 << 48));
+        size_t idx = hash(object);
+        size_t nchecked = 0;
+        uint64_t cur_frame = cur_frame_;
+        while (nchecked < NUM_ENTRIES) {
+            Entry *ent = &entries_[idx];
+            if (ent->object == 0 || ent->frame != cur_frame) {
+                return std::make_tuple(ent, false);
+            }
+            if (ent->object == object_up) {
+                return std::make_tuple(ent, true);
+            }
+
+            idx = (idx + 1) % NUM_ENTRIES;
+            nchecked++;
+        }
+        panic("table was unexpectedly full");
+    }
+
+    size_t hash(void *object) {
+        return (uintptr_t)object % NUM_ENTRIES;
+    }
+
+    void next_frame() {
+        cur_frame_++;
+        count_ = 0;
+
+        // clear out entries on a rolling basis
+        size_t possible_frames = 1 << 16;
+        size_t to_clear_per_frame = (NUM_ENTRIES + possible_frames - 1) / possible_frames;
+        // ^ might just be 1
+        for (size_t i = cur_frame_ * to_clear_per_frame;
+                    i < (cur_frame_ + 1) * to_clear_per_frame && i < NUM_ENTRIES;
+                    i++) {
+            entries_[i] = Entry{};
+        }
+    }
+
+    static constexpr size_t NUM_ENTRIES = 24593;
+    static constexpr size_t MAX_COUNT = NUM_ENTRIES / 2;
+    std::array<Entry, NUM_ENTRIES> entries_{};
+    uint16_t cur_frame_ = 0;
+    size_t count_ = 0;
+};
+
+SeenCache s_seen_cache;
+
+struct Hitbox {
+    char x[0x1c8];
+};
+
+static void report_hitbox(Hitbox *hb) {
+    if (!s_seen_cache.test_and_set(hb)) {
+        s_hose.write_fixed(
+            hose_tag{"hitbox"},
+            hb,
+            *hb
+        );
+    }
+}
+
+HOOK_DEFINE_TRAMPOLINE(StubHitboxCollide) {
+    static long Callback(Hitbox *hb1, Hitbox *hb2) {
+        long ret = Orig(hb1, hb2);
+        report_hitbox(hb1);
+        report_hitbox(hb2);
+        s_hose.write_fixed(
+            hose_tag{"collisi"},
+            hb1,
+            hb2,
+            ret
+        );
+        return ret;
+    }
+};
+
+struct AreaSystem {
+    PROP(worldID, 0x18, uint32_t);
+};
+
+HOOK_DEFINE_TRAMPOLINE(StubAreaSystemDoManyCollisions) {
+    static void Callback(AreaSystem *self) {
+        s_hose.write_fixed(
+            hose_tag{"do_many"},
+            self,
+            (uint64_t)self->worldID()
+        );
+        s_seen_cache.next_frame();
+        Orig(self);
+    }
+};
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
     xprintf("exl_main, TS=%lx", exl::util::modules::GetTargetStart());
@@ -292,6 +417,11 @@ extern "C" void exl_main(void* x0, void* x1) {
     // Store 0 to timer instead of the normal animation length
     exl::patch::CodePatcher(0x012dcc6c).Write<uint32_t>(0xf900581f); // cPose
     exl::patch::CodePatcher(0x012dc9e8).Write<uint32_t>(0xf9005a7f); // cFall
+
+
+    // TODO: make these dynamic hooks
+    StubHitboxCollide::InstallAtOffset(0xe28a50);
+    StubAreaSystemDoManyCollisions::InstallAtOffset(0xe44320);
 
     log_str("done hooking");
 }

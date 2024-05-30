@@ -1,3 +1,4 @@
+#pragma once
 #include <stdlib.h>
 
 void log_str(const char *str);
@@ -16,3 +17,72 @@ void xprintf(const char *fmt, ...);
     } \
 } while (0)
 
+// --
+
+#define PROP(name, offset, ty) \
+    using typeof_##name = ty; \
+    static constexpr size_t offsetof_##name() { \
+        return offset; \
+    } \
+    typeof_##name &name() { \
+        return *(typeof_##name *)((char *)this + offsetof_##name()); \
+    } \
+    const typeof_##name &name() const { \
+        return *(typeof_##name *)((char *)this + offsetof_##name()); \
+    }
+
+#define PT_TYPE_SIZE(size) \
+    static constexpr size_t size_of() { \
+        return size; \
+    } \
+    static constexpr bool _is_pt_type = true
+
+#define PT_TYPE_UNSIZED \
+    static constexpr bool _is_pt_type = true
+
+// A type that uses PROP macros for its fields.
+template <typename T>
+concept is_pt_type = requires { { T::_is_pt_type }; };
+
+template <is_pt_type T>
+inline size_t _pt_size_of() { return T::size_of(); }
+
+template <typename T>
+inline size_t _pt_size_of() { return sizeof(T); }
+
+template <typename T>
+inline size_t pt_size_of = _pt_size_of<T>();
+
+// Pointer to a type that uses PROP macros for its fields.  Normal pointer
+// arithmetic won't work because the type doesn't have any real fields, so
+// sizeof will give the wrong answer.
+template <is_pt_type T>
+struct pt_pointer {
+    T *raw;
+
+    pt_pointer(T *raw) : raw(raw) {}
+    T &operator*() const { return *raw; }
+    T *operator->() const { return raw; }
+    operator bool() const { return !!raw; }
+    T &operator[](size_t i) const { return *(*this + i); }
+
+    pt_pointer<T> operator+(size_t n) const {
+        return (T *)((char *)raw + n * pt_size_of<T>);
+    }
+};
+
+template <is_pt_type T, size_t count>
+struct pt_array {
+    pt_pointer<T> operator*() const { return *(T *)this; }
+    T *operator->() const { return (T *)this; }
+    T &operator[](size_t i) const { return *(*this + i); }
+
+    pt_pointer<T> operator+(size_t n) const {
+        return (T *)((char *)this + n * pt_size_of<T>);
+    }
+
+    static constexpr size_t size_of() {
+        return pt_size_of<T> * count;
+    }
+    static constexpr bool _is_pt_type = true;
+};

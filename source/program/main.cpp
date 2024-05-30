@@ -4,69 +4,11 @@
 #include <stdarg.h>
 #include <array>
 
-#define PROP(name, offset, ty) \
-    using typeof_##name = ty; \
-    typeof_##name &name() { \
-        return *(typeof_##name *)((char *)this + (offset)); \
-    } \
-    const typeof_##name &name() const { \
-        return *(typeof_##name *)((char *)this + (offset)); \
-    }
+// TODO: move this
 
 namespace nn::diag::detail {
     int PrintDebugString(const char *);
 }
-
-union state_obj_callback {
-    // this is actually a pointer-to-member-function
-    struct {
-        uint64_t _;
-        uint64_t is_virt:1,
-                 :63;
-    };
-    struct {
-        uint64_t func;
-        uint64_t zero;
-    } nonvirt;
-    struct {
-        uint64_t vtable_offset;
-        int64_t  is_virt:1,
-                 offset_to_vtable:63;
-    } virt;
-};
-static_assert(sizeof(union state_obj_callback) == 0x10);
-
-struct state_obj {
-    void *vt;
-    void *self;
-    union state_obj_callback callbacks[3];
-};
-static_assert(sizeof(struct state_obj) == 0x40);
-
-
-struct string {
-    void *vt;
-    const char *str;
-};
-
-struct statemgr {
-    void *vtable;
-    int state;
-    int counter;
-    int f10;
-    int f14;
-    int f18;
-    int f1c;
-    char f21;
-    char pad22[7];
-    int state_objs_count;
-    int pad28;
-    struct state_obj *state_objs;
-    int names_count;
-    int pad3c;
-    struct string *names;
-};
-static_assert(sizeof(struct statemgr) == 0x48);
 
 void log_str(const char *str) {
     nn::diag::detail::PrintDebugString(str);
@@ -82,28 +24,139 @@ void xprintf(const char *fmt, ...) {
     log_str(buf);
 }
 
-static const char *get_state_name(struct statemgr *smgr, int state) {
-    if (state >= 0 && state < smgr->names_count)
-        return smgr->names[state].str;
-    else
+namespace mm {
+
+// -- Naming
+//
+// All of these classes are things defined either in Mario Maker or in the SDK.
+// The naming convention is not random.
+//
+// `CamelCase` is used for names that either definitely or probably match the
+// actual name in the original source code.
+//
+// `snake_case` is used for names that are made up.
+//
+// These may be mixed: e.g., `AreaSystem_do_many_collisions` represents a
+// method with an unknown name on a class with a (probably-)known name.
+//
+// Actual type and function names may be discovered in a few different ways:
+// - The dynamically linked SDK has mostly full symbols.
+// - Some version of Splatoon 2 had symbols for the main binary, and it
+//   statically links many of the same libraries as Mario Maker 2.
+// - Some names are revealed through strings (though these are more likely to
+//   be guesses).
+//
+// -- Conventions
+//
+// Most of these types are defined in an unconventional way, using PROP macros
+// instead of real fields.
+//
+// This has two purposes:
+// - Allowing the offset of each field to be explicitly specified, without
+//   needing to manually add padding for unknown regions of the type.
+//
+// - Making it easier to have one binary that supports multiple versions of
+//   Mario Maker (which might have fields at different offsets).
+
+union pointer_to_member_function {
+    struct {
+        uint64_t _;
+        uint64_t is_virt:1,
+                 :63;
+    };
+    struct {
+        uint64_t func;
+        uint64_t zero;
+    } nonvirt;
+    struct {
+        uint64_t vtable_offset;
+        int64_t  is_virt:1,
+                 offset_to_vtable:63;
+    } virt;
+
+    void *resolve(void *object) const {
+        if (is_virt) {
+            uintptr_t vtable = *(uintptr_t *)((char *)object + virt.offset_to_vtable);
+            return *(void **)(vtable + virt.vtable_offset);
+        } else {
+            return (void *)nonvirt.func;
+        }
+    }
+};
+static_assert(sizeof(pointer_to_member_function) == 0x10);
+
+struct SafeString {
+    PROP(vtable,     0x0, void *);
+    PROP(str,        0x8, const char *);
+    PT_TYPE_SIZE(0x10);
+};
+
+// Lp::Utl::StateMachine::Delegate<T>
+struct StateMachineDelegate {
+    PROP(vtable,     0x0,  void *);
+    PROP(owner,      0x8,  void *);
+    PROP(enter,      0x10, pointer_to_member_function);
+    PROP(exec,       0x20, pointer_to_member_function);
+    PROP(exit,       0x30, pointer_to_member_function);
+    PT_TYPE_SIZE(0x40);
+
+    pointer_to_member_function &callback_n(size_t n) {
+        switch (n) {
+            case 0: return enter();
+            case 1: return exec();
+            case 2: return exit();
+            default: panic("invalid");
+        }
+    }
+};
+
+template <typename T>
+struct CountPtr {
+    uint32_t count;
+    pt_pointer<T> ptr;
+};
+
+// Lp::Utl::StateMachine
+struct StateMachine {
+    PROP(state,   0x8, uint32_t);
+    PROP(states, 0x28, CountPtr<StateMachineDelegate>);
+    PROP(names,  0x38, CountPtr<SafeString>);
+    PT_TYPE_SIZE(0x48);
+};
+
+struct hitbox {
+    PT_TYPE_SIZE(0x1c8);
+};
+
+struct hitbox_manager {
+
+};
+
+struct AreaSystem {
+    PROP(world_id,   0x18, uint32_t);
+    PROP(hitbox_mgr, 0x40, hitbox_manager);
+    PT_TYPE_UNSIZED;
+};
+
+} // namespace mm
+
+static const char *get_state_name(mm::StateMachine *sm, uint32_t state) {
+    if (state < sm->names().count) {
+        return sm->names().ptr[state].str();
+    } else {
         return "?";
+    }
 }
 
 __attribute__((noinline))
-static uintptr_t get_state_callback(struct statemgr *smgr, int state, int which_callback) {
-    EXL_ASSERT(state >= 0 && state < smgr->state_objs_count);
-    struct state_obj *obj = &smgr->state_objs[state];
-    union state_obj_callback *cb = &obj->callbacks[which_callback];
-    uintptr_t func = 0;
-    if (cb->is_virt) {
-        void *self = obj->self;
-        uintptr_t vtable = *(uintptr_t *)((char *)self + cb->virt.offset_to_vtable);
-        func = *(uintptr_t *)(vtable + cb->virt.vtable_offset);
-    } else {
-        func = cb->nonvirt.func;
-    }
-    if (func)
+static uintptr_t get_state_callback(mm::StateMachine *sm, uint32_t state, uint32_t which_callback) {
+    EXL_ASSERT(state < sm->states().count);
+    mm::StateMachineDelegate *delegate = &sm->states().ptr[state];
+    mm::pointer_to_member_function cb = delegate->callback_n(which_callback);
+    uintptr_t func = (uintptr_t)cb.resolve(delegate->owner());
+    if (func) {
         func -= exl::util::modules::GetTargetStart(); // unslide address
+    }
     return func;
 }
 
@@ -122,151 +175,32 @@ return_address_from_frame_impl(void *frame0, size_t n) {
 #define return_address_from_frame(n) \
     return_address_from_frame_impl(__builtin_frame_address(0), n)
 
-HOOK_DEFINE_TRAMPOLINE(StubStatemgrSetState) {
-    static void Callback(struct statemgr *smgr, int state) {
-        int old_state = smgr->state;
+HOOK_DEFINE_TRAMPOLINE(Stub_StateMachine_changeState) {
+    static void Callback(mm::StateMachine *sm, int state) {
+        int old_state = sm->state();
         xprintf("%p.set_state(%s(%d) -> %s(%d) in:0x%lx tick:0x%lx out:0x%lx (obj:%p)) <- %p <- %p <- %p <- %p <- %p",
-            smgr,
-            get_state_name(smgr, old_state), old_state,
-            get_state_name(smgr, state), state,
-            get_state_callback(smgr, state, 0),
-            get_state_callback(smgr, state, 1),
-            get_state_callback(smgr, state, 2),
-            smgr->state_objs[state].self,
+            sm,
+            get_state_name(sm, old_state), old_state,
+            get_state_name(sm, state), state,
+            get_state_callback(sm, state, 0),
+            get_state_callback(sm, state, 1),
+            get_state_callback(sm, state, 2),
+            sm->states().ptr[state].owner(),
             __builtin_return_address(0),
             return_address_from_frame(0),
             return_address_from_frame(1),
             return_address_from_frame(2),
             return_address_from_frame(3)
         );
-        Orig(smgr, state);
+        Orig(sm, state);
     }
+    static constexpr uintptr_t Offset_301 = 0x8b9280;
 };
 
-HOOK_DEFINE_TRAMPOLINE(StubOpenFile) {
-    static long Callback(struct string *name, long x1, long x2, long x3, long x4, long x5) {
-        char mine[256];
-        const char *orig = name->str;
-        if (orig) {
-            size_t len = strlen(orig);
-            if (len < sizeof(mine) - 1) {
-                memcpy(mine, orig, len);
-                mine[len] = '\0';
-                while (char *s = strstr(mine, "WU")) {
-                    s[0] = 'M';
-                    s[1] = '1';
-                }
-                name->str = mine;
-                long ret = Orig(name, x1, x2, x3, x4, x5);
-                xprintf("open_file(%s) => %lx", name->str, ret);
-                name->str = orig;
-                if (ret) {
-                    return ret;
-                }
-            }
-        }
-        long ret = Orig(name, x1, x2, x3, x4, x5);
-        xprintf("open_file(%s) => %lx", name->str, ret);
-        return ret;
-    }
-};
-
-HOOK_DEFINE_TRAMPOLINE(StubSearchAssetCallTableByName) {
-    static void *Callback(void *out, void *self, const char *name) {
-        xprintf("searchAssetCallTableByName(%s)", name);
-        return Orig(out, self, name);
-    }
-};
-
-HOOK_DEFINE_TRAMPOLINE(Stub_xlink2_System_setGlobalPropertyValue) {
-    static void Callback(void *self, int property_id, int value) {
-        xprintf("setGlobalPropertyValue(%p, %d, %d)", self, property_id, value);
-        if (property_id == 0) {
-            value = 3; // NSMBU
-        }
-        Orig(self, property_id, value);
-    }
-};
-
-HOOK_DEFINE_TRAMPOLINE(StubGetBlockInfo) {
-    static int *Callback(void *block) {
-        static int x = 0x100009;
-        return &x;
-    }
-};
-
-HOOK_DEFINE_TRAMPOLINE(Stub_gsys_Model_create) {
-    static void *Callback(struct string *name, void *create_arg, void *heap) {
-        void *ret = Orig(name, create_arg, heap);
-        xprintf("gsys::Model::create(name=%s) => %p", name->str, ret);
-        return ret;
-    }
-};
-HOOK_DEFINE_TRAMPOLINE(Stub_gsys_Model_pushBack) {
-    static void *Callback(void *self, void *model_resource, struct string *name, void *heap) {
-        xprintf("-- gsys::Model::pushBack(%p, name=%s)", self, name->str);
-        return Orig(self, model_resource, name, heap);
-    }
-};
-
-struct NVNmemoryPool {
-    char x0[0x10];
-    char flags;
-    char x11[0x70-0x11];
-    char *ptr;
-};
-
-struct agl_VertexBuffer {
-    char x0[0xf8];
-    int offset;
-    int xfc;
-    NVNmemoryPool *pool;
-};
-
-
-HOOK_DEFINE_TRAMPOLINE(Stub_agl_VertexBuffer_flushCPUCache) {
-    static void Callback(agl_VertexBuffer *self, int offset, long size) {
-        NVNmemoryPool *pool = self->pool;
-        if (pool && ((pool->flags & 5) == 4) && pool->ptr) {
-            char *ptr = pool->ptr;
-            static volatile void *ptr_to_corrupt;
-            xprintf("flushCPUCache(offset=%#x+%#x, size=%#lx): data=%p <%p>", self->offset, offset, size, ptr, &ptr_to_corrupt);
-            if (ptr == ptr_to_corrupt) {
-                xprintf("!");
-                memset(ptr + self->offset + offset, 0xee, size);
-            }
-        } else {
-            xprintf("flushCPUCache(offset=%#x+%#x, size=%#lx): weird", self->offset, offset, size);
-        }
-        Orig(self, offset, size);
-
-    }
-};
-HOOK_DEFINE_TRAMPOLINE(StubBgUnitGroupInitSpecific) {
-    static void Callback(void *self, int type) {
-        Orig(self, type);
-        float *fp = (float *)((char *)self + 0x6c);
-        xprintf("InitSpecific(%p, %d): %f,%f,%f %f,%f", self, type, fp[0], fp[1], fp[2], fp[3], fp[4]);
-        fp[3] /= 2;
-        fp[4] *= 2;
-
-    }
-};
-
-// this stretches blocks' visual appearance
-HOOK_DEFINE_TRAMPOLINE(StubBgRendererXX) {
-    static void Callback(void *self, int w1, float *xyz, void *w3, float *wh_in_blocks, int x5, void *x6) {
-        float new_wh_in_blocks[2] = {wh_in_blocks[0] / 2, wh_in_blocks[1] * 2};
-        Orig(self, w1, xyz, w3, new_wh_in_blocks, x5, x6);
-    }
-};
-
-HOOK_DEFINE_TRAMPOLINE(Stub_gsys_ProcessMeter_measureBeginSystem) {
-    static long Callback(void *self, struct string *name, int x2) {
-        xprintf("-- measureBeginSystem(%s)", name->str);
-        return Orig(self, name, x2);
-    }
-};
+template <typename StubFoo>
+void install() {
+    StubFoo::InstallAtOffset(StubFoo::Offset_301);
+}
 
 struct SeenCache {
     struct Entry {
@@ -338,11 +272,7 @@ struct SeenCache {
 
 SeenCache s_seen_cache;
 
-struct Hitbox {
-    char x[0x1c8];
-};
-
-static void report_hitbox(Hitbox *hb) {
+static void report_hitbox(mm::hitbox *hb) {
     if (!s_seen_cache.test_and_set(hb)) {
         s_hose.write_fixed(
             hose_tag{"hitbox"},
@@ -352,8 +282,8 @@ static void report_hitbox(Hitbox *hb) {
     }
 }
 
-HOOK_DEFINE_TRAMPOLINE(StubHitboxCollide) {
-    static long Callback(Hitbox *hb1, Hitbox *hb2) {
+HOOK_DEFINE_TRAMPOLINE(Stub_hitbox_collide) {
+    static long Callback(mm::hitbox *hb1, mm::hitbox *hb2) {
         long ret = Orig(hb1, hb2);
         report_hitbox(hb1);
         report_hitbox(hb2);
@@ -365,23 +295,22 @@ HOOK_DEFINE_TRAMPOLINE(StubHitboxCollide) {
         );
         return ret;
     }
+    static constexpr uintptr_t Offset_301 = 0xe28a50;
 };
 
-struct AreaSystem {
-    PROP(worldID, 0x18, uint32_t);
-};
-
-HOOK_DEFINE_TRAMPOLINE(StubAreaSystemDoManyCollisions) {
-    static void Callback(AreaSystem *self) {
+HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
+    static void Callback(mm::AreaSystem *self) {
         s_hose.write_fixed(
             hose_tag{"do_many"},
             self,
-            (uint64_t)self->worldID()
+            (uint64_t)self->world_id()
         );
         s_seen_cache.next_frame();
         Orig(self);
     }
+    static constexpr uintptr_t Offset_301 = 0xe44320;
 };
+
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
     xprintf("exl_main, TS=%lx", exl::util::modules::GetTargetStart());
@@ -389,22 +318,9 @@ extern "C" void exl_main(void* x0, void* x1) {
 
     serve_main();
 
+    install<Stub_StateMachine_changeState>();
+
     // this is for 3.0.1:
-
-    StubStatemgrSetState::InstallAtOffset(0x8b9280);
-    //StubOpenFile::InstallAtOffset(0x008b7b80);
-    //StubWtf::InstallAtOffset(0x1bc1590);
-    //StubSearchAssetCallTableByName::InstallAtOffset(0x005ac9e0);
-    //Stub_xlink2_System_setGlobalPropertyValue::InstallAtOffset(0x5a3490);
-    //StubGetBlockInfo::InstallAtOffset(0x00e25ae0);
-
-    //Stub_gsys_Model_create::InstallAtOffset(0x003e8cd0);
-    //Stub_gsys_Model_pushBack::InstallAtOffset(0x003e90f0);
-
-    //Stub_agl_VertexBuffer_flushCPUCache::InstallAtOffset(0x002fba20);
-    //StubBgUnitGroupInitSpecific::InstallAtOffset(0x00daf110);
-    //StubBgRendererXX::InstallAtOffset(0x00da2ec0);
-    //Stub_gsys_ProcessMeter_measureBeginSystem::InstallAtOffset(0x0046c2b0);
 
     {
         // Patch to skip intro cutscene
@@ -420,8 +336,8 @@ extern "C" void exl_main(void* x0, void* x1) {
 
 
     // TODO: make these dynamic hooks
-    StubHitboxCollide::InstallAtOffset(0xe28a50);
-    StubAreaSystemDoManyCollisions::InstallAtOffset(0xe44320);
+    install<Stub_hitbox_collide>();
+    install<Stub_AreaSystem_do_many_collisions>();
 
     log_str("done hooking");
 }

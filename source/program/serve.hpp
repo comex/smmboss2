@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <tuple>
 #include <string.h>
+#include "stuff.hpp"
 
 size_t add_ws_header_size(size_t size);
 uint8_t *fill_ws_header(uint8_t *p, size_t size, size_t min_size);
@@ -30,9 +31,9 @@ struct hose {
     template <typename ...T>
     void write_fixed(const T &...t) {
         size_t total_size = 0;
-        ((total_size += sizeof(t)), ...);
+        ((total_size += pt_size_of<T>), ...);
         write_packet(total_size, [&](uint8_t *dst) {
-            ((memcpy(dst, &t, sizeof(t)), dst += sizeof(t)), ...);
+            ((memcpy(dst, &t, pt_size_of<T>), dst += pt_size_of<T>), ...);
         });
     }
 

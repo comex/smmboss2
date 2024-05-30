@@ -4,21 +4,48 @@ from guest_access import *
 import socket, struct, sys, os, time, importlib
 from threading import Lock
 from binascii import hexlify
-import yaml
+from functools import cache
 
-addrs_yaml = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), 'addrs.yaml')))
+@cache
+def get_addrs_yaml():
+    import yaml
+    return yaml.safe_load(open(os.path.join(os.path.dirname(__file__), '..', 'addrs.yaml')))
+
+@cache
+def _dotnote_addrs():
+    return set(stuff.get('addrs', {}).get('dot_note') for stuff in get_addrs_yaml().values())
 
 class MM:
     class Addr:
+        # Just some syntax sugar for getting addresses:
+        # allow mm.addr.foo rather than mm.yaml['addrs']['foo']
         def __init__(self, mm):
             self.mm = mm
         def __getattr__(self, name):
             return self.mm.slide(self.mm.yaml['addrs'][name])
-    def __init__(self, guest):
-        self.guest = guest
-        self.addr = self.Addr(self)
-        dotnote_addrs = set(stuff.get('addrs', {}).get('dot_note') for stuff in addrs_yaml.values())
 
+    def __init__(self):
+        raise 'do not call'
+
+    @classmethod
+    def with_guest(cls, guest):
+        self = cls.__new__(cls)
+        self.guest = guest
+        self.extract_image_info_etc()
+        self.process_main_image_info()
+        return self
+
+    @classmethod
+    def detached(cls, build_id):
+        self = cls.__new__(cls, 42)
+        self.guest = None
+        self.main_image_info = {
+            'build_id': build_id,
+        }
+        self.process_main_image_info()
+        return self
+
+    def extract_image_info_etc(self):
         image_infos = []
         main_image_info = None
 
@@ -43,7 +70,7 @@ class MM:
             info['image_size'] = info['image_end'] - info['image_start']
 
             if main_image_info is None:
-                for dotnote_addr in dotnote_addrs:
+                for dotnote_addr in _dotnote_addrs():
                     if dotnote_addr is None or dotnote_addr >= info['image_size']:
                         continue
                     build_id_addr = dotnote_addr + 16
@@ -51,7 +78,7 @@ class MM:
                     if len(maybe_build_id) != 16:
                         continue
                     padded = (bytes(maybe_build_id) + b'\0'*16).hex()
-                    if padded in addrs_yaml:
+                    if padded in get_addrs_yaml():
                         info['build_id'] = padded
                         main_image_info = info
             image_infos.append(info)
@@ -62,9 +89,12 @@ class MM:
         self.image_infos = image_infos
         self.main_image_info = main_image_info
 
-        self.yaml = addrs_yaml[main_image_info['build_id']]
+    def process_main_image_info(self):
+        self.yaml = get_addrs_yaml()[self.main_image_info['build_id']]
         self.version = self.yaml['version']
-        self._slide = main_image_info['image_start']
+        if (slide := self.main_image_info.get('image_start')) is not None:
+            self._slide = slide
+        self.addr = self.Addr(self)
 
     def slide(self, addr):
         if addr == 0:
@@ -96,6 +126,7 @@ class MM:
         world.mm = self
         world._import('smmboss_world.py')
         return world
+
     @functools.cached_property
     def world(self):
         return self.make_world()

@@ -247,10 +247,8 @@ class GuestStruct(GuestPtr):
             fp.write(' (null)')
             return
         indent2 = indent + '  '
-        for cls in type(self).mro()[::-1]:
-            for key, prop in cls.__dict__.items():
-                if isinstance(prop, MyProperty):
-                    prop.dump_field(self, fp, indent2, key, **opts)
+        for key, prop in self._properties():
+            prop.dump_field(self, fp, indent2, key, **opts)
     def get(self):
         return self
     def set(self, val):
@@ -261,12 +259,25 @@ class GuestStruct(GuestPtr):
         ret = super().__repr__()
         if self.full_repr and self.addr != 0:
             subreprs = []
-            for cls in type(self).mro()[::-1]:
-                for key, prop in cls.__dict__.items():
-                    if isinstance(prop, MyProperty):
-                        subreprs.append(repr(getattr(self, key)))
+            for key, prop in self._properties():
+                subreprs.append(repr(getattr(self, key)))
             ret += '({})'.format(', '.join(subreprs))
         return ret
+
+    def _properties(self):
+        return (
+            (key, prop)
+            for cls in type(self).mro()[::-1]
+            for key, prop in cls.__dict__.items()
+            if isinstance(prop, MyProperty)
+        )
+
+    @classmethod
+    def _base_guest_struct(cls):
+        base = cls.__bases__[0]
+        if (issubclass(base, GuestStruct) and
+            base is not GuestStruct):
+            return base
 
 class GuestCString(GuestPtr):
     def sizeof_star(self):

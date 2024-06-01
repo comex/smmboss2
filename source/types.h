@@ -17,6 +17,10 @@ typedef int32_t s32;     ///<  32-bit signed integer.
 typedef int64_t s64;     ///<  64-bit signed integer.
 typedef __int128_t s128; ///< 128-bit unsigned integer.
 
+typedef float f32;           ///<  32-bit float.
+typedef double f64;          ///<  64-bit float.
+typedef __Float64x2_t f64x2; ///<  Two 64-bit floats.
+
 typedef volatile u8 vu8;     ///<   8-bit volatile unsigned integer.
 typedef volatile u16 vu16;   ///<  16-bit volatile unsigned integer.
 typedef volatile u32 vu32;   ///<  32-bit volatile unsigned integer.

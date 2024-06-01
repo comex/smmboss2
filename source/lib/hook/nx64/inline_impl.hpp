@@ -7,6 +7,13 @@ namespace exl::hook::nx64 {
         u32 W;
     };
 
+    union FpRegister {
+        f32 S;
+        f64 D;
+        f64x2 Q;
+    };
+
+
     union GpRegisters {
         GpRegister m_Gp[31];
         struct {
@@ -46,6 +53,7 @@ namespace exl::hook::nx64 {
             impl::GpRegisterAccessor32 W;
             GpRegisters m_Gpr;
         };
+        FpRegister m_Fpr[32];
     };
 
     void InitializeInline();

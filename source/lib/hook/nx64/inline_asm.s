@@ -12,7 +12,7 @@
 .endm
 
 /* Size of stack to reserve for the context. Adjust this along with CtxStackSize in inline_impl.cpp */
-.set CTX_STACK_SIZE, 0x100
+.set CTX_STACK_SIZE, 0x300
 
 /* For these macros, LR is deliberately not backed up as that's handled by the entry's entrypoint. */
 .macro armBackupRegisters
@@ -32,6 +32,24 @@
     stp x24, x25, [sp, #0xC0]
     stp x26, x27, [sp, #0xD0]
     stp x28, x29, [sp, #0xE0]
+    str x30,      [sp, #0xF0]
+
+    stp q0, q1,   [sp,  #0x00]
+    stp q2, q3,   [sp,  #0x20]
+    stp q4, q5,   [sp,  #0x40]
+    stp q6, q7,   [sp,  #0x60]
+    stp q8, q9,   [sp,  #0x80]
+    stp q10, q11, [sp,  #0xa0]
+    stp q12, q13, [sp,  #0xc0]
+    stp q14, q15, [sp,  #0xe0]
+    stp q16, q17, [sp, #0x100]
+    stp q18, q19, [sp, #0x120]
+    stp q20, q21, [sp, #0x140]
+    stp q22, q23, [sp, #0x160]
+    stp q24, q25, [sp, #0x180]
+    stp q26, q27, [sp, #0x1a0]
+    stp q28, q29, [sp, #0x1c0]
+    stp q30, q31, [sp, #0x1e0]
 .endm
 
 .macro armRecoverRegisters
@@ -50,6 +68,25 @@
     ldp x24, x25, [sp, #0xC0]
     ldp x26, x27, [sp, #0xD0]
     ldp x28, x29, [sp, #0xE0]
+    ldr x30,      [sp, #0xF0]
+
+    ldp q0, q1,   [sp,  #0x00]
+    ldp q2, q3,   [sp,  #0x20]
+    ldp q4, q5,   [sp,  #0x40]
+    ldp q6, q7,   [sp,  #0x60]
+    ldp q8, q9,   [sp,  #0x80]
+    ldp q10, q11, [sp,  #0xa0]
+    ldp q12, q13, [sp,  #0xc0]
+    ldp q14, q15, [sp,  #0xe0]
+    ldp q16, q17, [sp, #0x100]
+    ldp q18, q19, [sp, #0x120]
+    ldp q20, q21, [sp, #0x140]
+    ldp q22, q23, [sp, #0x160]
+    ldp q24, q25, [sp, #0x180]
+    ldp q26, q27, [sp, #0x1a0]
+    ldp q28, q29, [sp, #0x1c0]
+    ldp q30, q31, [sp, #0x1e0]
+
     add sp, sp, CTX_STACK_SIZE
 .endm
 

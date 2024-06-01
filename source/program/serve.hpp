@@ -74,6 +74,11 @@ struct hose {
         write_info_.store(new_write_info, std::memory_order_release);
     }
 
+    // any thread func:
+    uint64_t get_and_reset_total_overrun_size() {
+        return total_overrun_size_.exchange(0, std::memory_order_relaxed);
+    }
+
 private:
     // shared data:
     struct write_info {
@@ -87,6 +92,7 @@ private:
     std::atomic<int> new_fd_{-1};
     std::atomic<write_info> write_info_{{.wrap_offset = sizeof(buf_)}};
     std::atomic<uint32_t> read_offset_{0};
+    std::atomic<uint64_t> total_overrun_size_{0}; // used for stats
     _Alignas(16) uint8_t buf_[128 * 1024];
 
     // reader thread data:
@@ -96,11 +102,11 @@ private:
     void do_iter();
     void do_sleep();
 
-    static constexpr size_t OVERRUN_BODY_SIZE = 16;
+    static constexpr size_t OVERRUN_BODY_SIZE = 8; // just a tag
 
     std::tuple<bool, write_info> reserve_space(size_t size, bool for_overrun);
 
-    void write_overrun(size_t size);
+    void write_overrun();
 
     void assert_on_write_thread();
 };

@@ -4,6 +4,7 @@
 }
 </style>
 
+<div id="overrun"></div>
 <svg width="500" height="500" id="diagram">
 <g id="diagram_hitboxes"/>
 </svg>
@@ -446,19 +447,24 @@ class RPCConn {
   }
   async reqWrite(addr, data) {
     assert(ArrayBuffer.isView(data));
-    let headerLen = 17;
+    let headerLen = 9;
     let len = data.byteLength;
     let ab = new ArrayBuffer(headerLen + len);
     new Uint8Array(ab, headerLen).set(new Uint8Array(data.buffer, data.byteOffset, len));
     let dv = new DataView(ab);
     dv.setInt8(0, 2); // RPC_REQ_WRITE
     dv.setBigUint64(1, addr, true);
-    dv.setBigUint64(9, BigInt(len), true);
     let resp = await this.rawRequest(dv);
     assert(resp.byteLength == 8);
     let actual = resp.getBigUint64(0, true);
     assert(actual <= len);
     return [actual, len];
+  }
+  async reqGetOverrunStats() {
+    let u8 = Uint8Array.of(3); // RPC_REQ_GET_OVERRUN_STATS
+    let resp = await this.rawRequest(u8);
+    assert(resp.byteLength == 8);
+    return resp.getBigUint64(0, true);
   }
 }
 
@@ -611,6 +617,9 @@ class HoseConn {
     case 'hitbox\0\0':
       this.parseHitbox(ab);
       break;
+    case 'overrun\0':
+      this.parseOverrun(ab);
+      break;
     default:
       console.log(`hose message with unknown tag ${JSON.stringify(tag)}`);
     }
@@ -652,18 +661,27 @@ class HoseConn {
     }
     this.curFrame.hitboxes.set(ptr, new Hitbox.Local(new DataView(ab, 0x10)));
   }
+  parseOverrun(ab) {
+    document.getElementById('overrun').innerHTML = 'got overrun!';
+  }
 }
 
 let theBaseURL = 'ws://neb-solidus:8000';
 
 async function go() {
-  let rpcConn = new RPCConn(theBaseURL);
-  let data = await rpcConn.reqRead(0x1238n, 40);
-  console.log(data);
-  rpcConn.wsw.setWantOpen(false);
+  g_rpcConn = new RPCConn(theBaseURL);
+  (async () => {
+    while (1) {
+      if (g_rpcConn.isOpen) {
+        let overrun = await g_rpcConn.reqGetOverrunStats();
+        console.log(`overrun: ${overrun}`);
+      }
+      await sleep(1000);
+    }
+  })();
 
   g_hoseConn = new HoseConn(theBaseURL);
-  g_hoseConn.setWantOpen(true);
+  g_hoseConn.setWantOpen(false);
 
 }
 go();

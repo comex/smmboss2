@@ -120,4 +120,8 @@ ERRNO_WRAPPER(static inline, int, poll, nnsocketPoll,
 
 int nnsocketInitialize(void *tmem, uint64_t tmem_end_offset, uint64_t tmem_start_offset, int max_sess);
 
+// this is from the SDK, but based on the thread implementation in
+// syscalls.cpp, pthread_t is equivalent between newlib and the SDK pthreads
+int pthread_setname_np(pthread_t thread, const char *name);
+
 __END_DECLS

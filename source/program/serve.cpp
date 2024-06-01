@@ -6,14 +6,17 @@
 #include <string.h>
 #include <mutex>
 #include "util/modules.hpp"
+#include "syscalls.h"
 
-static void start_thread(void *(*f)(void *), void *ctx) {
+static void start_thread(const char *name, void *(*f)(void *), void *ctx) {
     pthread_attr_t attr;
     assert(!pthread_attr_init(&attr));
     assert(!pthread_attr_setstacksize(&attr, 0x4000));
     pthread_t pt;
     int create_ret = pthread_create(&pt, &attr, f, ctx);
     assert(!create_ret);
+    int setname_ret = pthread_setname_np(pt, name);
+    assert(!setname_ret);
 }
 
 static pthread_t s_main_thread;
@@ -174,15 +177,17 @@ void hose::do_iter() {
            write_info.write_offset <= write_info.wrap_offset &&
            write_info.wrap_offset <= sizeof(buf_));
 
+    if (read_offset == write_info.write_offset) {
+        // no data to send
+        return do_sleep();
+    }
+
     if (read_offset == write_info.wrap_offset) {
         read_offset = 0;
     }
 
     size_t to_send;
-    if (read_offset == write_info.write_offset) {
-        // no data to send
-        return do_sleep();
-    } else if (read_offset < write_info.write_offset) {
+    if (read_offset < write_info.write_offset) {
         to_send = write_info.write_offset - read_offset;
     } else { // read_offset > write_offset
         to_send = write_info.wrap_offset - read_offset;
@@ -238,8 +243,9 @@ std::tuple<bool, hose::write_info> hose::reserve_space(size_t size, bool for_ove
     if (!ok) {
         assert(!for_overrun);
         if (!write_info.just_wrote_overrun) {
-            write_overrun(size);
+            write_overrun();
         }
+        total_overrun_size_.fetch_add(size, std::memory_order_relaxed);
     }
     write_info.write_offset += size;
     write_info.just_wrote_overrun = for_overrun;
@@ -247,11 +253,10 @@ std::tuple<bool, hose::write_info> hose::reserve_space(size_t size, bool for_ove
     return std::make_tuple(ok, write_info);
 }
 
-void hose::write_overrun(size_t size) {
-    xprintf("write_overrun size=%zu", size);
+void hose::write_overrun() {
+    //xprintf("write_overrun size=%zu", size);
     write_packet([&](auto &w) {
         w.write_tag({"overrun"});
-        w.write_prim(size);
     }, /*for_overrun*/ true);
 }
 
@@ -301,6 +306,7 @@ private:
     enum rpc_req_type : uint8_t {
         RPC_REQ_READ = 1,
         RPC_REQ_WRITE = 2,
+        RPC_REQ_GET_OVERRUN_STATS = 3,
     };
 
     struct rpc_req {
@@ -310,7 +316,12 @@ private:
                 uint64_t addr;
                 uint64_t len;
                 char data[0];
-            } __attribute__((packed)) rw;
+            } __attribute__((packed)) read;
+            struct {
+                uint64_t addr;
+                char data[0];
+            } __attribute__((packed)) write;
+            char get_overrun_stats[0];
         };
 
     } __attribute__((packed));
@@ -325,11 +336,11 @@ private:
         }
         switch (req->type) {
         case RPC_REQ_READ: {
-            if (len < offsetof_end(rpc_req, rw)) {
-                err = "too short for rw";
+            if (len != offsetof_end(rpc_req, read)) {
+                err = "wrong len for read";
                 goto err;
             }
-            size_t rw_len = req->rw.len;
+            size_t read_len = req->read.len;
             size_t limit = 65536;
             if (c->send.size < limit) {
                 if (!mg_iobuf_resize(&c->send, limit)) {
@@ -337,30 +348,37 @@ private:
                     goto err;
                 }
             }
-            size_t full_len = rw_len + OUTGOING_WS_HEADER_SIZE;
-            if (full_len < rw_len || full_len > c->send.size - c->send.len) {
+            size_t full_len = read_len + OUTGOING_WS_HEADER_SIZE;
+            if (full_len < read_len || full_len > c->send.size - c->send.len) {
                 err = "i'm overstuffed";
                 goto err;
             }
             uint8_t *header = c->send.buf + c->send.len;
             uint8_t *past_header = header + OUTGOING_WS_HEADER_SIZE;
-            size_t actual = safe_memcpy(past_header, false, (void *)req->rw.addr, true, rw_len);
-            fill_ws_header(header, rw_len);
+            size_t actual = safe_memcpy(past_header, false, (void *)req->read.addr, true, read_len);
+            fill_ws_header(header, read_len);
             c->send.len += past_header + actual - header;
             return;
         }
 
         case RPC_REQ_WRITE: {
-            if (len < offsetof_end(rpc_req, rw)) {
-                err = "too short for rw";
+            if (len < offsetof_end(rpc_req, write)) {
+                err = "too short for write";
                 goto err;
             }
-            if (offsetof_end(rpc_req, rw) - len != req->rw.len) {
-                err = "wrong size for data";
-                goto err;
-            }
-            size_t actual = safe_memcpy((void *)req->rw.addr, true, req->rw.data, false, req->rw.len);
+            size_t write_len = len - offsetof_end(rpc_req, write);
+            size_t actual = safe_memcpy((void *)req->write.addr, true, req->write.data, false, write_len);
             mg_ws_send(c, &actual, sizeof(actual), WEBSOCKET_OP_BINARY);
+            return;
+        }
+
+        case RPC_REQ_GET_OVERRUN_STATS: {
+            if (len != offsetof_end(rpc_req, get_overrun_stats)) {
+                err = "wrong len for get_overrun_stats";
+                goto err;
+            }
+            uint64_t val = s_hose.get_and_reset_total_overrun_size();
+            mg_ws_send(c, &val, sizeof(val), WEBSOCKET_OP_BINARY);
             return;
         }
 
@@ -454,11 +472,11 @@ void serve_main() {
         panic("nnsocketInitialize failed: %x", e);
     }
     s_main_thread = pthread_self();
-    start_thread([](void *ignored) -> void * {
+    start_thread("hose", [](void *ignored) -> void * {
         s_hose.thread_func();
         return nullptr;
     }, nullptr);
-    start_thread([](void *ignored) -> void * {
+    start_thread("mongoose", [](void *ignored) -> void * {
         s_mongoose_server.serve();
         return nullptr;
     }, nullptr);

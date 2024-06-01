@@ -3,6 +3,7 @@
 #include "stuff.hpp"
 #include <stdarg.h>
 #include <array>
+#include <variant>
 
 // TODO: move this
 
@@ -32,6 +33,12 @@ enum mm_version {
 
 static const mm_version s_cur_mm_version = VER_301; // XXX
 
+static uintptr_t assert_nonzero(uintptr_t offset) {
+    assert(offset);
+    return offset;
+}
+
+// TODO: I decided I hate this namespace
 namespace mm {
 
 // -- Naming
@@ -134,6 +141,19 @@ struct list : public ListImpl {
     list_iterator<T> end()   { return list_iterator<T>{&head, offset_to_link, &head}; }
 };
 
+template <typename T>
+struct count_ptr {
+    uint32_t count;
+    pt_pointer<T> ptr;
+};
+
+template <typename T>
+struct count_cap_ptr {
+    uint32_t count;
+    uint32_t cap;
+    pt_pointer<T> ptr;
+};
+
 struct SafeString {
     PROP(vtable,     0x0, void *);
     PROP(str,        0x8, const char *);
@@ -159,17 +179,11 @@ struct StateMachineDelegate {
     }
 };
 
-template <typename T>
-struct CountPtr {
-    uint32_t count;
-    pt_pointer<T> ptr;
-};
-
 // Lp::Utl::StateMachine
 struct StateMachine {
     PROP(state,   0x8, uint32_t);
-    PROP(states, 0x28, CountPtr<StateMachineDelegate>);
-    PROP(names,  0x38, CountPtr<SafeString>);
+    PROP(states, 0x28, count_ptr<StateMachineDelegate>);
+    PROP(names,  0x38, count_ptr<SafeString>);
     PSEUDO_TYPE_SIZE(0x48);
 };
 
@@ -199,9 +213,93 @@ struct hitbox_manager {
     PSEUDO_TYPE_UNSIZED;
 };
 
+struct terrain_manager {
+
+    PSEUDO_TYPE_UNSIZED;
+};
+
+struct normal_collider;
+struct scol_collider;
+
+// This is really one of two unrelated structs, and the real way to distinguish
+// them is via the vtable on the node, but distinguishing them by their own
+// vtables is just a bit easier...
+struct some_collider {
+    PROP(vtable, 0, void *);
+    PSEUDO_TYPE_UNSIZED;
+
+    std::variant<normal_collider *, scol_collider *, std::monostate> downcast();
+    uintptr_t vt20_offset() const {
+        uintptr_t vt20 = *(uintptr_t *)((char *)vtable() + 0x20);
+        return vt20 - exl::util::modules::GetTargetStart();
+    }
+};
+
+struct normal_collider : public some_collider {
+    // virtual method @ 0x20 for all subclasses:
+    // (we don't care about the specific subclass for now)
+    static constexpr uintptr_t vt20_offset[VER_COUNT] = {
+        [VER_301] = 0xdd0e00,
+    };
+
+};
+
+struct scol_collider : public some_collider {
+    // virtual method @ 0x20 for two subclasses:
+    // (we don't care about the specific subclass for now)
+    static constexpr uintptr_t vt20_offset_1[VER_COUNT] = {
+        [VER_301] = 0xe192e0,
+    };
+    // virtual method @ 0x20 for another subclass:
+    static constexpr uintptr_t vt20_offset_2[VER_COUNT] = {
+        [VER_301] = 0xe23a70,
+    };
+
+};
+
+// Figure out what type of object this is.
+std::variant<normal_collider *, scol_collider *, std::monostate>
+some_collider::downcast() {
+    uintptr_t vt20_offset = this->vt20_offset();
+    if (vt20_offset == assert_nonzero(normal_collider::vt20_offset[s_cur_mm_version])) {
+        return (normal_collider *)this;
+    } else if (vt20_offset == assert_nonzero(scol_collider::vt20_offset_1[s_cur_mm_version]) ||
+               vt20_offset == assert_nonzero(scol_collider::vt20_offset_2[s_cur_mm_version])) {
+        return (scol_collider *)this;
+    } else {
+        // unknown type
+        return std::monostate{};
+    }
+}
+
+// TODO: cleanup naming for all collider stuff :(
+
+struct some_collider_node;
+
+struct some_collider_node_outer {
+    PROP(node,  0x20, some_collider_node);
+    PROP(owner, 0x48, some_collider *);
+    PSEUDO_TYPE_UNSIZED;
+};
+
+struct some_collider_node {
+    PROP(list_node, 0x0,  ListNode);
+    PROP(outer,     0x10, some_collider_node_outer *);
+    PSEUDO_TYPE_UNSIZED;
+};
+
+struct BgCollisionSystem {
+    PROP(colliders1, 0x38, list<mm::some_collider_node>);
+    PROP(colliders2, 0x58, list<mm::some_collider_node>);
+
+    PSEUDO_TYPE_UNSIZED;
+};
+
 struct AreaSystem {
-    PROP(world_id,   0x18, uint32_t);
-    PROP(hitbox_mgr, 0x40, hitbox_manager *);
+    PROP(world_id,            0x18, uint32_t);
+    PROP(hitbox_mgr,          0x40, hitbox_manager *);
+    PROP(bg_collision_system, 0x90, BgCollisionSystem *);
+    PROP(terrain_mgr,         0xa0, terrain_manager *);
     PSEUDO_TYPE_UNSIZED;
 };
 
@@ -269,7 +367,7 @@ template <typename StubFoo>
 void install() {
     uintptr_t offset = StubFoo::offset[s_cur_mm_version];
     assert(offset);
-    StubFoo::InstallAtOffset(offset);
+    StubFoo::InstallAtOffset(assert_nonzero(StubFoo::offset[s_cur_mm_version]));
 }
 
 struct SeenCache {
@@ -374,6 +472,44 @@ HOOK_DEFINE_TRAMPOLINE(Stub_hitbox_collide) {
     };
 };
 
+static void report_all_hitboxes(mm::AreaSystem *as) {
+    for (mm::list<mm::hitbox_node> &list : as->hitbox_mgr()->lists()) {
+        for (mm::hitbox_node &hn : list) {
+            report_hitbox(hn.owner(), /*surprise*/ false);
+        }
+    }
+}
+
+static void report_all_colliders_in(mm::list<mm::some_collider_node> *cnlist, int which_list) {
+    for (mm::some_collider_node &cn : *cnlist) {
+        mm::some_collider *some = cn.outer()->owner();
+        auto downcasted = some->downcast();
+        if (auto ncp = std::get_if<mm::normal_collider *>(&downcasted)) {
+            mm::normal_collider *nc = *ncp;
+            s_hose.write_fixed(
+                hose_tag{"normcol"},
+                nc
+            );
+        } else if (auto scp = std::get_if<mm::scol_collider *>(&downcasted)) {
+            mm::scol_collider *sc = *scp;
+            s_hose.write_fixed(
+                hose_tag{"scolcol"},
+                sc
+            );
+        } else {
+            xprintf("unknown collider %p with vtable %#lx", some, some->vt20_offset());
+            s_hose.write_fixed(
+                hose_tag{"unkcol"}
+            );
+        }
+    }
+}
+
+static void report_all_colliders(mm::AreaSystem *as) {
+    report_all_colliders_in(&as->bg_collision_system()->colliders1(), 1);
+    report_all_colliders_in(&as->bg_collision_system()->colliders2(), 2);
+}
+
 HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
     static void Callback(mm::AreaSystem *self) {
         s_seen_cache.next_frame();
@@ -382,11 +518,8 @@ HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
             self,
             (uint64_t)self->world_id()
         );
-        for (mm::list<mm::hitbox_node> &list : self->hitbox_mgr()->lists()) {
-            for (mm::hitbox_node &hn : list) {
-                report_hitbox(hn.owner(), /*surprise*/ false);
-            }
-        }
+        report_all_colliders(self);
+        report_all_hitboxes(self);
         Orig(self);
     }
     static constexpr uintptr_t offset[VER_COUNT] = {

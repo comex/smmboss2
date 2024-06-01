@@ -90,7 +90,7 @@ private:
     std::atomic<int> new_fd_{-1};
     std::atomic<write_info> write_info_{{.wrap_offset = sizeof(buf_)}};
     std::atomic<uint32_t> read_offset_{0};
-    _Alignas(16) uint8_t buf_[128 * 1024];
+    _Alignas(16) uint8_t buf_[2 * 1024 * 1024];
 
     // reader thread data:
     int cur_fd_{-1};

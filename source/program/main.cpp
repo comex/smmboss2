@@ -1,3 +1,4 @@
+#include "main.hpp"
 #include "lib.hpp"
 #include "serve.hpp"
 #include "stuff.hpp"
@@ -6,6 +7,9 @@
 #include <variant>
 #include <optional>
 #include <utility>
+#include "../../externals/xxhash/xxhash.h"
+
+std::atomic<uint64_t> g_hash_tweak;
 
 // TODO: move this
 
@@ -411,14 +415,16 @@ struct SeenCache {
         while (nchecked < NUM_ENTRIES) {
             Entry *ent = &entries_[idx];
             if (ent->key == 0 || ent->epoch != cur_epoch) {
-                if (insert && count_ < MAX_COUNT) {
-                    ent->epoch = cur_epoch;
-                    ent->key = key;
-                    count_++;
-                } else {
+                if (!insert) {
+                    ent = nullptr;
+                } else if (count_ == MAX_COUNT) {
                     xprintf("hash was full");
                     // TODO: report this better
                     ent = nullptr;
+                } else {
+                    ent->epoch = cur_epoch;
+                    ent->key = key;
+                    count_++;
                 }
                 return std::make_pair(ent, false);
             }
@@ -540,7 +546,8 @@ static void report_some_collider(mm_some_collider *some, int which_list) {
         hash_size = 0;
     }
 
-    uint64_t new_hash = hash_bytes(hash_start, hash_size);
+    uint64_t new_hash = XXH3_64bits(hash_start, hash_size) ^
+                        g_hash_tweak.load(std::memory_order_relaxed);
     bool already_sent = old_hash == new_hash;
     entry->value = new_hash;
 

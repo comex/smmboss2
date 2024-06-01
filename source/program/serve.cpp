@@ -1,6 +1,7 @@
+#include "serve.hpp"
 #include "common.hpp"
 #include "stuff.hpp"
-#include "serve.hpp"
+#include "main.hpp"
 #include <vector>
 #include <algorithm>
 #include <string.h>
@@ -310,6 +311,7 @@ private:
         RPC_REQ_READ = 1,
         RPC_REQ_WRITE = 2,
         RPC_REQ_GET_STATS = 3,
+        RPC_REQ_SET_HASH_TWEAK = 4,
     };
 
     struct rpc_req {
@@ -325,6 +327,9 @@ private:
                 char data[0];
             } __attribute__((packed)) write;
             char get_stats[0];
+            struct {
+                uint64_t tweak;
+            } __attribute__((packed)) set_hash_tweak;
         };
 
     } __attribute__((packed));
@@ -388,6 +393,15 @@ private:
             resp.written_bytes = s_hose.total_written_bytes_.exchange(0, std::memory_order_relaxed);
             mg_ws_send(c, &resp, sizeof(resp), WEBSOCKET_OP_BINARY);
             return;
+        }
+
+        case RPC_REQ_SET_HASH_TWEAK: {
+            if (len != offsetof_end(rpc_req, set_hash_tweak)) {
+                err = "wrong len for set_hash_tweak";
+                goto err;
+            }
+            g_hash_tweak.store(req->set_hash_tweak.tweak, std::memory_order_relaxed);
+            mg_ws_send(c, nullptr, 0, WEBSOCKET_OP_BINARY);
         }
 
         default:

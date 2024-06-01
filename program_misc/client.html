@@ -6,7 +6,6 @@
 
 <div id="overrun"></div>
 <svg width="500" height="500" id="diagram">
-<g id="diagram_hitboxes"/>
 </svg>
 
 <script>
@@ -526,85 +525,97 @@ let Hitbox = new Struct('Hitbox', 0x1c8, [
 
 let svgNS = 'http://www.w3.org/2000/svg';
 
-class 
-
-class Diagram {
-  constructor() {
-    this.hitboxesGroup = document.getElementById('diagram_hitboxes');
-    this.hitboxElms = new Map();
+class DiagramThingKind {
+  constructor(diagram) {
+    this.diagram = diagram;
+    this.group = document.createElementNS(svgNS, 'g');
+    diagram.svg.appendChild(this.group);
+    this.elmsByPtr = new Map();
   }
-  renderFrame(frame) {
-    this.curFrame = frame;
-    this.renderHitboxes(frame);
-    this.curFrame = null;
-  }
-  renderHitboxes(frame) {
-    this.renderGroup(frame.hitboxes, this.hitboxesGroup, this.hitboxElms, this.renderHitbox.bind(this));
-  }
-  renderGroup(frameThings, thingsGroup, thingElms, renderThing) {
+  renderThings() {
+    let frameThings = this.getThingsFromFrame();
     let seen = new Set();
     for (let [ptr, thing] of frameThings.entries()) {
-      let elm = renderThing(ptr, thing, (wantedTag) => {
-        let elm = thingElms.get(ptr);
-        if (elm && elm.tag != wantedTag) {
-          elm.deleteMe();
-          elm = null;
-        }
-        if (!elm) {
-          elm = document.createElementNS(svgNS, wantedTag);
-          elm.ptr = ptr;
-          elm.deleteMe = () => {
-            elm.parentNode.removeChild(elm);
-            thingElms.delete(ptr);
-          };
-          thingsGroup.appendChild(elm);
-          thingElms.set(ptr, elm);
-        }
-        returun elm;
-      });
+      let elm = this.renderThing(ptr, thing);
       if (elm) {
         seen.add(elm);
       }
     }
-    for (let elm of Array.from(thingsGroup.children)) {
+    for (let elm of Array.from(this.group.children)) {
       if (!seen.has(elm)) {
-        console.log(`${this.curFrame.number}/${this.curFrame.worldID} removing stale ${elm} at ${elm.ptr} from ${elm.frameN}`);
-        elm.parentNode.removeChild(elm);
+        console.log(`${this.diagram.curFrame.number}/${this.diagram.curFrame.worldID} removing stale ${elm} at ${elm.ptr} from ${elm.frameNum}`);
         elm.deleteMe();
-        this.hitboxElms.delete(elm.ptr);
       }
     }
   }
-  renderHitbox(ptr, hitbox) {
+  getOrCreateElmFor(ptr, wantedTag) {
+    let elm = this.elmsByPtr.get(ptr);
+    if (elm && elm.tag != wantedTag) {
+      elm.deleteMe();
+      elm = null;
+    }
+    if (!elm) {
+      elm = document.createElementNS(svgNS, wantedTag);
+      elm.ptr = ptr;
+      elm.deleteMe = () => {
+        elm.parentNode.removeChild(elm);
+        this.elmsByPtr.delete(ptr);
+      };
+      this.group.appendChild(elm);
+      this.elmsByPtr.set(ptr, elm);
+    }
+    return elm;
+  }
+}
+
+class DiagramHitboxes extends DiagramThingKind {
+  getThingsFromFrame() {
+    return this.diagram.curFrame.hitboxes;
+  }
+  renderThing(ptr, hitbox) {
     let params = hitbox.params;
     let isCircle = params.isCircle;
-    let wantedTag = isCircle ? 'circle' : 'rect';
     let x = hitbox.rect.min.x;
     let y = hitbox.rect.min.y;
     let w = hitbox.rect.width();
     let h = hitbox.rect.height();
+
+    let dia = this.diagram;
+    let wantedTag = isCircle ? 'circle' : 'rect';
+    let elm = this.getOrCreateElmFor(ptr, wantedTag);
     if (w < 0) {
       // todo: DRY
-      elm.parentNode.removeChild(elm);
-      this.hitboxElms.delete(ptr);
+      elm.deleteMe();
       return null;
     }
     if (isCircle) {
       assert(w == h);
-      elm.setAttribute('cx', this.transformX(x + w/2));
-      elm.setAttribute('cy', this.transformY(y + h/2));
-      elm.setAttribute('r', this.transformSize(w/2));
+      elm.setAttribute('cx', dia.transformX(x + w/2));
+      elm.setAttribute('cy', dia.transformY(y + h/2));
+      elm.setAttribute('r', dia.transformSize(w/2));
     } else {
-      elm.setAttribute('x', this.transformX(x));
-      elm.setAttribute('y', this.transformY(y));
-      elm.setAttribute('width', this.transformSize(w));
-      elm.setAttribute('height', this.transformSize(h));
+      elm.setAttribute('x', dia.transformX(x));
+      elm.setAttribute('y', dia.transformY(y));
+      elm.setAttribute('width', dia.transformSize(w));
+      elm.setAttribute('height', dia.transformSize(h));
     }
     elm.setAttribute('stroke', 'green');
     elm.setAttribute('stroke-width', 4);
     elm.setAttribute('fill', 'yellow');
-    elm.frameN = this.curFrame.number;
+    elm.frameNum = dia.curFrame.number;
     return elm;
+  }
+}
+
+class Diagram {
+  constructor(svg) {
+    this.svg = svg;
+    this.hitboxes = new DiagramHitboxes(this);
+  }
+  renderFrame(frame) {
+    this.curFrame = frame;
+    this.hitboxes.renderThings();
+    this.curFrame = null;
   }
   transformX(x) {
     return this.transformSize(x);
@@ -616,7 +627,7 @@ class Diagram {
     return size; // todo: match camera
   }
 };
-let diagram = new Diagram;
+let diagram = new Diagram(document.getElementById('diagram'));
 
 class HoseFrame {
   constructor(number, worldID) {

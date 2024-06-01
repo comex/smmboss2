@@ -203,8 +203,8 @@ void hose::do_iter() {
         if (actual == 0) {
             xprintf("send() returned 0?");
         }
-        read_offset += (size_t)actual;
     }
+    read_offset += (size_t)actual;
     assert(read_offset <= sizeof(buf_));
     read_offset_.store(read_offset, std::memory_order_release);
 }

@@ -7,7 +7,7 @@ importlib.reload(guest_access)
 importlib.reload(smmboss)
 importlib.reload(gdb_guest)
 guest = guest_access.CachingGuest(gdb_guest.GDBGuest())
-mm = smmboss.MM(guest)
+mm = smmboss.MM.with_guest(guest)
 gdb_guest.add_niceties(mm)
 for (_attr, _attrval) in mm.world.__dict__.items():
     if not _attr.startswith('_'):

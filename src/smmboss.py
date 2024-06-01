@@ -49,7 +49,7 @@ class MM:
         image_infos = []
         main_image_info = None
 
-        for info in guest.extract_image_info():
+        for info in self.guest.extract_image_info():
             text_addr = info['text_start']
             name = info.get('name')
 

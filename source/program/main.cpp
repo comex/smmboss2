@@ -133,10 +133,13 @@ struct mm_list_iterator {
 };
 
 // wrapper, no evidence for original
-template <typename T>
+template <typename T, bool use_offset_to_link = true>
 struct mm_list : public mm_ListImpl {
-    mm_list_iterator<T> begin() { return mm_list_iterator<T>{head.next, offset_to_link, &head}; }
-    mm_list_iterator<T> end()   { return mm_list_iterator<T>{&head, offset_to_link, &head}; }
+    mm_list_iterator<T> begin() { return mm_list_iterator<T>{head.next, get_offset_to_link(), &head}; }
+    mm_list_iterator<T> end()   { return mm_list_iterator<T>{&head, get_offset_to_link(), &head}; }
+    uint32_t get_offset_to_link() {
+        return use_offset_to_link ? offset_to_link : 0;
+    }
 };
 
 template <typename T>
@@ -194,9 +197,11 @@ struct mm_hitbox {
     };
 
     void verify() {
-        assert(vtable() == s_target_start +
-                           vtable_offset[s_cur_mm_version]);
-    };
+        uintptr_t offset = vtable() - s_target_start;
+        if (offset != assert_nonzero(vtable_offset[s_cur_mm_version])) {
+            panic("mm_hitbox unexpected vtable %#lx", offset);
+        }
+    }
 };
 
 struct mm_hitbox_node {
@@ -207,7 +212,8 @@ struct mm_hitbox_node {
 };
 
 struct mm_hitbox_manager {
-    PROP(lists,  0x10, mm_list<mm_hitbox_node>[5]);
+    PROP(split_lists,  0x10, mm_list<mm_hitbox_node, /*use_offset_to_link*/ false>[4]);
+    PROP(staging_list, 0x70, mm_list<mm_hitbox>);
     PSEUDO_TYPE_UNSIZED;
 };
 
@@ -234,17 +240,24 @@ struct mm_some_collider {
 };
 
 struct mm_normal_collider : public mm_some_collider {
+    static constexpr size_t initial_dump_size = 0x3e0;
+
+    PROP(ext_pos_cur, 0x290, float *);
+    PROP(ext_pos_old, 0x298, float *);
+
     // virtual method @ 0x20 for all subclasses:
     // (we don't care about the specific subclass for now)
     static constexpr uintptr_t vt20_offset[VER_COUNT] = {
         [VER_301] = 0xdd0e00,
     };
-
-    PROP(dump_start, 0x238, char);
-    PROP(dump_end,   0x3e0, char);
 };
 
 struct mm_scol_collider : public mm_some_collider {
+    static constexpr size_t initial_dump_size = 0x3e8;
+
+    PROP(ext_pos_cur, 0x2a0, float *);
+    PROP(ext_pos_old, 0x2a8, float *);
+
     // virtual method @ 0x20 for two subclasses:
     // (we don't care about the specific subclass for now)
     static constexpr uintptr_t vt20_offset_1[VER_COUNT] = {
@@ -471,12 +484,16 @@ HOOK_DEFINE_TRAMPOLINE(Stub_hitbox_collide) {
 };
 
 static void report_all_hitboxes(mm_AreaSystem *as) {
-    for (mm_list<mm_hitbox_node> &list : as->hitbox_mgr()->lists()) {
+    for (mm_list<mm_hitbox_node, false> &list : as->hitbox_mgr()->split_lists()) {
         for (mm_hitbox_node &hn : list) {
             report_hitbox(hn.owner(), /*surprise*/ false);
         }
     }
+    for (mm_hitbox &hb : as->hitbox_mgr()->staging_list()) {
+        report_hitbox(&hb, /*surprise*/ false);
+    }
 }
+static const float dummy_pos[2]{};
 
 static void report_all_colliders_in(mm_list<mm_some_collider_node> *cnlist, int which_list) {
     for (mm_some_collider_node &cn : *cnlist) {
@@ -487,14 +504,22 @@ static void report_all_colliders_in(mm_list<mm_some_collider_node> *cnlist, int 
             s_hose.write_packet([&](auto &w) {
                 w.write_tag({"normcol"});
                 w.write_prim(nc);
-                w.write_prim((uint64_t)mm_normal_collider::offsetof_dump_start);
-                w.write_range(&nc->dump_start(), &nc->dump_end());
+                w.write_raw(nc, mm_normal_collider::initial_dump_size);
+                w.write_prim(nc->ext_pos_cur());
+                w.write_n(nc->ext_pos_cur() ?: dummy_pos, 2);
+                w.write_prim(nc->ext_pos_old());
+                w.write_n(nc->ext_pos_old() ?: dummy_pos, 2);
             });
         } else if (auto scp = std::get_if<mm_scol_collider *>(&downcasted)) {
             mm_scol_collider *sc = *scp;
             s_hose.write_packet([&](auto &w) {
                 w.write_tag({"scolcol"});
                 w.write_prim(sc);
+                w.write_raw(sc, mm_scol_collider::initial_dump_size);
+                w.write_prim(sc->ext_pos_cur());
+                w.write_n(sc->ext_pos_cur() ?: dummy_pos, 2);
+                w.write_prim(sc->ext_pos_old());
+                w.write_n(sc->ext_pos_old() ?: dummy_pos, 2);
             });
         } else {
             xprintf("unknown collider %p with vtable %#lx", some, some->vt20_offset());
@@ -527,6 +552,45 @@ HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
     };
 };
 
+HOOK_DEFINE_TRAMPOLINE(Stub_sead_ListNode_insertBack) {
+    static void Callback(mm_ListNode *list, mm_ListNode *node) {
+        if (node &&
+            *(uintptr_t *)(node + 0x20) - s_target_start == 0x02868ef0) {
+            xprintf("insertBack happened to %p in %p! <- %p <- %p <- %p <- %p <- %p",
+                node,
+                list,
+                __builtin_return_address(0),
+                return_address_from_frame(0),
+                return_address_from_frame(1),
+                return_address_from_frame(2),
+                return_address_from_frame(3));
+        }
+        Orig(list, node);
+    }
+    static constexpr uintptr_t offset[VER_COUNT] = {
+        [VER_301] = 0x00262d90,
+    };
+};
+HOOK_DEFINE_TRAMPOLINE(Stub_sead_ListNode_insertFront) {
+    static void Callback(mm_ListNode *list, mm_ListNode *node) {
+        if (node &&
+            *(uintptr_t *)(node + 0x20) - s_target_start == 0x02868ef0) {
+            xprintf("insertFront happened to %p in %p! <- %p <- %p <- %p <- %p <- %p",
+                node,
+                list,
+                __builtin_return_address(0),
+                return_address_from_frame(0),
+                return_address_from_frame(1),
+                return_address_from_frame(2),
+                return_address_from_frame(3));
+        }
+        Orig(list, node);
+    }
+    static constexpr uintptr_t offset[VER_COUNT] = {
+        [VER_301] = 0x00262db0,
+    };
+};
+
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
     s_target_start = exl::util::modules::GetTargetStart();
@@ -555,6 +619,10 @@ extern "C" void exl_main(void* x0, void* x1) {
     // TODO: make these dynamic hooks
     install<Stub_hitbox_collide>();
     install<Stub_AreaSystem_do_many_collisions>();
+
+    // XXX
+    install<Stub_sead_ListNode_insertFront>();
+    install<Stub_sead_ListNode_insertBack>();
 
     log_str("done hooking");
 }

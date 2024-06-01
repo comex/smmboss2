@@ -24,7 +24,14 @@ struct hose {
     struct writer_base {
         template <typename T>
         void write_prim(const T &t) {
-            ((self_t *)this)->write_range(&t, &t + 1);
+            write_n(&t, 1);
+        }
+        void write_range(const void *start, const void *end) {
+            ((self_t *)this)->write_raw(start, (char *)end - (char *)start);
+        }
+        template <typename T>
+        void write_n(const T *ts, size_t n) {
+            ((self_t *)this)->write_raw(ts, n * sizeof(T));
         }
         struct tag { char c[8]; };
         void write_tag(tag t) {
@@ -34,18 +41,17 @@ struct hose {
 
     struct size_calculator : public writer_base<size_calculator> {
         size_t size_;
-        void write_range(const void *start, const void *end) {
+        void write_raw(const void *ptr, size_t write_size) {
             size_t old_size = size_;
-            size_t new_size = old_size + ((uint8_t *)end - (uint8_t *)start);
+            size_t new_size = old_size + write_size;
             size_ = new_size > old_size ? new_size : SIZE_MAX;
         }
     };
 
     struct actual_writer : public writer_base<actual_writer> {
         uint8_t *cur_ptr_;
-        void write_range(const void *start, const void *end) {
-            size_t size = (uint8_t *)end - (uint8_t *)start;
-            memcpy(cur_ptr_, start, size);
+        void write_raw(const void *ptr, size_t size) {
+            memcpy(cur_ptr_, ptr, size);
             cur_ptr_ += size;
         }
     };

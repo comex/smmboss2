@@ -33,8 +33,7 @@ struct hose {
         void write_n(const T *ts, size_t n) {
             ((self_t *)this)->write_raw(ts, n * sizeof(T));
         }
-        struct tag { char c[8]; };
-        void write_tag(tag t) {
+        void write_tag(tag8 t) {
             write_prim(t);
         }
     };
@@ -74,10 +73,9 @@ struct hose {
         write_info_.store(new_write_info, std::memory_order_release);
     }
 
-    // any thread func:
-    uint64_t get_and_reset_total_overrun_size() {
-        return total_overrun_size_.exchange(0, std::memory_order_relaxed);
-    }
+    // any thread, used for stats:
+    std::atomic<uint64_t> total_overrun_bytes_{0};
+    std::atomic<uint64_t> total_written_bytes_{0};
 
 private:
     // shared data:
@@ -92,7 +90,6 @@ private:
     std::atomic<int> new_fd_{-1};
     std::atomic<write_info> write_info_{{.wrap_offset = sizeof(buf_)}};
     std::atomic<uint32_t> read_offset_{0};
-    std::atomic<uint64_t> total_overrun_size_{0}; // used for stats
     _Alignas(16) uint8_t buf_[128 * 1024];
 
     // reader thread data:

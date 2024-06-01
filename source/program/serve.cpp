@@ -245,8 +245,11 @@ std::tuple<bool, hose::write_info> hose::reserve_space(size_t size, bool for_ove
         if (!write_info.just_wrote_overrun) {
             write_overrun();
         }
-        total_overrun_size_.fetch_add(size, std::memory_order_relaxed);
+        total_overrun_bytes_.fetch_add(size, std::memory_order_relaxed);
     }
+
+    total_written_bytes_.fetch_add(size, std::memory_order_relaxed);
+
     write_info.write_offset += size;
     write_info.just_wrote_overrun = for_overrun;
     write_info.wrap_offset = std::max(write_info.wrap_offset, write_info.write_offset);
@@ -306,7 +309,7 @@ private:
     enum rpc_req_type : uint8_t {
         RPC_REQ_READ = 1,
         RPC_REQ_WRITE = 2,
-        RPC_REQ_GET_OVERRUN_STATS = 3,
+        RPC_REQ_GET_STATS = 3,
     };
 
     struct rpc_req {
@@ -321,7 +324,7 @@ private:
                 uint64_t addr;
                 char data[0];
             } __attribute__((packed)) write;
-            char get_overrun_stats[0];
+            char get_stats[0];
         };
 
     } __attribute__((packed));
@@ -372,13 +375,18 @@ private:
             return;
         }
 
-        case RPC_REQ_GET_OVERRUN_STATS: {
-            if (len != offsetof_end(rpc_req, get_overrun_stats)) {
-                err = "wrong len for get_overrun_stats";
+        case RPC_REQ_GET_STATS: {
+            if (len != offsetof_end(rpc_req, get_stats)) {
+                err = "wrong len for get_stats";
                 goto err;
             }
-            uint64_t val = s_hose.get_and_reset_total_overrun_size();
-            mg_ws_send(c, &val, sizeof(val), WEBSOCKET_OP_BINARY);
+            struct {
+                uint64_t overrun_bytes;
+                uint64_t written_bytes;
+            } resp;
+            resp.overrun_bytes = s_hose.total_overrun_bytes_.exchange(0, std::memory_order_relaxed);
+            resp.written_bytes = s_hose.total_written_bytes_.exchange(0, std::memory_order_relaxed);
+            mg_ws_send(c, &resp, sizeof(resp), WEBSOCKET_OP_BINARY);
             return;
         }
 

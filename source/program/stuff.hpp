@@ -92,3 +92,7 @@ struct pt_array {
     }
     static constexpr bool _pseudo_type = true;
 };
+
+struct tag8 {
+    char c[8];
+};

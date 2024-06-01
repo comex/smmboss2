@@ -407,7 +407,7 @@ class RPCConn {
         }
       }
 
-      console.log(`sending ${req.byteLength} ${req}`);
+      //console.log(`sending ${req.byteLength} ${req}`);
       this.wsw.ws.send(req);
       let haveResponse = false;
       let response = null;
@@ -460,11 +460,15 @@ class RPCConn {
     assert(actual <= len);
     return [actual, len];
   }
-  async reqGetOverrunStats() {
-    let u8 = Uint8Array.of(3); // RPC_REQ_GET_OVERRUN_STATS
+  async reqGetStats() {
+    let u8 = Uint8Array.of(3); // RPC_REQ_GET_STATS
     let resp = await this.rawRequest(u8);
-    assert(resp.byteLength == 8);
-    return resp.getBigUint64(0, true);
+    assert(resp.byteLength == 16);
+    return {
+      overrunBytes: resp.getBigUint64(0, true),
+      sentBytes: resp.getBigUint64(8, true),
+    }
+
   }
 }
 
@@ -673,8 +677,8 @@ async function go() {
   (async () => {
     while (1) {
       if (g_rpcConn.isOpen) {
-        let overrun = await g_rpcConn.reqGetOverrunStats();
-        console.log(`overrun: ${overrun}`);
+        let stats = await g_rpcConn.reqGetStats();
+        console.log(`stats: overrunBytes=${stats.overrunBytes} sentBytes=${stats.sentBytes}`);
       }
       await sleep(1000);
     }

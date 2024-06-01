@@ -392,10 +392,12 @@ void install() {
     StubFoo::InstallAtOffset(assert_nonzero(StubFoo::offset[s_cur_mm_version]));
 }
 
+// just a simple hash table
 struct SeenCache {
     struct Entry {
-        uintptr_t object:48,
+        uint64_t object:48,
                   frame:16;
+        uint64_t value;
     };
 
     bool test_and_set(void *object) {
@@ -405,8 +407,9 @@ struct SeenCache {
                 xprintf("hash was full");
                 return true;
             }
-            entry->frame = cur_frame_ % (1 << 16);
+            entry->frame = cur_frame_;
             entry->object = (uintptr_t)object;
+            count_++;
             return false;
         }
         return true;
@@ -440,24 +443,36 @@ struct SeenCache {
 
     void next_frame() {
         cur_frame_++;
-        count_ = 0;
 
-        // clear out entries on a rolling basis
-        size_t possible_frames = 1 << 16;
-        size_t to_clear_per_frame = (NUM_ENTRIES + possible_frames - 1) / possible_frames;
-        // ^ might just be 1
-        for (size_t i = cur_frame_ * to_clear_per_frame;
-                    i < (cur_frame_ + 1) * to_clear_per_frame && i < NUM_ENTRIES;
-                    i++) {
-            entries_[i] = Entry{};
+        // Clear out entries on a rolling basis.
+        // Must visit the entire array at least once every `visit_frames` frames:
+        size_t visit_frames = FRAME_ROLLOVER_COUNT - MAX_AGE;
+        size_t entries_per_frame = (NUM_ENTRIES + visit_frames - 1) / visit_frames;
+        for (size_t i = 0; i < entries_per_frame; i++) {
+            size_t idx = clearout_idx_++;
+            if (clearout_idx_ == NUM_ENTRIES) {
+                clearout_idx_ = 0;
+            }
+            if (age(entries_[idx]) > MAX_AGE) {
+                entries_[idx] = Entry{};
+                count_ = 0;
+            }
         }
+    }
+
+    size_t age(Entry &entry) {
+        return (uint16_t)(cur_frame_ - entry.frame);
     }
 
     static constexpr size_t NUM_ENTRIES = 24593;
     static constexpr size_t MAX_COUNT = NUM_ENTRIES / 2;
+    static constexpr size_t FRAME_ROLLOVER_COUNT = 1 << 16;
+    static constexpr size_t MAX_AGE = 1;
+
     std::array<Entry, NUM_ENTRIES> entries_{};
     uint16_t cur_frame_ = 0;
     size_t count_ = 0;
+    size_t clearout_idx_ = 0;
 };
 
 SeenCache s_seen_cache;
@@ -506,6 +521,14 @@ static void report_all_hitboxes(mm_AreaSystem *as) {
 }
 static void report_some_collider(mm_some_collider *some, int which_list) {
     static const float dummy_pos[2]{};
+    if (s_seen_cache.test_and_set(some)) {
+        return;
+    }
+    s_hose.write_packet([&](auto &w) {
+        w.write_tag({"uhh"});
+        w.write_prim(some);
+    });
+    return;
     auto downcasted = some->downcast();
     if (auto ncp = std::get_if<mm_normal_collider *>(&downcasted)) {
         mm_normal_collider *nc = *ncp;

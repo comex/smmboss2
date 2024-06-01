@@ -4,6 +4,8 @@
 #include <stdarg.h>
 #include <array>
 #include <variant>
+#include <optional>
+#include <utility>
 
 // TODO: move this
 
@@ -395,40 +397,33 @@ void install() {
 // just a simple hash table with lazy clearing
 struct SeenCache {
     struct Entry {
-        uint64_t object:48,
-                  epoch:16;
+        uint64_t key:48,
+                 epoch:16;
         uint64_t value;
     };
 
-    bool test_and_set(void *object) {
-        auto [entry, found] = find_entry(object);
-        if (!found) {
-            if (count_ >= MAX_COUNT) {
-                xprintf("hash was full");
-                return true;
-            }
-            entry->epoch = cur_epoch_;
-            entry->object = (uintptr_t)object;
-            count_++;
-            return false;
-        }
-        return true;
-    }
-
-    std::tuple<Entry *, bool> find_entry(void *object) {
+    std::pair<Entry *, bool> lookup(void *object, bool insert) {
         assert(object != nullptr);
-        uintptr_t object_up = (uintptr_t)object;
-        assert(object_up < ((uintptr_t)1 << 48));
-        size_t idx = hash(object);
+        uint64_t key = form_key(object);
+        size_t idx = (size_t)(key % NUM_ENTRIES);
         size_t nchecked = 0;
         uint64_t cur_epoch = cur_epoch_;
         while (nchecked < NUM_ENTRIES) {
             Entry *ent = &entries_[idx];
-            if (ent->object == 0 || ent->epoch != cur_epoch) {
-                return std::make_tuple(ent, false);
+            if (ent->key == 0 || ent->epoch != cur_epoch) {
+                if (insert && count_ < MAX_COUNT) {
+                    ent->epoch = cur_epoch;
+                    ent->key = key;
+                    count_++;
+                } else {
+                    xprintf("hash was full");
+                    // TODO: report this better
+                    ent = nullptr;
+                }
+                return std::make_pair(ent, false);
             }
-            if (ent->object == object_up) {
-                return std::make_tuple(ent, true);
+            if (ent->key == key) {
+                return std::make_pair(ent, true);
             }
 
             idx = (idx + 1) % NUM_ENTRIES;
@@ -437,11 +432,17 @@ struct SeenCache {
         panic("table was unexpectedly full");
     }
 
-    size_t hash(void *object) {
-        return (uintptr_t)object % NUM_ENTRIES;
+    uint64_t form_key(/*uint32_t world_id, */ void *object) {
+        uintptr_t object_up = (uintptr_t)object;
+        uint64_t mask = ((uint64_t)1 << 48) - 1;//((uint64_t)1 << 2);
+        if ((object_up & ~mask) || object_up == 0) {
+            panic("bad object pointer %p (mask=%#lx)", object, mask);
+        }
+        //assert(world_id < (1 << 2));
+        return object_up /*| world_id*/;
     }
 
-    void next_epoch() {
+    void clear() {
         cur_epoch_++;
         count_ = 0;
 
@@ -463,20 +464,24 @@ struct SeenCache {
     size_t count_ = 0;
 };
 
-SeenCache s_seen_cache;
+static SeenCache s_seen_caches[2];
+static SeenCache *s_seen_cache_cur = &s_seen_caches[0];
+static SeenCache *s_seen_cache_old = &s_seen_caches[1];
 
 static void report_hitbox(mm_hitbox *hb, bool surprise) {
     hb->verify();
-    if (!s_seen_cache.test_and_set(hb)) {
-        if (surprise) {
-            xprintf("surprising hitbox %p", hb);
-        }
-        s_hose.write_packet([&](auto &w) {
-            w.write_tag({"hitbox"});
-            w.write_prim(hb);
-            w.write_range(hb, (char *)hb + pt_size_of<mm_hitbox>);
-        });
+    if (s_seen_cache_cur->lookup(hb, /*insert*/ true).second) {
+        // already seen
+        return;
     }
+    if (surprise) {
+        xprintf("surprising hitbox %p", hb);
+    }
+    s_hose.write_packet([&](auto &w) {
+        w.write_tag({"hitbox"});
+        w.write_prim(hb);
+        w.write_range(hb, (char *)hb + pt_size_of<mm_hitbox>);
+    });
 }
 
 HOOK_DEFINE_TRAMPOLINE(Stub_hitbox_collide) {
@@ -507,23 +512,48 @@ static void report_all_hitboxes(mm_AreaSystem *as) {
         report_hitbox(&hb, /*surprise*/ false);
     }
 }
+
 static void report_some_collider(mm_some_collider *some, int which_list) {
     static const float dummy_pos[2]{};
-    if (s_seen_cache.test_and_set(some)) {
+    auto [entry, found] = s_seen_cache_cur->lookup(some, /*insert*/ true);
+    if (found || !entry) {
         return;
     }
-    s_hose.write_packet([&](auto &w) {
-        w.write_tag({"uhh"});
-        w.write_prim(some);
-    });
-    return;
+    std::optional<uint64_t> old_hash;
+    if (auto [old_entry, old_found] = s_seen_cache_old->lookup(some, /*insert*/ false);
+        old_found) {
+        old_hash = old_entry->value;
+    }
+
     auto downcasted = some->downcast();
+
+    void *hash_start;
+    size_t hash_size;
+    if (auto ncp = std::get_if<mm_normal_collider *>(&downcasted)) {
+        hash_start = *ncp;
+        hash_size = mm_normal_collider::initial_dump_size;
+    } else if (auto scp = std::get_if<mm_scol_collider *>(&downcasted)) {
+        hash_start = *scp;
+        hash_size = mm_scol_collider::initial_dump_size;
+    } else {
+        hash_start = nullptr;
+        hash_size = 0;
+    }
+
+    uint64_t new_hash = hash_bytes(hash_start, hash_size);
+    bool already_sent = old_hash == new_hash;
+    entry->value = new_hash;
+
+
     if (auto ncp = std::get_if<mm_normal_collider *>(&downcasted)) {
         mm_normal_collider *nc = *ncp;
         s_hose.write_packet([&](auto &w) {
             w.write_tag({"normcol"});
             w.write_prim(nc);
-            w.write_raw(nc, mm_normal_collider::initial_dump_size);
+            w.write_prim(already_sent);
+            if (!already_sent) {
+                w.write_raw(hash_start, hash_size);
+            }
             w.write_prim(nc->ext_pos_cur());
             w.write_n(nc->ext_pos_cur() ?: dummy_pos, 2);
             w.write_prim(nc->ext_pos_old());
@@ -534,7 +564,10 @@ static void report_some_collider(mm_some_collider *some, int which_list) {
         s_hose.write_packet([&](auto &w) {
             w.write_tag({"scolcol"});
             w.write_prim(sc);
-            w.write_raw(sc, mm_scol_collider::initial_dump_size);
+            w.write_prim(already_sent);
+            if (!already_sent) {
+                w.write_raw(hash_start, hash_size);
+            }
             w.write_prim(sc->ext_pos_cur());
             w.write_n(sc->ext_pos_cur() ?: dummy_pos, 2);
             w.write_prim(sc->ext_pos_old());
@@ -566,7 +599,10 @@ static void report_all_colliders(mm_AreaSystem *as) {
 
 HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
     static void Callback(mm_AreaSystem *self) {
-        s_seen_cache.next_frame();
+        if (self->world_id() == 0) {
+            std::swap(s_seen_cache_cur, s_seen_cache_old);
+            s_seen_cache_cur->clear();
+        }
         s_hose.write_packet([&](auto &w) {
             w.write_tag({"do_many"});
             w.write_prim(self);

@@ -7,12 +7,8 @@
 
 constexpr size_t OUTGOING_WS_HEADER_SIZE = 10;
 
-static inline void fill_ws_header(uint8_t *p, size_t size) {
-    p[0] = 0x82;
-    p[1] = 0x7f;
-    uint64_t swapped = __builtin_bswap64(size);
-    memcpy(&p[2], &swapped, 8);
-}
+size_t add_ws_header_size(size_t size);
+uint8_t *fill_ws_header(uint8_t *p, size_t size);
 
 struct hose {
     void push_fd(int fd);
@@ -57,16 +53,15 @@ struct hose {
 
     // writer thread func:
     void write_packet(auto &&callback, bool for_overrun = false) {
-        size_calculator sc{.size_ = OUTGOING_WS_HEADER_SIZE};
+        size_calculator sc{.size_ = 0};
         callback(sc);
         size_t size = sc.size_;
-        auto [ok, new_write_info] = reserve_space(size, for_overrun);
+        auto [ok, new_write_info] = reserve_space_and_write_header(size, for_overrun);
         if (!ok) {
             return;
         }
         uint8_t *ptr = buf_ + (new_write_info.write_offset - size);
-        fill_ws_header(ptr, size - OUTGOING_WS_HEADER_SIZE);
-        actual_writer aw{.cur_ptr_ = ptr + OUTGOING_WS_HEADER_SIZE};
+        actual_writer aw{.cur_ptr_ = ptr};
         callback(aw);
         assert(aw.cur_ptr_ == ptr + size);
 
@@ -99,9 +94,9 @@ private:
     void do_iter();
     void do_sleep();
 
-    static constexpr size_t OVERRUN_BODY_SIZE = 8; // just a tag
+    static constexpr size_t OVERRUN_PACKET_SIZE = 10; // 2-byte header + 8-byte body
 
-    std::tuple<bool, write_info> reserve_space(size_t size, bool for_overrun);
+    std::tuple<bool, write_info> reserve_space_and_write_header(size_t size, bool for_overrun);
 
     void write_overrun();
 

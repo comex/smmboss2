@@ -8,6 +8,39 @@
 #include <mutex>
 #include "util/modules.hpp"
 #include "syscalls.h"
+#include "../../externals/mongoose/mongoose.h"
+
+size_t add_ws_header_size(size_t size) {
+    if (size < 126) {
+        return size + 2;
+    } else if (size < 65536) {
+        return size + 4;
+    } else if (size <= SIZE_MAX - 10) {
+        return size + 10;
+    } else {
+        return SIZE_MAX;
+    }
+}
+
+uint8_t *fill_ws_header(uint8_t *p, size_t size) {
+    // Fill out websocket frame header.  Based on mkhdr.
+    // I wish I could just always use 64-bit sizes, but that's not allowed.
+    p[0] = WEBSOCKET_OP_BINARY | 128;
+    if (size < 126) {
+        p[1] = (uint8_t)size;
+        return p + 2;
+    } else if (size < 65536) {
+        p[1] = 126;
+        p[2] = (uint8_t)(size >> 8);
+        p[3] = (uint8_t)(size >> 0);
+        return p + 4;
+    } else {
+        p[1] = 127;
+        uint64_t swapped = __builtin_bswap64(size);
+        memcpy(&p[2], &swapped, 8);
+        return p + 10;
+    }
+}
 
 static void start_thread(const char *name, void *(*f)(void *), void *ctx) {
     pthread_attr_t attr;
@@ -135,8 +168,6 @@ static size_t safe_memcpy(void *dst, bool check_dst,
     return orig_size - size;
 }
 
-#include "../../externals/mongoose/mongoose.h"
-
 #define offsetof_end(ty, what) \
     (offsetof(ty, what) + sizeof(((ty *)0)->what))
 
@@ -222,12 +253,18 @@ void hose::do_sleep() {
     usleep(5000);
 }
 
-std::tuple<bool, hose::write_info> hose::reserve_space(size_t size, bool for_overrun) {
+std::tuple<bool, hose::write_info> hose::reserve_space_and_write_header(size_t body_size, bool for_overrun) {
     assert_on_write_thread();
+
     uint32_t read_offset = read_offset_.load(std::memory_order_acquire);
     write_info write_info = write_info_.load(std::memory_order_relaxed);
-    size_t needed_size = size + (for_overrun ? 0 : (OUTGOING_WS_HEADER_SIZE + OVERRUN_BODY_SIZE));
-    if (needed_size < size) {
+
+    // total number of bytes we're going to put in the buffer
+    size_t full_size = add_ws_header_size(body_size);
+
+    // total number of bytes we need to be free in order to do that
+    size_t needed_size;
+    if (__builtin_add_overflow(full_size, for_overrun ? 0 : OVERRUN_PACKET_SIZE, &needed_size)) {
         needed_size = SIZE_MAX;
     }
     bool ok = false;
@@ -244,17 +281,19 @@ std::tuple<bool, hose::write_info> hose::reserve_space(size_t size, bool for_ove
             write_info.write_offset = 0;
         }
     }
-    if (!ok) {
+    if (ok) {
+        fill_ws_header(buf_ + write_info.write_offset, body_size);
+    } else {
         assert(!for_overrun);
         if (!write_info.just_wrote_overrun) {
             write_overrun();
         }
-        total_overrun_bytes_.fetch_add(size, std::memory_order_relaxed);
+        total_overrun_bytes_.fetch_add(full_size, std::memory_order_relaxed);
     }
 
-    total_written_bytes_.fetch_add(size, std::memory_order_relaxed);
+    total_written_bytes_.fetch_add(full_size, std::memory_order_relaxed);
 
-    write_info.write_offset += size;
+    write_info.write_offset += full_size;
     write_info.just_wrote_overrun = for_overrun;
     write_info.wrap_offset = std::max(write_info.wrap_offset, write_info.write_offset);
     return std::make_tuple(ok, write_info);
@@ -359,16 +398,22 @@ private:
                     goto err;
                 }
             }
-            size_t full_len = read_len + OUTGOING_WS_HEADER_SIZE;
-            if (full_len < read_len || full_len > c->send.size - c->send.len) {
+            size_t full_len = add_ws_header_size(read_len);
+            if (full_len > c->send.size - c->send.len) {
                 err = "i'm overstuffed";
                 goto err;
             }
+            size_t header_len = full_len - read_len;
             uint8_t *header = c->send.buf + c->send.len;
-            uint8_t *past_header = header + OUTGOING_WS_HEADER_SIZE;
-            size_t actual = safe_memcpy(past_header, false, (void *)req->read.addr, true, read_len);
-            fill_ws_header(header, read_len);
-            c->send.len += past_header + actual - header;
+            uint8_t *expected_body = header + header_len;
+            size_t actual = safe_memcpy(expected_body, false, (void *)req->read.addr, true, read_len);
+            uint8_t *actual_body = fill_ws_header(header, actual);
+            if (actual_body != expected_body) {
+                // The actual size required a smaller WebSocket header.
+                assert(actual_body < expected_body);
+                memmove(actual_body, expected_body, actual);
+            }
+            c->send.len += actual_body + actual - header;
             return;
         }
 

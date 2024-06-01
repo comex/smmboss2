@@ -31,20 +31,20 @@ void xprintf(const char *fmt, ...);
         return *(typeof_##name *)((char *)this + offsetof_##name()); \
     }
 
-#define PT_TYPE_SIZE(size) \
+#define PSEUDO_TYPE_SIZE(size) \
     static constexpr size_t size_of() { \
         return size; \
     } \
-    static constexpr bool _is_pt_type = true
+    static constexpr bool _is_pseudo_type = true
 
-#define PT_TYPE_UNSIZED \
-    static constexpr bool _is_pt_type = true
+#define PSEUDO_TYPE_UNSIZED \
+    static constexpr bool _is_pseudo_type = true
 
 // A type that uses PROP macros for its fields.
 template <typename T>
-concept is_pt_type = requires { { T::_is_pt_type }; };
+concept pseudo_type = requires { { T::_is_pseudo_type }; };
 
-template <is_pt_type T>
+template <pseudo_type T>
 inline size_t _pt_size_of() { return T::size_of(); }
 
 template <typename T>
@@ -56,7 +56,7 @@ inline size_t pt_size_of = _pt_size_of<T>();
 // Pointer to a type that uses PROP macros for its fields.  Normal pointer
 // arithmetic won't work because the type doesn't have any real fields, so
 // sizeof will give the wrong answer.
-template <is_pt_type T>
+template <pseudo_type T>
 struct pt_pointer {
     T *raw;
 
@@ -71,7 +71,7 @@ struct pt_pointer {
     }
 };
 
-template <is_pt_type T, size_t count>
+template <pseudo_type T, size_t count>
 struct pt_array {
     pt_pointer<T> operator*() const { return *(T *)this; }
     T *operator->() const { return (T *)this; }
@@ -84,5 +84,5 @@ struct pt_array {
     static constexpr size_t size_of() {
         return pt_size_of<T> * count;
     }
-    static constexpr bool _is_pt_type = true;
+    static constexpr bool _pseudo_type = true;
 };

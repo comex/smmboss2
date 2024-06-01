@@ -88,7 +88,7 @@ static_assert(sizeof(pointer_to_member_function) == 0x10);
 struct SafeString {
     PROP(vtable,     0x0, void *);
     PROP(str,        0x8, const char *);
-    PT_TYPE_SIZE(0x10);
+    PSEUDO_TYPE_SIZE(0x10);
 };
 
 // Lp::Utl::StateMachine::Delegate<T>
@@ -98,7 +98,7 @@ struct StateMachineDelegate {
     PROP(enter,      0x10, pointer_to_member_function);
     PROP(exec,       0x20, pointer_to_member_function);
     PROP(exit,       0x30, pointer_to_member_function);
-    PT_TYPE_SIZE(0x40);
+    PSEUDO_TYPE_SIZE(0x40);
 
     pointer_to_member_function &callback_n(size_t n) {
         switch (n) {
@@ -121,11 +121,11 @@ struct StateMachine {
     PROP(state,   0x8, uint32_t);
     PROP(states, 0x28, CountPtr<StateMachineDelegate>);
     PROP(names,  0x38, CountPtr<SafeString>);
-    PT_TYPE_SIZE(0x48);
+    PSEUDO_TYPE_SIZE(0x48);
 };
 
 struct hitbox {
-    PT_TYPE_SIZE(0x1c8);
+    PSEUDO_TYPE_SIZE(0x1c8);
 };
 
 struct hitbox_manager {
@@ -135,7 +135,7 @@ struct hitbox_manager {
 struct AreaSystem {
     PROP(world_id,   0x18, uint32_t);
     PROP(hitbox_mgr, 0x40, hitbox_manager);
-    PT_TYPE_UNSIZED;
+    PSEUDO_TYPE_UNSIZED;
 };
 
 } // namespace mm

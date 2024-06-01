@@ -470,6 +470,13 @@ class RPCConn {
     }
 
   }
+  async reqSetHashTweak(tweak) {
+    let dv = new DataView(new ArrayBuffer(9));
+    dv.setInt8(0, 4); // RPC_REQ_SET_HASH_TWEAK
+    dv.setBigUint64(1, tweak, true);
+    let resp = await this.rawRequest(dv);
+    assert(resp.byteLength == 0);
+  }
 }
 
 
@@ -685,7 +692,7 @@ async function go() {
   })();
 
   g_hoseConn = new HoseConn(theBaseURL);
-  g_hoseConn.setWantOpen(false);
+  g_hoseConn.setWantOpen(true);
 
 }
 go();

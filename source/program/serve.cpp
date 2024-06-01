@@ -162,6 +162,9 @@ void hose::thread_func() {
 }
 
 void hose::do_iter() {
+    write_info write_info = write_info_.load(std::memory_order_acquire);
+    uint32_t read_offset = read_offset_.load(std::memory_order_relaxed);
+
     // pick up new connection if present
     int new_fd = new_fd_.exchange(-1, std::memory_order_relaxed);
     if (new_fd != -1) {
@@ -169,10 +172,10 @@ void hose::do_iter() {
             close(cur_fd_);
         }
         cur_fd_ = new_fd;
+        // drop existing buffer srince it might have a half-sent frame
+        read_offset_.store(write_info.write_offset, std::memory_order_release);
+        return;
     }
-
-    write_info write_info = write_info_.load(std::memory_order_acquire);
-    uint32_t read_offset = read_offset_.load(std::memory_order_relaxed);
 
     assert(read_offset <= write_info.wrap_offset &&
            write_info.write_offset <= write_info.wrap_offset &&

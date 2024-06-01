@@ -19,8 +19,8 @@ void xprintf(const char *fmt, ...);
 
 // --
 
-#define PROP(name, offset, ty) \
-    using typeof_##name = ty; \
+#define PROP(name, offset, ...) \
+    using typeof_##name = __VA_ARGS__; \
     static constexpr size_t offsetof_##name() { \
         return offset; \
     } \

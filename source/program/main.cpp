@@ -24,6 +24,14 @@ void xprintf(const char *fmt, ...) {
     log_str(buf);
 }
 
+enum mm_version {
+    VER_301,
+    VER_302,
+    VER_COUNT,
+};
+
+static const mm_version s_cur_mm_version = VER_301; // XXX
+
 namespace mm {
 
 // -- Naming
@@ -85,6 +93,47 @@ union pointer_to_member_function {
 };
 static_assert(sizeof(pointer_to_member_function) == 0x10);
 
+// sead::ListNode
+struct ListNode {
+    ListNode *prev;
+    ListNode *next;
+};
+
+// sead::ListImpl
+struct ListImpl {
+    ListNode head;
+    uint32_t count;
+    uint32_t offset_to_link;
+};
+
+// wrapper, no evidence for original
+template <typename T>
+struct list_iterator {
+    ListNode *cur_node_;
+    uint32_t offset_to_link_;
+    ListNode *end_;
+
+    T &operator*() const {
+        assert(cur_node_ != end_);
+        return *(T *)((char *)cur_node_ - offset_to_link_);
+    }
+    list_iterator &operator++() {
+        assert(cur_node_ != end_);
+        cur_node_ = cur_node_->next;
+        return *this;
+    }
+    bool operator==(const list_iterator &other) const {
+        return cur_node_ == other.cur_node_;
+    };
+};
+
+// wrapper, no evidence for original
+template <typename T>
+struct list : public ListImpl {
+    list_iterator<T> begin() { return list_iterator<T>{head.next, offset_to_link, &head}; }
+    list_iterator<T> end()   { return list_iterator<T>{&head, offset_to_link, &head}; }
+};
+
 struct SafeString {
     PROP(vtable,     0x0, void *);
     PROP(str,        0x8, const char *);
@@ -125,16 +174,34 @@ struct StateMachine {
 };
 
 struct hitbox {
+    PROP(vtable, 0x0, uintptr_t);
     PSEUDO_TYPE_SIZE(0x1c8);
+
+    static constexpr uintptr_t vtable_offset[VER_COUNT] = {
+        [VER_301] = 0x028694a0,
+    };
+
+    void verify() {
+        assert(vtable() == exl::util::modules::GetTargetStart() +
+                           vtable_offset[s_cur_mm_version]);
+    };
+};
+
+struct hitbox_node {
+    PROP(node,     0, ListNode);
+    PROP(owner, 0x10, hitbox *);
+    PROP(list,  0x18, void *);
+    PSEUDO_TYPE_UNSIZED;
 };
 
 struct hitbox_manager {
-
+    PROP(lists,  0x10, list<hitbox_node>[5]);
+    PSEUDO_TYPE_UNSIZED;
 };
 
 struct AreaSystem {
     PROP(world_id,   0x18, uint32_t);
-    PROP(hitbox_mgr, 0x40, hitbox_manager);
+    PROP(hitbox_mgr, 0x40, hitbox_manager *);
     PSEUDO_TYPE_UNSIZED;
 };
 
@@ -160,8 +227,7 @@ static uintptr_t get_state_callback(mm::StateMachine *sm, uint32_t state, uint32
     return func;
 }
 
-static void *
-return_address_from_frame_impl(void *frame0, size_t n) {
+static void *return_address_from_frame_impl(void *frame0, size_t n) {
     while (n--) {
         if (!frame0)
             return nullptr;
@@ -194,12 +260,16 @@ HOOK_DEFINE_TRAMPOLINE(Stub_StateMachine_changeState) {
         );
         Orig(sm, state);
     }
-    static constexpr uintptr_t Offset_301 = 0x8b9280;
+    static constexpr uintptr_t offset[VER_COUNT] = {
+        [VER_301] = 0x8b9280,
+    };
 };
 
 template <typename StubFoo>
 void install() {
-    StubFoo::InstallAtOffset(StubFoo::Offset_301);
+    uintptr_t offset = StubFoo::offset[s_cur_mm_version];
+    assert(offset);
+    StubFoo::InstallAtOffset(offset);
 }
 
 struct SeenCache {
@@ -272,8 +342,12 @@ struct SeenCache {
 
 SeenCache s_seen_cache;
 
-static void report_hitbox(mm::hitbox *hb) {
+static void report_hitbox(mm::hitbox *hb, bool surprise) {
+    hb->verify();
     if (!s_seen_cache.test_and_set(hb)) {
+        if (surprise) {
+            xprintf("surprising hitbox %p", hb);
+        }
         s_hose.write_fixed(
             hose_tag{"hitbox"},
             hb,
@@ -285,8 +359,8 @@ static void report_hitbox(mm::hitbox *hb) {
 HOOK_DEFINE_TRAMPOLINE(Stub_hitbox_collide) {
     static long Callback(mm::hitbox *hb1, mm::hitbox *hb2) {
         long ret = Orig(hb1, hb2);
-        report_hitbox(hb1);
-        report_hitbox(hb2);
+        report_hitbox(hb1, /*surprise*/ true);
+        report_hitbox(hb2, /*surprise*/ true);
         s_hose.write_fixed(
             hose_tag{"collisi"},
             hb1,
@@ -295,20 +369,29 @@ HOOK_DEFINE_TRAMPOLINE(Stub_hitbox_collide) {
         );
         return ret;
     }
-    static constexpr uintptr_t Offset_301 = 0xe28a50;
+    static constexpr uintptr_t offset[VER_COUNT] = {
+        [VER_301] = 0xe28a50,
+    };
 };
 
 HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
     static void Callback(mm::AreaSystem *self) {
+        s_seen_cache.next_frame();
         s_hose.write_fixed(
             hose_tag{"do_many"},
             self,
             (uint64_t)self->world_id()
         );
-        s_seen_cache.next_frame();
+        for (mm::list<mm::hitbox_node> &list : self->hitbox_mgr()->lists()) {
+            for (mm::hitbox_node &hn : list) {
+                report_hitbox(hn.owner(), /*surprise*/ false);
+            }
+        }
         Orig(self);
     }
-    static constexpr uintptr_t Offset_301 = 0xe44320;
+    static constexpr uintptr_t offset[VER_COUNT] = {
+        [VER_301] = 0xe44320,
+    };
 };
 
 extern "C" void exl_main(void* x0, void* x1) {

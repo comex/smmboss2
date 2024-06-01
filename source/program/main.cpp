@@ -3,6 +3,7 @@
 #include "stuff.hpp"
 #include <stdarg.h>
 #include <array>
+#include <span>
 #include <variant>
 
 // TODO: move this
@@ -239,6 +240,8 @@ struct mm_normal_collider : public mm_some_collider {
         [VER_301] = 0xdd0e00,
     };
 
+    PROP(dump_start, char, 0x238);
+    PROP(dump_end,   char, 0x3e0);
 };
 
 struct mm_scol_collider : public mm_some_collider {
@@ -483,7 +486,9 @@ static void report_all_colliders_in(mm_list<mm_some_collider_node> *cnlist, int 
             mm_normal_collider *nc = *ncp;
             s_hose.write_fixed(
                 hose_tag{"normcol"},
-                nc
+                nc,
+                mm_normal_collider::offsetof_dump_start,
+                std::span<char>(&nc->dump_start(), &nc->dump_end())
             );
         } else if (auto scp = std::get_if<mm_scol_collider *>(&downcasted)) {
             mm_scol_collider *sc = *scp;

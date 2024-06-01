@@ -392,11 +392,11 @@ void install() {
     StubFoo::InstallAtOffset(assert_nonzero(StubFoo::offset[s_cur_mm_version]));
 }
 
-// just a simple hash table
+// just a simple hash table with lazy clearing
 struct SeenCache {
     struct Entry {
         uint64_t object:48,
-                  frame:16;
+                  epoch:16;
         uint64_t value;
     };
 
@@ -407,7 +407,7 @@ struct SeenCache {
                 xprintf("hash was full");
                 return true;
             }
-            entry->frame = cur_frame_;
+            entry->epoch = cur_epoch_;
             entry->object = (uintptr_t)object;
             count_++;
             return false;
@@ -421,10 +421,10 @@ struct SeenCache {
         assert(object_up < ((uintptr_t)1 << 48));
         size_t idx = hash(object);
         size_t nchecked = 0;
-        uint64_t cur_frame = cur_frame_;
+        uint64_t cur_epoch = cur_epoch_;
         while (nchecked < NUM_ENTRIES) {
             Entry *ent = &entries_[idx];
-            if (ent->object == 0 || ent->frame != cur_frame) {
+            if (ent->object == 0 || ent->epoch != cur_epoch) {
                 return std::make_tuple(ent, false);
             }
             if (ent->object == object_up) {
@@ -441,38 +441,26 @@ struct SeenCache {
         return (uintptr_t)object % NUM_ENTRIES;
     }
 
-    void next_frame() {
-        cur_frame_++;
+    void next_epoch() {
+        cur_epoch_++;
+        count_ = 0;
 
-        // Clear out entries on a rolling basis.
-        // Must visit the entire array at least once every `visit_frames` frames:
-        size_t visit_frames = FRAME_ROLLOVER_COUNT - MAX_AGE;
-        size_t entries_per_frame = (NUM_ENTRIES + visit_frames - 1) / visit_frames;
-        for (size_t i = 0; i < entries_per_frame; i++) {
-            size_t idx = clearout_idx_++;
-            if (clearout_idx_ == NUM_ENTRIES) {
-                clearout_idx_ = 0;
-            }
-            if (age(entries_[idx]) > MAX_AGE) {
-                entries_[idx] = Entry{};
-                count_ = 0;
-            }
+        // clear out entries on a rolling basis
+        size_t possible_epochs = 1 << 16;
+        size_t to_clear_per_epoch = (NUM_ENTRIES + possible_epochs - 1) / possible_epochs;
+        // ^ might just be 1
+        for (size_t i = cur_epoch_ * to_clear_per_epoch;
+                    i < (cur_epoch_ + 1) * to_clear_per_epoch && i < NUM_ENTRIES;
+                    i++) {
+            entries_[i] = Entry{};
         }
-    }
-
-    size_t age(Entry &entry) {
-        return (uint16_t)(cur_frame_ - entry.frame);
     }
 
     static constexpr size_t NUM_ENTRIES = 24593;
     static constexpr size_t MAX_COUNT = NUM_ENTRIES / 2;
-    static constexpr size_t FRAME_ROLLOVER_COUNT = 1 << 16;
-    static constexpr size_t MAX_AGE = 1;
-
     std::array<Entry, NUM_ENTRIES> entries_{};
-    uint16_t cur_frame_ = 0;
+    uint16_t cur_epoch_ = 0;
     size_t count_ = 0;
-    size_t clearout_idx_ = 0;
 };
 
 SeenCache s_seen_cache;

@@ -53,22 +53,28 @@ constexpr inline size_t _pt_size_of() { return sizeof(T); }
 template <typename T>
 constexpr inline size_t pt_size_of = _pt_size_of<T>();
 
-// Pointer to a type that uses PROP macros for its fields.  Normal pointer
-// arithmetic won't work because the type doesn't have any real fields, so
-// sizeof will give the wrong answer.
-template <pseudo_type T>
+// Pointer to a pseudo-type.  Normal pointer arithmetic won't work because the
+// type doesn't have any real fields, so sizeof will give the wrong answer.
+// Can also be used for normal types.
+template <typename T>
 struct pt_pointer {
     T *raw;
 
     pt_pointer(T *raw) : raw(raw) {}
     T &operator*() const { return *raw; }
     T *operator->() const { return raw; }
-    operator bool() const { return !!raw; }
+    explicit operator bool() const { return !!raw; }
     T &operator[](size_t i) const { return *(*this + i); }
 
-    pt_pointer<T> operator+(size_t n) const {
+    pt_pointer operator+(size_t n) const {
         return (T *)((char *)raw + n * pt_size_of<T>);
     }
+
+    pt_pointer &operator++() {
+        return *this = *this + 1;
+    }
+
+    bool operator==(const pt_pointer &other) const { return raw == other.raw; }
 };
 
 template <pseudo_type T, size_t count>

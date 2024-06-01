@@ -136,22 +136,6 @@ static size_t safe_memcpy(void *dst, bool check_dst,
 #define offsetof_end(ty, what) \
     (offsetof(ty, what) + sizeof(((ty *)0)->what))
 
-size_t add_ws_header_size(size_t size) {
-    size_t header_size;
-    if (size < 126) {
-        header_size = 2;
-    } else if (size < 65536) {
-        header_size = 4;
-    } else {
-        header_size = 10;
-    }
-    size_t full_size = size + header_size;
-    if (full_size < size) {
-        return SIZE_MAX;
-    }
-    return full_size;
-}
-
 void hose::push_fd(int fd) {
     xprintf("hose::push_fd(%d)", fd);
     // disable nonblock
@@ -190,12 +174,6 @@ void hose::do_iter() {
            write_info.write_offset <= write_info.wrap_offset &&
            write_info.wrap_offset <= sizeof(buf_));
 
-    if (cur_fd_ == -1) {
-        // nobody to send to
-        read_offset_.store(write_info.write_offset, std::memory_order_relaxed);
-        return do_sleep();
-    }
-
     if (read_offset == write_info.wrap_offset) {
         read_offset = 0;
     }
@@ -210,17 +188,23 @@ void hose::do_iter() {
         to_send = write_info.wrap_offset - read_offset;
     }
 
-    ssize_t ret = send(cur_fd_, buf_ + read_offset, to_send, 0);
-    if (ret == -1) {
-        xprintf("send() failed: %s", strerror(errno));
-        close(cur_fd_);
-        cur_fd_ = -1;
-        return;
+    ssize_t actual;
+    if (cur_fd_ == -1) {
+        // nobody to send to; just discard data
+        actual = to_send;
+    } else {
+        actual = send(cur_fd_, buf_ + read_offset, to_send, 0);
+        if (actual == -1) {
+            xprintf("send() failed: %s", strerror(errno));
+            close(cur_fd_);
+            cur_fd_ = -1;
+            return;
+        }
+        if (actual == 0) {
+            xprintf("send() returned 0?");
+        }
+        read_offset += (size_t)actual;
     }
-    if (ret == 0) {
-        xprintf("send() returned 0?");
-    }
-    read_offset += (size_t)ret;
     assert(read_offset <= sizeof(buf_));
     read_offset_.store(read_offset, std::memory_order_release);
 }
@@ -233,7 +217,7 @@ std::tuple<bool, hose::write_info> hose::reserve_space(size_t size, bool for_ove
     assert_on_write_thread();
     uint32_t read_offset = read_offset_.load(std::memory_order_acquire);
     write_info write_info = write_info_.load(std::memory_order_relaxed);
-    size_t needed_size = size + (for_overrun ? 0 : add_ws_header_size(OVERRUN_BODY_SIZE));
+    size_t needed_size = size + (for_overrun ? 0 : (OUTGOING_WS_HEADER_SIZE + OVERRUN_BODY_SIZE));
     if (needed_size < size) {
         needed_size = SIZE_MAX;
     }

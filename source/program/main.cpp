@@ -142,14 +142,20 @@ struct mm_list : public mm_ListImpl {
     }
 };
 
+template <typename self_t, typename T>
+struct mm_count_ptr_methods {
+    pt_pointer<T> begin() const { return ((self_t *)this)->ptr; }
+    pt_pointer<T> end() const { return begin() + ((self_t *)this)->count; }
+};
+
 template <typename T>
-struct mm_count_ptr {
+struct mm_count_ptr : public mm_count_ptr_methods<mm_count_ptr<T>, T> {
     uint32_t count;
     pt_pointer<T> ptr;
 };
 
 template <typename T>
-struct mm_count_cap_ptr {
+struct mm_count_cap_ptr : public mm_count_ptr_methods<mm_count_cap_ptr<T>, T>  {
     uint32_t count;
     uint32_t cap;
     pt_pointer<T> ptr;
@@ -217,13 +223,18 @@ struct mm_hitbox_manager {
     PSEUDO_TYPE_UNSIZED;
 };
 
-struct mm_terrain_manager {
+struct mm_normal_collider;
+struct mm_scol_collider;
 
+struct mm_block_collider_owner {
+    PROP(collider, 0x38, mm_normal_collider);
     PSEUDO_TYPE_UNSIZED;
 };
 
-struct mm_normal_collider;
-struct mm_scol_collider;
+struct mm_terrain_manager {
+    PROP(block_collider_owners, 0x18, mm_count_ptr<mm_block_collider_owner *>);
+    PSEUDO_TYPE_UNSIZED;
+};
 
 // This is really one of two unrelated structs, and the real way to distinguish
 // them is via the vtable on the node, but distinguishing them by their own
@@ -493,46 +504,53 @@ static void report_all_hitboxes(mm_AreaSystem *as) {
         report_hitbox(&hb, /*surprise*/ false);
     }
 }
-static const float dummy_pos[2]{};
+static void report_some_collider(mm_some_collider *some, int which_list) {
+    static const float dummy_pos[2]{};
+    auto downcasted = some->downcast();
+    if (auto ncp = std::get_if<mm_normal_collider *>(&downcasted)) {
+        mm_normal_collider *nc = *ncp;
+        s_hose.write_packet([&](auto &w) {
+            w.write_tag({"normcol"});
+            w.write_prim(nc);
+            w.write_raw(nc, mm_normal_collider::initial_dump_size);
+            w.write_prim(nc->ext_pos_cur());
+            w.write_n(nc->ext_pos_cur() ?: dummy_pos, 2);
+            w.write_prim(nc->ext_pos_old());
+            w.write_n(nc->ext_pos_old() ?: dummy_pos, 2);
+        });
+    } else if (auto scp = std::get_if<mm_scol_collider *>(&downcasted)) {
+        mm_scol_collider *sc = *scp;
+        s_hose.write_packet([&](auto &w) {
+            w.write_tag({"scolcol"});
+            w.write_prim(sc);
+            w.write_raw(sc, mm_scol_collider::initial_dump_size);
+            w.write_prim(sc->ext_pos_cur());
+            w.write_n(sc->ext_pos_cur() ?: dummy_pos, 2);
+            w.write_prim(sc->ext_pos_old());
+            w.write_n(sc->ext_pos_old() ?: dummy_pos, 2);
+        });
+    } else {
+        xprintf("unknown collider %p with vtable %#lx", some, some->vt20_offset());
+        s_hose.write_packet([&](auto &w) {
+            w.write_tag({"unkcol"});
+            w.write_prim(some);
+        });
+    }
+}
 
 static void report_all_colliders_in(mm_list<mm_some_collider_node> *cnlist, int which_list) {
     for (mm_some_collider_node &cn : *cnlist) {
         mm_some_collider *some = cn.outer()->owner();
-        auto downcasted = some->downcast();
-        if (auto ncp = std::get_if<mm_normal_collider *>(&downcasted)) {
-            mm_normal_collider *nc = *ncp;
-            s_hose.write_packet([&](auto &w) {
-                w.write_tag({"normcol"});
-                w.write_prim(nc);
-                w.write_raw(nc, mm_normal_collider::initial_dump_size);
-                w.write_prim(nc->ext_pos_cur());
-                w.write_n(nc->ext_pos_cur() ?: dummy_pos, 2);
-                w.write_prim(nc->ext_pos_old());
-                w.write_n(nc->ext_pos_old() ?: dummy_pos, 2);
-            });
-        } else if (auto scp = std::get_if<mm_scol_collider *>(&downcasted)) {
-            mm_scol_collider *sc = *scp;
-            s_hose.write_packet([&](auto &w) {
-                w.write_tag({"scolcol"});
-                w.write_prim(sc);
-                w.write_raw(sc, mm_scol_collider::initial_dump_size);
-                w.write_prim(sc->ext_pos_cur());
-                w.write_n(sc->ext_pos_cur() ?: dummy_pos, 2);
-                w.write_prim(sc->ext_pos_old());
-                w.write_n(sc->ext_pos_old() ?: dummy_pos, 2);
-            });
-        } else {
-            xprintf("unknown collider %p with vtable %#lx", some, some->vt20_offset());
-            s_hose.write_packet([&](auto &w) {
-                w.write_tag({"unkcol"});
-            });
-        }
+        report_some_collider(some, which_list);
     }
 }
 
 static void report_all_colliders(mm_AreaSystem *as) {
     report_all_colliders_in(&as->bg_collision_system()->colliders1(), 1);
     report_all_colliders_in(&as->bg_collision_system()->colliders2(), 2);
+    for (mm_block_collider_owner *owner : as->terrain_mgr()->block_collider_owners()) {
+        report_some_collider(&owner->collider(), 2);
+    }
 }
 
 HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
@@ -552,45 +570,6 @@ HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
     };
 };
 
-HOOK_DEFINE_TRAMPOLINE(Stub_sead_ListNode_insertBack) {
-    static void Callback(mm_ListNode *list, mm_ListNode *node) {
-        if (node &&
-            *(uintptr_t *)(node + 0x20) - s_target_start == 0x02868ef0) {
-            xprintf("insertBack happened to %p in %p! <- %p <- %p <- %p <- %p <- %p",
-                node,
-                list,
-                __builtin_return_address(0),
-                return_address_from_frame(0),
-                return_address_from_frame(1),
-                return_address_from_frame(2),
-                return_address_from_frame(3));
-        }
-        Orig(list, node);
-    }
-    static constexpr uintptr_t offset[VER_COUNT] = {
-        [VER_301] = 0x00262d90,
-    };
-};
-HOOK_DEFINE_TRAMPOLINE(Stub_sead_ListNode_insertFront) {
-    static void Callback(mm_ListNode *list, mm_ListNode *node) {
-        if (node &&
-            *(uintptr_t *)(node + 0x20) - s_target_start == 0x02868ef0) {
-            xprintf("insertFront happened to %p in %p! <- %p <- %p <- %p <- %p <- %p",
-                node,
-                list,
-                __builtin_return_address(0),
-                return_address_from_frame(0),
-                return_address_from_frame(1),
-                return_address_from_frame(2),
-                return_address_from_frame(3));
-        }
-        Orig(list, node);
-    }
-    static constexpr uintptr_t offset[VER_COUNT] = {
-        [VER_301] = 0x00262db0,
-    };
-};
-
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
     s_target_start = exl::util::modules::GetTargetStart();
@@ -599,7 +578,7 @@ extern "C" void exl_main(void* x0, void* x1) {
 
     serve_main();
 
-    install<Stub_StateMachine_changeState>();
+    //install<Stub_StateMachine_changeState>();
 
     // this is for 3.0.1:
 
@@ -619,11 +598,6 @@ extern "C" void exl_main(void* x0, void* x1) {
     // TODO: make these dynamic hooks
     install<Stub_hitbox_collide>();
     install<Stub_AreaSystem_do_many_collisions>();
-
-    // XXX
-    install<Stub_sead_ListNode_insertFront>();
-    install<Stub_sead_ListNode_insertBack>();
-
     log_str("done hooking");
 }
 

@@ -5,12 +5,14 @@
 #include <string.h>
 #include "stuff.hpp"
 
-size_t add_ws_header_size(size_t size);
-uint8_t *fill_ws_header(uint8_t *p, size_t size, size_t min_size);
+constexpr size_t OUTGOING_WS_HEADER_SIZE = 10;
 
-struct hose_tag {
-    char name[8];
-};
+static inline void fill_ws_header(uint8_t *p, size_t size) {
+    p[0] = 0x82;
+    p[1] = 0x7f;
+    uint64_t swapped = __builtin_bswap64(size);
+    memcpy(&p[2], &swapped, 8);
+}
 
 struct hose {
     void push_fd(int fd);
@@ -18,31 +20,55 @@ struct hose {
     // reader thread func:
     void thread_func();
 
-    // writer thread func:
-    template <typename F>
-    void write_packet(size_t size, F &&writeout, bool for_overrun = false) {
-        size_t full_size = add_ws_header_size(size);
-        write_raw(full_size, [&](uint8_t *p) {
-            uint8_t *past_header = fill_ws_header(p, size, size);
-            writeout(past_header);
-        }, for_overrun);
-    }
+    template <typename self_t>
+    struct writer_base {
+        template <typename T>
+        void write_prim(const T &t) {
+            ((self_t *)this)->write_range(&t, &t + 1);
+        }
+        struct tag { char c[8]; };
+        void write_tag(tag t) {
+            write_prim(t);
+        }
+    };
 
-    template <typename ...T>
-    void write_fixed(const T &...t) {
-        size_t total_size = 0;
-        ((total_size += pt_size_of<T>), ...);
-        write_packet(total_size, [&](uint8_t *dst) {
-            ((memcpy(dst, &t, pt_size_of<T>), dst += pt_size_of<T>), ...);
-        });
+    struct size_calculator : public writer_base<size_calculator> {
+        size_t size_;
+        void write_range(const void *start, const void *end) {
+            size_t old_size = size_;
+            size_t new_size = old_size + ((uint8_t *)end - (uint8_t *)start);
+            size_ = new_size > old_size ? new_size : SIZE_MAX;
+        }
+    };
+
+    struct actual_writer : public writer_base<actual_writer> {
+        uint8_t *cur_ptr_;
+        void write_range(const void *start, const void *end) {
+            size_t size = (uint8_t *)end - (uint8_t *)start;
+            memcpy(cur_ptr_, start, size);
+            cur_ptr_ += size;
+        }
+    };
+
+    // writer thread func:
+    void write_packet(auto &&callback, bool for_overrun = false) {
+        size_calculator sc{.size_ = OUTGOING_WS_HEADER_SIZE};
+        callback(sc);
+        size_t size = sc.size_;
+        auto [ok, new_write_info] = reserve_space(size, for_overrun);
+        if (!ok) {
+            return;
+        }
+        uint8_t *ptr = buf_ + (new_write_info.write_offset - size);
+        fill_ws_header(ptr, size - OUTGOING_WS_HEADER_SIZE);
+        actual_writer aw{.cur_ptr_ = ptr + OUTGOING_WS_HEADER_SIZE};
+        callback(aw);
+        assert(aw.cur_ptr_ == ptr + size);
+
+        write_info_.store(new_write_info, std::memory_order_release);
     }
 
 private:
-    // protocol:
-    enum hose_packet_type : uint8_t {
-        HOSE_PACKET_OVERRUN = 1,
-    };
-
     // shared data:
     struct write_info {
         uint32_t write_offset;
@@ -64,18 +90,7 @@ private:
     void do_iter();
     void do_sleep();
 
-    static constexpr size_t OVERRUN_BODY_SIZE = 9;
-
-    // writer thread funcs:
-    template <typename F>
-    void write_raw(size_t size, F &&writeout, bool for_overrun) {
-        auto [ok, new_write_info] = reserve_space(size, for_overrun);
-        if (!ok) {
-            return;
-        }
-        writeout(buf_ + (new_write_info.write_offset - size));
-        write_info_.store(new_write_info, std::memory_order_release);
-    }
+    static constexpr size_t OVERRUN_BODY_SIZE = 16;
 
     std::tuple<bool, write_info> reserve_space(size_t size, bool for_overrun);
 

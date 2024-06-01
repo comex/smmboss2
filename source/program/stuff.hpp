@@ -45,13 +45,13 @@ template <typename T>
 concept pseudo_type = requires { { T::_is_pseudo_type }; };
 
 template <pseudo_type T>
-inline size_t _pt_size_of() { return T::size_of(); }
+constexpr inline size_t _pt_size_of() { return T::size_of(); }
 
 template <typename T>
-inline size_t _pt_size_of() { return sizeof(T); }
+constexpr inline size_t _pt_size_of() { return sizeof(T); }
 
 template <typename T>
-inline size_t pt_size_of = _pt_size_of<T>();
+constexpr inline size_t pt_size_of = _pt_size_of<T>();
 
 // Pointer to a type that uses PROP macros for its fields.  Normal pointer
 // arithmetic won't work because the type doesn't have any real fields, so

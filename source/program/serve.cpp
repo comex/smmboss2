@@ -152,32 +152,6 @@ size_t add_ws_header_size(size_t size) {
     return full_size;
 }
 
-uint8_t *fill_ws_header(uint8_t *p, size_t size, size_t min_size) {
-    // fill out websocket frame header.  based on mkhdr.
-    assert(size <= min_size);
-    p[0] = WEBSOCKET_OP_BINARY | 128;
-    if (min_size < 126) {
-        p[1] = (uint8_t)size;
-        return p + 2;
-    } else if (min_size < 65536) {
-        p[1] = 126;
-        p[2] = (uint8_t)(size >> 8);
-        p[3] = (uint8_t)(size >> 0);
-        return p + 4;
-    } else {
-        p[1] = 127;
-        uint64_t swapped = __builtin_bswap64(size);
-        memcpy(&p[2], &swapped, 8);
-        return p + 10;
-    }
-}
-
-
-__attribute__((constructor))
-static void ctor_test() {
-    log_str("i should be kept");
-}
-
 void hose::push_fd(int fd) {
     xprintf("hose::push_fd(%d)", fd);
     // disable nonblock
@@ -291,10 +265,9 @@ std::tuple<bool, hose::write_info> hose::reserve_space(size_t size, bool for_ove
 
 void hose::write_overrun(size_t size) {
     xprintf("write_overrun size=%zu", size);
-    write_packet(OVERRUN_BODY_SIZE, [&](uint8_t *p) {
-        p[0] = HOSE_PACKET_OVERRUN;
-        static_assert(sizeof(size) == 8);
-        memcpy(p + 1, &size, 8);
+    write_packet([&](auto &w) {
+        w.write_tag({"overrun"});
+        w.write_prim(size);
     }, /*for_overrun*/ true);
 }
 
@@ -380,17 +353,16 @@ private:
                     goto err;
                 }
             }
-            size_t full_len = add_ws_header_size(rw_len);
-            if (full_len > c->send.size - c->send.len) {
+            size_t full_len = rw_len + OUTGOING_WS_HEADER_SIZE;
+            if (full_len < rw_len || full_len > c->send.size - c->send.len) {
                 err = "i'm overstuffed";
                 goto err;
             }
             uint8_t *header = c->send.buf + c->send.len;
-            uint8_t *past_header = header + (full_len - rw_len);
+            uint8_t *past_header = header + OUTGOING_WS_HEADER_SIZE;
             size_t actual = safe_memcpy(past_header, false, (void *)req->rw.addr, true, rw_len);
-            uint8_t *ph = fill_ws_header(header, actual, rw_len);
-            assert(ph == past_header);
-            c->send.len += ph + actual - header;
+            fill_ws_header(header, rw_len);
+            c->send.len += past_header + actual - header;
             return;
         }
 

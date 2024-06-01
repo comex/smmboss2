@@ -3,7 +3,6 @@
 #include "stuff.hpp"
 #include <stdarg.h>
 #include <array>
-#include <span>
 #include <variant>
 
 // TODO: move this
@@ -33,6 +32,7 @@ enum mm_version {
 };
 
 static const mm_version s_cur_mm_version = VER_301; // XXX
+static uintptr_t s_target_start;
 
 static uintptr_t assert_nonzero(uintptr_t offset) {
     assert(offset);
@@ -194,7 +194,7 @@ struct mm_hitbox {
     };
 
     void verify() {
-        assert(vtable() == exl::util::modules::GetTargetStart() +
+        assert(vtable() == s_target_start +
                            vtable_offset[s_cur_mm_version]);
     };
 };
@@ -229,7 +229,7 @@ struct mm_some_collider {
     std::variant<mm_normal_collider *, mm_scol_collider *, std::monostate> downcast();
     uintptr_t vt20_offset() const {
         uintptr_t vt20 = *(uintptr_t *)((char *)vtable() + 0x20);
-        return vt20 - exl::util::modules::GetTargetStart();
+        return vt20 - s_target_start;
     }
 };
 
@@ -240,8 +240,8 @@ struct mm_normal_collider : public mm_some_collider {
         [VER_301] = 0xdd0e00,
     };
 
-    PROP(dump_start, char, 0x238);
-    PROP(dump_end,   char, 0x3e0);
+    PROP(dump_start, 0x238, char);
+    PROP(dump_end,   0x3e0, char);
 };
 
 struct mm_scol_collider : public mm_some_collider {
@@ -318,7 +318,7 @@ static uintptr_t get_state_callback(mm_StateMachine *sm, uint32_t state, uint32_
     mm_pointer_to_member_function cb = delegate->callback_n(which_callback);
     uintptr_t func = (uintptr_t)cb.resolve(delegate->owner());
     if (func) {
-        func -= exl::util::modules::GetTargetStart(); // unslide address
+        func -= s_target_start; // unslide address
     }
     return func;
 }
@@ -444,11 +444,11 @@ static void report_hitbox(mm_hitbox *hb, bool surprise) {
         if (surprise) {
             xprintf("surprising hitbox %p", hb);
         }
-        s_hose.write_fixed(
-            hose_tag{"hitbox"},
-            hb,
-            *hb
-        );
+        s_hose.write_packet([&](auto &w) {
+            w.write_tag({"hitbox"});
+            w.write_prim(hb);
+            w.write_range(hb, (char *)hb + pt_size_of<mm_hitbox>);
+        });
     }
 }
 
@@ -457,12 +457,12 @@ HOOK_DEFINE_TRAMPOLINE(Stub_hitbox_collide) {
         long ret = Orig(hb1, hb2);
         report_hitbox(hb1, /*surprise*/ true);
         report_hitbox(hb2, /*surprise*/ true);
-        s_hose.write_fixed(
-            hose_tag{"collisi"},
-            hb1,
-            hb2,
-            ret
-        );
+        s_hose.write_packet([&](auto &w) {
+            w.write_tag({"collisi"});
+            w.write_prim(hb1);
+            w.write_prim(hb2);
+            w.write_prim(ret);
+        });
         return ret;
     }
     static constexpr uintptr_t offset[VER_COUNT] = {
@@ -484,23 +484,23 @@ static void report_all_colliders_in(mm_list<mm_some_collider_node> *cnlist, int 
         auto downcasted = some->downcast();
         if (auto ncp = std::get_if<mm_normal_collider *>(&downcasted)) {
             mm_normal_collider *nc = *ncp;
-            s_hose.write_fixed(
-                hose_tag{"normcol"},
-                nc,
-                mm_normal_collider::offsetof_dump_start,
-                std::span<char>(&nc->dump_start(), &nc->dump_end())
-            );
+            s_hose.write_packet([&](auto &w) {
+                w.write_tag({"normcol"});
+                w.write_prim(nc);
+                w.write_prim((uint64_t)mm_normal_collider::offsetof_dump_start);
+                w.write_range(&nc->dump_start(), &nc->dump_end());
+            });
         } else if (auto scp = std::get_if<mm_scol_collider *>(&downcasted)) {
             mm_scol_collider *sc = *scp;
-            s_hose.write_fixed(
-                hose_tag{"scolcol"},
-                sc
-            );
+            s_hose.write_packet([&](auto &w) {
+                w.write_tag({"scolcol"});
+                w.write_prim(sc);
+            });
         } else {
             xprintf("unknown collider %p with vtable %#lx", some, some->vt20_offset());
-            s_hose.write_fixed(
-                hose_tag{"unkcol"}
-            );
+            s_hose.write_packet([&](auto &w) {
+                w.write_tag({"unkcol"});
+            });
         }
     }
 }
@@ -513,11 +513,11 @@ static void report_all_colliders(mm_AreaSystem *as) {
 HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
     static void Callback(mm_AreaSystem *self) {
         s_seen_cache.next_frame();
-        s_hose.write_fixed(
-            hose_tag{"do_many"},
-            self,
-            (uint64_t)self->world_id()
-        );
+        s_hose.write_packet([&](auto &w) {
+            w.write_tag({"do_many"});
+            w.write_prim(self);
+            w.write_prim((uint64_t)self->world_id());
+        });
         report_all_colliders(self);
         report_all_hitboxes(self);
         Orig(self);
@@ -529,7 +529,8 @@ HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
 
 extern "C" void exl_main(void* x0, void* x1) {
     /* Setup hooking enviroment. */
-    xprintf("exl_main, TS=%lx", exl::util::modules::GetTargetStart());
+    s_target_start = exl::util::modules::GetTargetStart();
+    xprintf("exl_main, TS=%lx", s_target_start);
     exl::hook::Initialize();
 
     serve_main();

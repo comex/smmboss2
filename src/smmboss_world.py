@@ -311,7 +311,7 @@ class Scol(GuestStruct):
     # xxy_ptrs_cur[i]
     # xxy_ptrs_old[i]
     # sees_by_point_idx[i]
-    # sees_valid[i] (only for 0 and 1)
+    # sees_valid_cur[i] (only for 0 and 1)
     # result_lists_cur[i][result_list_idxs_cur[i]]
     # actor_idbits[i]
     # ridden_by_scol_lists[(2,3,1,0)[i]]
@@ -616,6 +616,10 @@ class AreaSystem(GuestStruct):
     bloch = prop(0xa0, ptr_to(Bloch))
     rngplus = prop(0xf8, ptr_to(RNGPlus))
     tiler2 = prop(0x110, ptr_to(Tiler2))
+
+    # XXX: just for testing
+    if mm.version >= 302:
+        fake_prop = prop(0x120, u32)
 
 class World(GuestStruct):
     name = prop(8, FancyString)

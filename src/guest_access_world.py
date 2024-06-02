@@ -61,6 +61,7 @@ def make_GuestPrimPtr(code, class_name):
         def encode_data(val):
             return struct.pack(code, val)
     GuestXPrimPtr.__name__ = class_name
+    GuestXPrimPtr.code = code
     return GuestXPrimPtr
 
 u8 = make_GuestPrimPtr('B', 'u8')
@@ -77,10 +78,13 @@ f64 = make_GuestPrimPtr('d', 'f64')
 usize = u64
 ptr_size = usize.sizeof_star
 
+class GuestPtrPtrBase(GuestPrimPtr):
+    pass
+
 @functools.lru_cache(None)
 def ptr_to(ptr_ty):
     assert isinstance(ptr_ty, type)
-    class GuestXPtrPtr(GuestPrimPtr):
+    class GuestXPtrPtr(GuestPtrPtrBase):
         sizeof_star = ptr_size
         val_ty = ptr_ty
         @classmethod
@@ -90,6 +94,7 @@ def ptr_to(ptr_ty):
         def encode_data(cls, val):
             assert isinstance(val, cls.val_ty)
             return usize.encode_data(val.addr)
+    GuestXPtrPtr.__name__ = f'ptr_to({ptr_ty.__name__})'
     return GuestXPtrPtr
 
 GuestPtrPtr = ptr_to(GuestPtr)
@@ -178,12 +183,18 @@ def count4_ptr(ptr_ty):
             return self.count
     return CountPtr
 
+class GuestFixedArrayBase(GuestArray):
+    pass
+
 @functools.lru_cache(None)
 def fixed_array(ptr_ty, count):
-    class GuestFixedArray(GuestArray):
+    class GuestFixedArray(GuestFixedArrayBase):
         def __init__(self, addr):
             super().__init__(addr, ptr_ty, count)
         sizeof_star = ptr_ty.sizeof_star * count
+    GuestFixedArray.count = count
+    GuestFixedArray.val_ptr_ty = ptr_ty
+    GuestFixedArray.__name__ = f'fixed_array({ptr_ty.__name__}, {count})'
     return GuestFixedArray
 
 class MyProperty(property):
@@ -264,11 +275,12 @@ class GuestStruct(GuestPtr):
             ret += '({})'.format(', '.join(subreprs))
         return ret
 
-    def _properties(self):
+    @classmethod
+    def _properties(cls):
         return (
             (key, prop)
-            for cls in type(self).mro()[::-1]
-            for key, prop in cls.__dict__.items()
+            for supercls in cls.mro()[::-1]
+            for key, prop in supercls.__dict__.items()
             if isinstance(prop, MyProperty)
         )
 

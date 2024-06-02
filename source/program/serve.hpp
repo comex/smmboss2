@@ -10,51 +10,66 @@ constexpr size_t OUTGOING_WS_HEADER_SIZE = 10;
 size_t add_ws_header_size(size_t size);
 uint8_t *fill_ws_header(uint8_t *p, size_t size);
 
+template <typename self_t>
+struct writer_base {
+    template <typename T>
+    void write_prim(const T &t) {
+        write_n(&t, 1);
+    }
+    void write_range(const void *start, const void *end) {
+        ((self_t *)this)->write_raw(start, (char *)end - (char *)start);
+    }
+    template <typename T>
+    void write_n(const T *ts, size_t n) {
+        ((self_t *)this)->write_raw(ts, n * sizeof(T));
+    }
+    template <typename T>
+    void write_n(pt_pointer<T> ts, size_t n) {
+        ((self_t *)this)->write_raw(ts.raw, n * pt_size_of<T>);
+    }
+    void write_tag(tag8 t) {
+        write_prim(t);
+    }
+};
+
+struct size_calculator : public writer_base<size_calculator> {
+    size_t size_;
+    void write_raw(const void *ptr, size_t write_size) {
+        size_t old_size = size_;
+        size_t new_size = old_size + write_size;
+        size_ = new_size > old_size ? new_size : SIZE_MAX;
+    }
+};
+
+struct actual_writer : public writer_base<actual_writer> {
+    uint8_t *cur_ptr_;
+    void write_raw(const void *ptr, size_t size) {
+        memcpy(cur_ptr_, ptr, size);
+        cur_ptr_ += size;
+    }
+};
+
 struct hose {
+    static constexpr auto DEFAULT_REVIEW_CALLBACK = [](uint8_t *ptr, size_t size) -> bool {
+        return true;
+    };
+
     void push_fd(int fd);
 
     // reader thread func:
     void thread_func();
 
-    template <typename self_t>
-    struct writer_base {
-        template <typename T>
-        void write_prim(const T &t) {
-            write_n(&t, 1);
-        }
-        void write_range(const void *start, const void *end) {
-            ((self_t *)this)->write_raw(start, (char *)end - (char *)start);
-        }
-        template <typename T>
-        void write_n(const T *ts, size_t n) {
-            ((self_t *)this)->write_raw(ts, n * sizeof(T));
-        }
-        void write_tag(tag8 t) {
-            write_prim(t);
-        }
-    };
-
-    struct size_calculator : public writer_base<size_calculator> {
-        size_t size_;
-        void write_raw(const void *ptr, size_t write_size) {
-            size_t old_size = size_;
-            size_t new_size = old_size + write_size;
-            size_ = new_size > old_size ? new_size : SIZE_MAX;
-        }
-    };
-
-    struct actual_writer : public writer_base<actual_writer> {
-        uint8_t *cur_ptr_;
-        void write_raw(const void *ptr, size_t size) {
-            memcpy(cur_ptr_, ptr, size);
-            cur_ptr_ += size;
-        }
-    };
-
     // writer thread func:
-    void write_packet(auto &&callback, bool for_overrun = false) {
+    void write_packet(auto &&write_callback) {
+        write_packet(write_callback, DEFAULT_REVIEW_CALLBACK, false);
+    }
+    void write_packet(
+        auto &&write_callback,
+        auto &&review_callback,
+        bool for_overrun = false
+    ) {
         size_calculator sc{.size_ = 0};
-        callback(sc);
+        write_callback(sc);
         size_t size = sc.size_;
         auto [ok, new_write_info] = reserve_space_and_write_header(size, for_overrun);
         if (!ok) {
@@ -62,8 +77,11 @@ struct hose {
         }
         uint8_t *ptr = buf_ + (new_write_info.write_offset - size);
         actual_writer aw{.cur_ptr_ = ptr};
-        callback(aw);
+        write_callback(aw);
         assert(aw.cur_ptr_ == ptr + size);
+        if (!review_callback(ptr, size)) {
+            return;
+        }
 
         write_info_.store(new_write_info, std::memory_order_release);
     }

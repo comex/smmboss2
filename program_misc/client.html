@@ -39,9 +39,10 @@ async function doWrite(addr, data) {
 
 class BaseType {}
 class IntBaseType extends BaseType {
-  constructor(name, dataViewName, {needBigWrap} = {}) {
+  constructor(name, sizeof, dataViewName, {needBigWrap} = {}) {
     super();
     this.name = name;
+    this.sizeof = sizeof;
     let getLocal = new Function(
       'dv', 'off',
       `return dv.get${dataViewName}(off, true);`
@@ -72,16 +73,16 @@ class IntBaseType extends BaseType {
   }
 }
 
-let u8  = new IntBaseType('u8',  'Uint8');
-let u16 = new IntBaseType('u16', 'Uint16');
-let u32 = new IntBaseType('u32', 'Uint32');
-let u64 = new IntBaseType('u64', 'BigUint64', {needBigWrap: true});
-let s8  = new IntBaseType('s8',  'Int8');
-let s16 = new IntBaseType('s16', 'Int16');
-let s32 = new IntBaseType('s32', 'Int32');
-let s64 = new IntBaseType('s64', 'BigInt64', {needBigWrap: true});
-let f32 = new IntBaseType('f32', 'Float32');
-let f64 = new IntBaseType('f64', 'Float64');
+let u8  = new IntBaseType('u8',  1, 'Uint8');
+let u16 = new IntBaseType('u16', 2, 'Uint16');
+let u32 = new IntBaseType('u32', 4, 'Uint32');
+let u64 = new IntBaseType('u64', 8, 'BigUint64', {needBigWrap: true});
+let s8  = new IntBaseType('s8',  1, 'Int8');
+let s16 = new IntBaseType('s16', 2, 'Int16');
+let s32 = new IntBaseType('s32', 4, 'Int32');
+let s64 = new IntBaseType('s64', 8, 'BigInt64', {needBigWrap: true});
+let f32 = new IntBaseType('f32', 4, 'Float32');
+let f64 = new IntBaseType('f64', 8, 'Float64');
 
 
 let utf8Decoder = new TextDecoder();
@@ -122,8 +123,26 @@ class Struct {
     this.name = name;
     this.sizeof = sizeof;
     this.fields = fields;
+    this.doAutoSizes();
     this.Local = this.makeLocalClass();
     this.Remote = this.makeRemoteClass();
+  }
+  doAutoSizes() {
+    let prevOff = 0;
+    for (let i = 0; i < this.fields.length; i++) {
+      let [fieldName, off, ty] = this.fields[i];
+      if (off === 'auto') {
+        assert(prevOff !== null);
+        off = prevOff;
+        this.fields[i] = [fieldName, off, ty];
+      }
+      prevOff = ty.sizeof === null ? null : (off + ty.sizeof);
+    }
+    if (this.sizeof === 'auto') {
+      assert(prevOff !== null);
+      this.sizeof = prevOff;
+    }
+
   }
   makeLocalClass() {
     let argNames = ['struct'];
@@ -173,6 +192,7 @@ class Struct {
     return new Function(...argNames, code)(...argVals);
   }
   makeRemoteClass() {
+    // TODO: redo this to be more useful
     let argNames = [];
     let argVals = [];
     let code = `
@@ -476,35 +496,49 @@ class RPCConn {
     let resp = await this.rawRequest(dv);
     assert(resp.byteLength == 0);
   }
+  maybeSetHashTweak() {
+    if (!this.setHashTweakPending) {
+      this.setHashTweakPending = true;
+      let u64 = new BigUint64Array(1);
+      crypto.getRandomValues(u64);
+      let tweak = u64[0];
+      console.log(`new tweak: ${tweak}`);
+      (async () => {
+        await this.reqSetHashTweak(tweak);
+        await sleep(300);
+        this.setHashTweakPending = false;
+      })();
+    }
+  }
 }
 
 
 // --
-let Point2D = new Struct('Point2D', 8, [
+let mm_point2d = new Struct('mm_point2d', 8, [
   ['x', 0x0, f32],
   ['y', 0x4, f32],
 ]);
 
-let Size2D = new Struct('Size2D', 8, [
+let mm_size2d = new Struct('mm_size2d', 8, [
   ['w', 0x0, f32],
   ['h', 0x4, f32],
 ]);
 
 
-let Rect = new Struct('Rect', 0x10, [
-  ['min', 0x0, Point2D],
-  ['max', 0x8, Point2D],
+let mm_rect = new Struct('mm_rect', 0x10, [
+  ['min', 0x0, mm_point2d],
+  ['max', 0x8, mm_point2d],
 ]);
-Rect.Local.prototype.width = function() {
+mm_rect.Local.prototype.width = function() {
   return this.max.x - this.min.x;
 }
-Rect.Local.prototype.height = function() {
+mm_rect.Local.prototype.height = function() {
   return this.max.y - this.min.y;
 }
 
-let HitboxParams = new Struct('Hitbox', 0x40, [
-  ['pos', 0x0, Point2D],
-  ['radius', 0x8, Size2D],
+let mm_hitbox_params = new Struct('mm_hitbox_params', 0x40, [
+  ['pos', 0x0, mm_point2d],
+  ['radius', 0x8, mm_size2d],
   ['isCircle', 0x10, u32],
   ['whichList', 0x14, u32],
   ['f18', 0x18, u32],
@@ -514,11 +548,52 @@ let HitboxParams = new Struct('Hitbox', 0x40, [
   ['callback', 0x38, u64],
 ]);
 
-let Hitbox = new Struct('Hitbox', 0x1c8, [
-  ['params', 0x60, HitboxParams],
-  ['owner', 0xa8, u64],
+let mm_hitbox = new Struct('mm_hitbox', 0x1c8, [
+  ['params',     0x60,  mm_hitbox_params],
+  ['owner',      0xa8,  u64],
   ['didCollide', 0x1b5, u8],
-  ['rect', 0x1b8, Rect],
+  ['rect',       0x1b8, mm_rect],
+]);
+
+let mm_collider_segment = new Struct('mm_collider_segment', 0x18, [
+  ['whichSide', 0,    u8],
+  ['relPos1',   4,    mm_point2d],
+  ['relPos2',   0xc,  mm_point2d],
+  ['lastWord',  0x14, u32],
+]);
+
+// this is mm_normal_collider plus other stuff we append to it
+let mm_normal_collider_cached = new Struct('mm_normal_collider_cached', null, [
+  ['segmentsCurCount', 0x3c0, u32],
+  ['segmentsOldCount', 0x3d0, u32],
+]);
+mm_normal_collider_cached.Local.prototype.extraParse = function() {
+  let off = this.off + 0x3e0;
+  this.segmentsCur = [];
+  for (let i = 0, count = this.segmentsCurCount; i < count; i++) {
+    this.segmentsCur.push(new mm_collider_segment.Local(this.dv, off));
+    off += 0x18;
+  }
+  this.segmentsOld = [];
+  for (let i = 0, count = this.segmentsOldCount; i < count; i++) {
+    this.segmentsOld.push(new mm_collider_segment.Local(this.dv, off));
+    off += 0x18;
+  }
+  assert(off == this.dv.byteLength);
+}
+
+let mm_normal_collider_uncached = new Struct('mm_normal_collider_uncached', 'auto', [
+  ['extPosCur', 'auto', mm_point2d],
+  ['extPosOld', 'auto', mm_point2d],
+]);
+
+
+let mm_scol_collider_cached = new Struct('mm_scol_collider_cached', null, [
+
+]);
+let mm_scol_collider_uncached = new Struct('mm_scol_collider_uncached', 'auto', [
+  ['extPosCur', 'auto', mm_point2d],
+  ['extPosOld', 'auto', mm_point2d],
 ]);
 
 // --
@@ -607,6 +682,45 @@ class DiagramHitboxes extends DiagramThingKind {
   }
 }
 
+class DiagramNormalColliders extends DiagramThingKind {
+  getThingsFromFrame() {
+    return this.diagram.curFrame.normalColliders;
+  }
+  renderThing(ptr, hitbox) {
+    let params = hitbox.params;
+    let isCircle = params.isCircle;
+    let x = hitbox.rect.min.x;
+    let y = hitbox.rect.min.y;
+    let w = hitbox.rect.width();
+    let h = hitbox.rect.height();
+
+    let dia = this.diagram;
+    let wantedTag = isCircle ? 'circle' : 'rect';
+    let elm = this.getOrCreateElmFor(ptr, wantedTag);
+    if (w < 0) {
+      // todo: DRY
+      elm.deleteMe();
+      return null;
+    }
+    if (isCircle) {
+      assert(w == h);
+      elm.setAttribute('cx', dia.transformX(x + w/2));
+      elm.setAttribute('cy', dia.transformY(y + h/2));
+      elm.setAttribute('r', dia.transformSize(w/2));
+    } else {
+      elm.setAttribute('x', dia.transformX(x));
+      elm.setAttribute('y', dia.transformY(y));
+      elm.setAttribute('width', dia.transformSize(w));
+      elm.setAttribute('height', dia.transformSize(h));
+    }
+    elm.setAttribute('stroke', 'green');
+    elm.setAttribute('stroke-width', 4);
+    elm.setAttribute('fill', 'yellow');
+    elm.frameNum = dia.curFrame.number;
+    return elm;
+  }
+}
+
 class Diagram {
   constructor(svg) {
     this.svg = svg;
@@ -634,6 +748,8 @@ class HoseFrame {
     this.number = number;
     this.worldID = worldID;
     this.hitboxes = new Map();
+    this.normalColliders = new Map();
+    this.scolColliders = new Map();
     this.collisions = [];
   }
 };
@@ -642,6 +758,7 @@ class HoseConn {
   constructor(baseURL) {
     this.wsw = new WSWrapper(`${baseURL}/ws/hose`, this);
     this.prevFrameByWorldID = new Map();
+    this.cachedDumps = new Map();
   }
   setWantOpen(wantOpen) {
     this.wsw.setWantOpen(wantOpen);
@@ -661,13 +778,17 @@ class HoseConn {
       this.parseDoMany(ab);
       break;
     case 'hitbox\0\0':
-      this.parseHitbox(ab);
+      this.parsemm_hitbox(ab);
       break;
-    case 'normcol\0':
-      this.parseNormalCollider(ab);
+    case 'normcl1\0':
+    case 'scolcl1\0':
+      this.parseSomeColliderCachedPart(ab);
       break;
-    case 'scolcol\0':
-      this.parseScolCollider(ab);
+    case 'normcl2\0':
+      this.parseNormalColliderUncachedPart(ab);
+      break;
+    case 'scolcl2\0':
+      this.parseScolColliderUncachedPart(ab);
       break;
     case 'overrun\0':
       this.parseOverrun(ab);
@@ -706,16 +827,51 @@ class HoseConn {
       ret: u64[2],
     });
   }
-  parseHitbox(ab) {
+  parsemm_hitbox(ab) {
     let ptr = new BigUint64Array(ab)[1];
     if (!this.curFrame) {
       return;
     }
-    this.curFrame.hitboxes.set(ptr, new Hitbox.Local(new DataView(ab, 0x10)));
+    this.curFrame.hitboxes.set(ptr, new mm_hitbox.Local(new DataView(ab, 0x10)));
   }
-  parseNormalCollider(ab) {
+  parseSomeColliderCachedPart(ab) {
+    let ptr = new DataView(ab).getBigUint64(8, true);
+    let dump = new DataView(ab, 0x10);
+      //console.log(`GOT dump for ${hex(ptr)}`);
+    this.cachedDumps.set(ptr, dump);
   }
-  parseScolCollider(ab) {
+  parseSomeColliderUncachedPartCommon(dv) {
+    let ptr = dv.getBigUint64(8, true);
+    let dump = this.cachedDumps.get(ptr);
+    if (!dump) {
+      g_rpcConn.maybeSetHashTweak();
+      //console.log(`missing dump for ${ptr}`);
+    }
+    return [ptr, dump];
+  }
+  parseNormalColliderUncachedPart(ab) {
+    let dv = new DataView(ab);
+    let [ptr, dump] = this.parseSomeColliderUncachedPartCommon(dv);
+    if (!dump) {
+      return;
+    }
+    let cached = new mm_normal_collider_cached.Local(dump, 0);
+    cached.extraParse();
+    this.curFrame.normalColliders.set(ptr, {
+      cached: cached,
+      uncached: new mm_normal_collider_uncached.Local(dv, 0x10),
+    });
+  }
+  parseScolColliderUncachedPart(ab) {
+    let dv = new DataView(ab);
+    let [ptr, offset, dump] = this.parseSomeColliderUncachedPartCommon(dv);
+    if (!dump) {
+      return;
+    }
+    this.curFrame.scolColliders.set(ptr, {
+      cached: new mm_scol_collider_cached.Local(dump, 0),
+      uncached: new mm_scol_collider_uncached.Local(dv, 0x10),
+    });
   }
   parseOverrun(ab) {
     document.getElementById('overrun').innerHTML = 'got overrun!';

@@ -242,6 +242,11 @@ struct mm_terrain_manager {
     PSEUDO_TYPE_UNSIZED;
 };
 
+struct mm_collider_segment {
+    PSEUDO_TYPE_SIZE(0x18);
+};
+
+
 // This is really one of two unrelated structs, and the real way to distinguish
 // them is via the vtable on the node, but distinguishing them by their own
 // vtables is just a bit easier...
@@ -257,10 +262,13 @@ struct mm_some_collider {
 };
 
 struct mm_normal_collider : public mm_some_collider {
-    static constexpr size_t initial_dump_size = 0x3e0;
-
     PROP(ext_pos_cur, 0x290, float *);
     PROP(ext_pos_old, 0x298, float *);
+
+    PROP(segments_cur, 0x3c0, mm_count_ptr<mm_collider_segment>);
+    PROP(segments_old, 0x3d0, mm_count_ptr<mm_collider_segment>);
+
+    static constexpr size_t initial_dump_size = 0x3e0;
 
     // virtual method @ 0x20 for all subclasses:
     // (we don't care about the specific subclass for now)
@@ -519,6 +527,18 @@ static void report_all_hitboxes(mm_AreaSystem *as) {
     }
 }
 
+static void write_cached_dump(SeenCache::Entry *entry, std::optional<uint64_t> old_hash, auto &&write_callback) {
+    s_hose.write_packet(
+        std::move(write_callback),
+        [&](uint8_t *buf, size_t len) -> bool {
+            uint64_t new_hash = XXH3_64bits(buf, len) ^ g_hash_tweak.load(std::memory_order_relaxed);
+            entry->value = new_hash;
+            // only send if this is new
+            return old_hash != new_hash;
+        }
+    );
+}
+
 static void report_some_collider(mm_some_collider *some, int which_list) {
     static const float dummy_pos[2]{};
     auto [entry, found] = s_seen_cache_cur->lookup(some, /*insert*/ true);
@@ -533,55 +553,36 @@ static void report_some_collider(mm_some_collider *some, int which_list) {
 
     auto downcasted = some->downcast();
 
-    void *hash_start;
-    size_t hash_size;
-    if (auto ncp = std::get_if<mm_normal_collider *>(&downcasted)) {
-        hash_start = *ncp;
-        hash_size = mm_normal_collider::initial_dump_size;
-    } else if (auto scp = std::get_if<mm_scol_collider *>(&downcasted)) {
-        hash_start = *scp;
-        hash_size = mm_scol_collider::initial_dump_size;
-    } else {
-        hash_start = nullptr;
-        hash_size = 0;
-    }
-
-    uint64_t new_hash = XXH3_64bits(hash_start, hash_size) ^
-                        g_hash_tweak.load(std::memory_order_relaxed);
-    bool already_sent = old_hash == new_hash;
-    entry->value = new_hash;
-
-
     if (auto ncp = std::get_if<mm_normal_collider *>(&downcasted)) {
         mm_normal_collider *nc = *ncp;
-        s_hose.write_packet([&](auto &w) {
-            w.write_tag({"normcol"});
+        write_cached_dump(entry, old_hash, [&](auto &w) {
+            w.write_tag({"normcl1"});
             w.write_prim(nc);
-            w.write_prim(already_sent);
-            if (!already_sent) {
-                w.write_raw(hash_start, hash_size);
-            }
-            w.write_prim(nc->ext_pos_cur());
+            w.write_raw(nc, mm_normal_collider::initial_dump_size);
+            w.write_n(nc->segments_cur().ptr, nc->segments_cur().count);
+            w.write_n(nc->segments_old().ptr, nc->segments_old().count);
+        });
+        s_hose.write_packet([&](auto &w) {
+            w.write_tag({"normcl2"});
+            w.write_prim(nc);
             w.write_n(nc->ext_pos_cur() ?: dummy_pos, 2);
-            w.write_prim(nc->ext_pos_old());
             w.write_n(nc->ext_pos_old() ?: dummy_pos, 2);
         });
     } else if (auto scp = std::get_if<mm_scol_collider *>(&downcasted)) {
+        (void)scp;
         mm_scol_collider *sc = *scp;
-        s_hose.write_packet([&](auto &w) {
-            w.write_tag({"scolcol"});
+        write_cached_dump(entry, old_hash, [&](auto &w) {
+            w.write_tag({"scolcl1"});
             w.write_prim(sc);
-            w.write_prim(already_sent);
-            if (!already_sent) {
-                w.write_raw(hash_start, hash_size);
-            }
-            w.write_prim(sc->ext_pos_cur());
+            w.write_raw(sc, mm_scol_collider::initial_dump_size);
+        });
+        s_hose.write_packet([&](auto &w) {
+            w.write_tag({"scolcl2"});
+            w.write_prim(sc);
             w.write_n(sc->ext_pos_cur() ?: dummy_pos, 2);
-            w.write_prim(sc->ext_pos_old());
             w.write_n(sc->ext_pos_old() ?: dummy_pos, 2);
         });
     } else {
-        xprintf("unknown collider %p with vtable %#lx", some, some->vt20_offset());
         s_hose.write_packet([&](auto &w) {
             w.write_tag({"unkcol"});
             w.write_prim(some);

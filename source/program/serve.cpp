@@ -301,9 +301,13 @@ std::tuple<bool, hose::write_info> hose::reserve_space_and_write_header(size_t b
 
 void hose::write_overrun() {
     //xprintf("write_overrun size=%zu", size);
-    write_packet([&](auto &w) {
-        w.write_tag({"overrun"});
-    }, /*for_overrun*/ true);
+    write_packet(
+        [&](auto &w) {
+            w.write_tag({"overrun"});
+        },
+        /*review_callback*/ DEFAULT_REVIEW_CALLBACK,
+        /*for_overrun*/ true
+    );
 }
 
 void hose::assert_on_write_thread() {
@@ -450,6 +454,7 @@ private:
             }
             g_hash_tweak.store(req->set_hash_tweak.tweak, std::memory_order_relaxed);
             mg_ws_send(c, nullptr, 0, WEBSOCKET_OP_BINARY);
+            return;
         }
 
         default:

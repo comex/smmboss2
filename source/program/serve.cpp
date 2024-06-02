@@ -291,8 +291,6 @@ std::tuple<bool, hose::write_info> hose::reserve_space_and_write_header(size_t b
         total_overrun_bytes_.fetch_add(full_size, std::memory_order_relaxed);
     }
 
-    total_written_bytes_.fetch_add(full_size, std::memory_order_relaxed);
-
     write_info.write_offset += full_size;
     write_info.just_wrote_overrun = for_overrun;
     write_info.wrap_offset = std::max(write_info.wrap_offset, write_info.write_offset);

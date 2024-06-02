@@ -97,6 +97,59 @@ CString.getLocal = (dv, off) => {
   return utf8Decoder.decode(u8);
 };
 
+class CompoundType {}
+
+class FixedArrayLocal {
+  constructor(dv, off) {
+    this.dv = dv;
+    this.off = off;
+  }
+  serialize() {
+    return Array.from(Array(count), (_, i) => this.get(i));
+  }
+}
+
+class FixedArray extends CompoundType {
+  constructor(elmTy, count) {
+    super();
+    let elmTySizeof = elmTy.sizeof;
+    if (elmTySizeof !== null) {
+      assert(typeof elmTySizeof == 'number');
+      this.sizeof = elmTySizeof * count;
+    }
+    if (elmTy instanceof CompoundType) {
+      class Local extends FixedArrayLocal {
+        constructor(dv, off) {
+          super(dv, off);
+          this._cache = [];
+        }
+        get(i) {
+          assert(i >= 0 && i < count);
+          let ret = this._cache[i];
+          if (ret === undefined) {
+            ret = this._cache[i] = new elmTy(this.dv, this.off + i * elmTySizeof);
+          }
+          return ret;
+        }
+      }
+      this.Local = Local;
+    } else {
+      let getLocal = elmTy.getLocal;
+      class Local extends FixedArrayLocal {
+        constructor(dv, off) {
+          super(dv, off);
+        }
+        get(i) {
+          assert(i >= 0 && i < count);
+          return getLocal(this.dv, this.off + i * elmTySizeof);
+        }
+        // could implement set
+      }
+      this.Local = Local;
+    }
+  }
+}
+
 class StructLocal {
   constructor(struct, dv, off) {
     this.struct = struct;
@@ -118,8 +171,9 @@ class StructLocal {
 
 }
 
-class Struct {
+class Struct extends CompoundType {
   constructor(name, sizeof, fields) {
+    super();
     this.name = name;
     this.sizeof = sizeof;
     this.fields = fields;
@@ -153,7 +207,7 @@ class Struct {
           super(struct, dv, off);
     `
     for (let [fieldName, off, ty] of this.fields) {
-      if (ty instanceof Struct) {
+      if (ty instanceof CompoundType) {
         code += `
           this._${fieldName} = undefined;
         `;
@@ -171,7 +225,7 @@ class Struct {
           set ${fieldName}(val) { return setLocal_${fieldName}(this.dv, this.off + ${off}, val); }
         `
       } else {
-        assert(ty instanceof Struct);
+        assert(ty instanceof CompoundType);
         argNames.push(`ty_${fieldName}_Local`);
         argVals.push(ty.Local);
         // todo: cache
@@ -189,7 +243,11 @@ class Struct {
       }
       return ${this.name}_Local;
     `;
-    return new Function(...argNames, code)(...argVals);
+    let cls = new Function(...argNames, code)(...argVals);
+    for (let [fieldName, off, ty] of this.fields) {
+      cls.prototype[`offsetof_${fieldName}`] = off;
+    }
+    return cls;
   }
   makeRemoteClass() {
     // TODO: redo this to be more useful
@@ -211,7 +269,7 @@ class Struct {
           ${setterName}(val) { return setRemote_${fieldName}(this.addr + ${off}n, val); }
         `
       } else {
-        assert(ty instanceof Struct);
+        assert(ty instanceof CompoundType);
         argNames.push(`ty_${fieldName}`);
         argVals.push(ty);
         code += `
@@ -452,7 +510,7 @@ class RPCConn {
 
       assert(response instanceof ArrayBuffer);
       this.rpcThrottle.reset();
-      console.log(`RPC got good response: ${response}`);
+      //console.log(`RPC got good response: ${response}`);
 
       return new DataView(response);
     }
@@ -517,6 +575,12 @@ class RPCConn {
 let mm_point2d = new Struct('mm_point2d', 8, [
   ['x', 0x0, f32],
   ['y', 0x4, f32],
+]);
+
+let mm_point3d = new Struct('mm_point3d', 0xc, [
+  ['x', 0x0, f32],
+  ['y', 0x4, f32],
+  ['z', 0x8, f32],
 ]);
 
 let mm_size2d = new Struct('mm_size2d', 8, [
@@ -589,8 +653,25 @@ let mm_normal_collider_uncached = new Struct('mm_normal_collider_uncached', 'aut
 
 
 let mm_scol_collider_cached = new Struct('mm_scol_collider_cached', null, [
-
+  ['xxyPtrs', 0x1a8, new FixedArray(u64, 8)],
+  //['lineInfo', 
 ]);
+mm_scol_collider_cached.Local.prototype.extraParse = function(ptr) {
+  this.addr = ptr;
+}
+mm_scol_collider_cached.Local.prototype.getPoint3D = function(i) {
+  let ptr = this.point3DPtrs.get(i);
+  if (!ptr) {
+    return null;
+  }
+  let offset = Number(ptr - this.addr);
+  assert(offset + this.off + 0xc <= this.dv.byteLength);
+  return new mm_point3d.Local(this.dv, this.off + offset);
+}
+mm_scol_collider_cached.Local.prototype.serializePoint3Ds = function() {
+    return Array.from(Array(8), (_, i) => this.getPoint3D(i).serialize());
+}
+
 let mm_scol_collider_uncached = new Struct('mm_scol_collider_uncached', 'auto', [
   ['extPosCur', 'auto', mm_point2d],
   ['extPosOld', 'auto', mm_point2d],
@@ -610,35 +691,41 @@ class DiagramThingKind {
   renderThings() {
     let frameThings = this.getThingsFromFrame();
     let seen = new Set();
+    this.seen = seen;
     for (let [ptr, thing] of frameThings.entries()) {
-      let elm = this.renderThing(ptr, thing);
-      if (elm) {
-        seen.add(elm);
-      }
+      this.renderThing(ptr, thing);
     }
     for (let elm of Array.from(this.group.children)) {
-      if (!seen.has(elm)) {
-        console.log(`${this.diagram.curFrame.number}/${this.diagram.curFrame.worldID} removing stale ${elm} at ${elm.ptr} from ${elm.frameNum}`);
+      if (!this.seen.has(elm)) {
+        //console.log(`${this.diagram.curFrame.number}/${this.diagram.curFrame.worldID} removing stale ${elm} at ${elm.ptr} from ${elm.createdFrameNum}`);
         elm.deleteMe();
       }
     }
+    this.seen = null;
+    //console.log(`now have ${this.group.childElementCount} children`);
   }
   getOrCreateElmFor(ptr, wantedTag) {
     let elm = this.elmsByPtr.get(ptr);
-    if (elm && elm.tag != wantedTag) {
+    //console.log(elm);
+    if (elm && elm.tagName != wantedTag) {
       elm.deleteMe();
       elm = null;
     }
     if (!elm) {
       elm = document.createElementNS(svgNS, wantedTag);
+      assert(elm.tagName == wantedTag);
+      //console.log(`creating ${wantedTag}`);
       elm.ptr = ptr;
+      elm.createdFrameNum = this.diagram.curFrame.number;
       elm.deleteMe = () => {
+        //console.log(`** deleteMe for ${wantedTag} ptr=${ptr}`);
         elm.parentNode.removeChild(elm);
         this.elmsByPtr.delete(ptr);
       };
       this.group.appendChild(elm);
       this.elmsByPtr.set(ptr, elm);
     }
+    this.seen.add(elm);
     return elm;
   }
 }
@@ -661,7 +748,7 @@ class DiagramHitboxes extends DiagramThingKind {
     if (w < 0) {
       // todo: DRY
       elm.deleteMe();
-      return null;
+      return;
     }
     if (isCircle) {
       assert(w == h);
@@ -670,15 +757,13 @@ class DiagramHitboxes extends DiagramThingKind {
       elm.setAttribute('r', dia.transformSize(w/2));
     } else {
       elm.setAttribute('x', dia.transformX(x));
-      elm.setAttribute('y', dia.transformY(y));
+      elm.setAttribute('y', dia.transformY(y + h));
       elm.setAttribute('width', dia.transformSize(w));
       elm.setAttribute('height', dia.transformSize(h));
     }
     elm.setAttribute('stroke', 'green');
     elm.setAttribute('stroke-width', 4);
     elm.setAttribute('fill', 'yellow');
-    elm.frameNum = dia.curFrame.number;
-    return elm;
   }
 }
 
@@ -686,38 +771,49 @@ class DiagramNormalColliders extends DiagramThingKind {
   getThingsFromFrame() {
     return this.diagram.curFrame.normalColliders;
   }
-  renderThing(ptr, hitbox) {
-    let params = hitbox.params;
-    let isCircle = params.isCircle;
-    let x = hitbox.rect.min.x;
-    let y = hitbox.rect.min.y;
-    let w = hitbox.rect.width();
-    let h = hitbox.rect.height();
-
+  renderThing(ptr, {cached, uncached, uniqueDumpId}) {
+    let extX = uncached.extPosCur.x;
+    let extY = uncached.extPosCur.y;
     let dia = this.diagram;
-    let wantedTag = isCircle ? 'circle' : 'rect';
-    let elm = this.getOrCreateElmFor(ptr, wantedTag);
-    if (w < 0) {
-      // todo: DRY
-      elm.deleteMe();
-      return null;
+    for (let i = 0; i < cached.segmentsCur.length; i++) {
+      let seg = cached.segmentsCur[i];
+      let fakePtr = ptr + BigInt(i);
+      let line = this.getOrCreateElmFor(fakePtr, 'line');
+      if (line.drawnExtX === extX &&
+          line.drawnExtY === extY &&
+          line.drawnUniqueDumpId === uniqueDumpId) {
+        continue;
+      }
+      line.drawnExtX = extX;
+      line.drawnExtY = extY;
+      line.drawnUniqueDumpId = uniqueDumpId;
+      line.setAttribute('x1', dia.transformX(seg.relPos1.x + extX));
+      line.setAttribute('y1', dia.transformY(seg.relPos1.y + extY));
+      line.setAttribute('x2', dia.transformX(seg.relPos2.x + extX));
+      line.setAttribute('y2', dia.transformY(seg.relPos2.y + extY));
+      line.setAttribute('stroke', 'red');
+      line.setAttribute('stroke-width', 4);
     }
-    if (isCircle) {
-      assert(w == h);
-      elm.setAttribute('cx', dia.transformX(x + w/2));
-      elm.setAttribute('cy', dia.transformY(y + h/2));
-      elm.setAttribute('r', dia.transformSize(w/2));
-    } else {
-      elm.setAttribute('x', dia.transformX(x));
-      elm.setAttribute('y', dia.transformY(y));
-      elm.setAttribute('width', dia.transformSize(w));
-      elm.setAttribute('height', dia.transformSize(h));
+  }
+}
+
+class DiagramScolColliders extends DiagramThingKind {
+  getThingsFromFrame() {
+    return this.diagram.curFrame.normalColliders;
+  }
+  renderThing(ptr, {cached, uncached}) {
+    let dia = this.diagram;
+    for (let i = 0; i < cached.segmentsCur.length; i++) {
+      let seg = cached.segmentsCur[i];
+      let fakePtr = ptr + BigInt(i);
+      let line = this.getOrCreateElmFor(fakePtr, 'line');
+      line.setAttribute('x1', dia.transformX(seg.relPos1.x + uncached.extPosCur.x));
+      line.setAttribute('y1', dia.transformY(seg.relPos1.y + uncached.extPosCur.y));
+      line.setAttribute('x2', dia.transformX(seg.relPos2.x + uncached.extPosCur.x));
+      line.setAttribute('y2', dia.transformY(seg.relPos2.y + uncached.extPosCur.y));
+      line.setAttribute('stroke', 'red');
+      line.setAttribute('stroke-width', 4);
     }
-    elm.setAttribute('stroke', 'green');
-    elm.setAttribute('stroke-width', 4);
-    elm.setAttribute('fill', 'yellow');
-    elm.frameNum = dia.curFrame.number;
-    return elm;
   }
 }
 
@@ -725,10 +821,12 @@ class Diagram {
   constructor(svg) {
     this.svg = svg;
     this.hitboxes = new DiagramHitboxes(this);
+    this.normalColliders = new DiagramNormalColliders(this);
   }
   renderFrame(frame) {
     this.curFrame = frame;
     this.hitboxes.renderThings();
+    this.normalColliders.renderThings();
     this.curFrame = null;
   }
   transformX(x) {
@@ -759,6 +857,7 @@ class HoseConn {
     this.wsw = new WSWrapper(`${baseURL}/ws/hose`, this);
     this.prevFrameByWorldID = new Map();
     this.cachedDumps = new Map();
+    this.nextUniqueDumpId = 0;
   }
   setWantOpen(wantOpen) {
     this.wsw.setWantOpen(wantOpen);
@@ -837,6 +936,7 @@ class HoseConn {
   parseSomeColliderCachedPart(ab) {
     let ptr = new DataView(ab).getBigUint64(8, true);
     let dump = new DataView(ab, 0x10);
+    dump.uniqueDumpId = ++this.nextUniqueDumpId;
       //console.log(`GOT dump for ${hex(ptr)}`);
     this.cachedDumps.set(ptr, dump);
   }
@@ -844,6 +944,7 @@ class HoseConn {
     let ptr = dv.getBigUint64(8, true);
     let dump = this.cachedDumps.get(ptr);
     if (!dump) {
+      // scramble the hashes so we hopefully get everything again
       g_rpcConn.maybeSetHashTweak();
       //console.log(`missing dump for ${ptr}`);
     }
@@ -860,16 +961,20 @@ class HoseConn {
     this.curFrame.normalColliders.set(ptr, {
       cached: cached,
       uncached: new mm_normal_collider_uncached.Local(dv, 0x10),
+      uniqueDumpId: dump.uniqueDumpId,
     });
   }
   parseScolColliderUncachedPart(ab) {
     let dv = new DataView(ab);
-    let [ptr, offset, dump] = this.parseSomeColliderUncachedPartCommon(dv);
+    let [ptr, dump] = this.parseSomeColliderUncachedPartCommon(dv);
     if (!dump) {
+      //console.log(`missing scol ${ptr}`);
       return;
     }
+    let cached = new mm_scol_collider_cached.Local(dump, 0);
+    cached.extraParse(ptr);
     this.curFrame.scolColliders.set(ptr, {
-      cached: new mm_scol_collider_cached.Local(dump, 0),
+      cached,
       uncached: new mm_scol_collider_uncached.Local(dv, 0x10),
     });
   }

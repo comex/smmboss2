@@ -84,6 +84,8 @@ struct hose {
         }
 
         write_info_.store(new_write_info, std::memory_order_release);
+        total_written_bytes_.fetch_add(size, std::memory_order_relaxed);
+
     }
 
     // any thread, used for stats:

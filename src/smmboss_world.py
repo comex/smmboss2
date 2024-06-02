@@ -7,6 +7,7 @@ class Point2D(GuestStruct):
     def xy(self):
         return (self.x, self.y)
     full_repr = True
+
 class Point3D(Point2D):
     z = prop(8, f32)
     sizeof_star = 12
@@ -24,6 +25,13 @@ class Rect(GuestStruct):
     sizeof_star = 0x10
     def size(self):
         return (self.max.x - self.min.x, self.max.y - self.min.y)
+    full_repr = True
+
+class XXY(GuestStruct):
+    x_left = prop(0, f32)
+    x_right = prop(4, f32)
+    y = prop(8, f32)
+    sizeof_star = 12
     full_repr = True
 
 class IntPoint2D(GuestStruct):
@@ -77,7 +85,7 @@ class SeadListImpl(SeadListNode):
     def __iter__(self, rev=False):
         expected_count = self.count
         actual_count = 0
-        link_offset = self.link_offset
+        link_offset = 0 if self.ignore_link_offset else self.link_offset
         link = self.prev if rev else self.next
         while link != self:
             next = link.prev if rev else link.next
@@ -107,9 +115,11 @@ class SeadListImpl(SeadListNode):
             fp.write(',')
             i += 1
 
-def sead_list(_elem_ty):
+def sead_list(_elem_ty, ignore_link_offset=False):
+    _ignore_link_offset = ignore_link_offset
     class C(SeadListImpl):
         elem_ty = _elem_ty
+        ignore_link_offset = _ignore_link_offset
     C.__name__ = f'sead_list({_elem_ty.__name__})'
     return C
 
@@ -261,10 +271,11 @@ class Scol(GuestStruct):
     owners_pos_old = prop(0x198, Point2D)
     owners_relatedtopos = prop(0x1a0, u8)
 
-    point3d_ptrs = prop(0x1a8, fixed_array(ptr_to(Point3D), 8))
-    point3d_storage = prop(0x1e8, fixed_array(Point3D, 8), dump=False)
-    point3d_ptrs_by_point_idx = prop(0x248, fixed_array(ptr_to(Point3D), 4))
-    point3ds_by_point_idx_storage = prop(0x268, fixed_array(Point3D, 4), dump=False)
+    xxy_ptrs_cur = prop(0x1a8, fixed_array(ptr_to(XXY), 4))
+    xxy_ptrs_old = prop(0x1c8, fixed_array(ptr_to(XXY), 4))
+    xxys_storage = prop(0x1e8, fixed_array(XXY, 8), dump=False)
+    other_xxy_ptrs_by_point_idx = prop(0x248, fixed_array(ptr_to(XXY), 4)) # copied in from p1250
+    other_xxys_storage = prop(0x268, fixed_array(XXY, 4), dump=False)
     owner_idbits = prop(0x298, u64)
 
     ptr_owners_pos_cur = prop(0x2a0, ptr_to(Point2D))
@@ -272,10 +283,8 @@ class Scol(GuestStruct):
 
     point_2b0 = prop(0x2b0, Point2D)
 
-    flags_2b8 = prop(0x2b8, u32)
-    flags_2bc = prop(0x2bc, u32)
-    flags_2c0 = prop(0x2c0, u32)
-    flags_2c4 = prop(0x2c4, u32)
+    bitmask_cur = prop(0x2b8, fixed_array(u32, 2))
+    bitmask_old = prop(0x2c0, fixed_array(u32, 2)) # copied from cur
 
     rects = prop(0x2c8, fixed_array(Rect, 4))
     point308 = prop(0x308, Point2D)
@@ -285,15 +294,27 @@ class Scol(GuestStruct):
 
     something_from_collider = prop(0x328, u32)
 
-    # these arrays are indexed by point index
-    sees_360 = prop(0x360, fixed_array(ScolSee, 4))
-    sees_valid = prop(0x390, fixed_array(u8, 4))
-    sees_394 = prop(0x394, fixed_array(ScolSee, 4))
+    actor_idbits = prop(0x330, fixed_array(u64, 4))
+
+    xxys_360_cur = prop(0x360, fixed_array(XXY, 2))
+    xxys_360_old = prop(0x370, fixed_array(XXY, 2)) # copied from cur
+    sees_valid_cur = prop(0x390, fixed_array(u8, 2))
+    sees_valid_old = prop(0x392, fixed_array(u8, 2)) # copied from cur
+    sees_by_point_idx = prop(0x394, fixed_array(ScolSee, 4))
     result_list_idxs_cur = prop(0x3c4, fixed_array(u32, 4))
-    result_list_idxs_old = prop(0x3d4, fixed_array(u32, 4))
+    result_list_idxs_old = prop(0x3d4, fixed_array(u32, 4)) # copied from cur
 
     result_lists_cur = prop(0x3e8, fixed_array(ScolResultList, 4))
-    result_lists_old = prop(0xa08, fixed_array(ScolResultList, 4))
+    result_lists_old = prop(0xa08, fixed_array(ScolResultList, 4)) # copied from cur
+
+    # these are all associated:
+    # xxy_ptrs_cur[i]
+    # xxy_ptrs_old[i]
+    # sees_by_point_idx[i]
+    # sees_valid[i] (only for 0 and 1)
+    # result_lists_cur[i][result_list_idxs_cur[i]]
+    # actor_idbits[i]
+    # ridden_by_scol_lists[(2,3,1,0)[i]]
 
 
 class PlayerScolWrap(GuestStruct):
@@ -335,7 +356,7 @@ class Collider(GuestStruct):
     # aka HasBlockInfo
     vtable = prop(0, GuestPtrPtr)
     scol_mid_node = prop(0x20, ScolMidNode, dump=False)
-    # nodes[0] is for BGCollisionSystem's colliders1; nodes[1] is for colliders2
+    # nodes[0] is for BgCollisionSystem's colliders1; nodes[1] is for colliders2
     nodes = prop(0x58, lambda: fixed_array(ColliderListNodeOuter, 5))
     bbox_cur = prop(0x238, Rect)
     bbox_old = prop(0x248, Rect)
@@ -366,6 +387,7 @@ class BlockColliderOwner(GuestStruct):
     # aka HBO1
     collider = prop(0x38, Collider)
 
+# aka mm_terrain_manager
 class Bloch(GuestStruct):
     block_collider_owners = prop(0x18, count4_ptr(ptr_to(BlockColliderOwner)))
 
@@ -412,7 +434,7 @@ class BlockColliderListItem(GuestStruct):
 class BlockColliderListEntry(GuestStruct):
     item = prop(0x10, ptr_to(BlockColliderListItem), dump_deep=True)
 
-class BGCollisionGridSquare(GuestStruct):
+class BgCollisionGridSquare(GuestStruct):
     # aka triple_24klist
     list0 = prop(0x00, sead_list(BlockColliderListEntry))
     list1 = prop(0x18, sead_list(BlockColliderListEntry))
@@ -421,7 +443,7 @@ class BGCollisionGridSquare(GuestStruct):
     def any_nonempty(self):
         return self.list0.count or self.list1.count or self.list2.count
 
-class BGCollisionGrid(GuestStruct, GuestArray):
+class BgCollisionGrid(GuestStruct, GuestArray):
     # Grid coordinates are in units of blocks.
 
     # (0, 0) corresponds to (x, y) in the grid; thus some negative coordinates
@@ -431,8 +453,8 @@ class BGCollisionGrid(GuestStruct, GuestArray):
     size_if_horizontal = prop(8, IntSize2D)
     size_if_vertical = prop(0x10, IntSize2D)
     count = prop(0x18, u32)
-    base = prop(0x20, ptr_to(BGCollisionGridSquare))
-    ptr_ty = BGCollisionGridSquare
+    base = prop(0x20, ptr_to(BgCollisionGridSquare))
+    ptr_ty = BgCollisionGridSquare
     is_vertical_level = prop(0x28, u8)
 
     def size(self):
@@ -478,7 +500,7 @@ class BGCollisionGrid(GuestStruct, GuestArray):
             fp.write(f'\n{indent3}({x}, {y}): ')
             square.dump(fp, indent3, **opts)
 
-class BGCollisionSystem(GuestStruct):
+class BgCollisionSystem(GuestStruct):
     # things that can land??
     # never iterated until game end
     colliders1 = prop(0x38, sead_list(ColliderListNode))
@@ -487,7 +509,7 @@ class BGCollisionSystem(GuestStruct):
     # ticked every frame
     colliders2 = prop(0x58, sead_list(ColliderListNode))
 
-    grid = prop(0x18, ptr_to(BGCollisionGrid))
+    grid = prop(0x18, ptr_to(BgCollisionGrid))
 
 class Tile(GuestStruct):
     what_to_draw = prop(0, u32)
@@ -575,7 +597,7 @@ class HitboxNode(GuestStruct):
     list = prop(0x18, GuestPtrPtr)
 
 class HitboxManager(GuestStruct):
-    split_hitbox_lists = prop(0x10, fixed_array(sead_list(HitboxNode), 4))
+    split_hitbox_lists = prop(0x10, fixed_array(sead_list(HitboxNode, ignore_link_offset=True), 4))
     staging_hitbox_list = prop(0x70, sead_list(Hitbox))
     # ...
     t1 = prop(0x88, ptr_array(Hitbox))
@@ -590,7 +612,7 @@ class AreaSystem(GuestStruct):
     use_second_coords = prop(0x30, u8)
     hitbox_manager = prop(0x40, ptr_to(HitboxManager))
     spawner = prop(0x70, ptr_to(Spawner))
-    bg_collision_system = prop(0x90, ptr_to(BGCollisionSystem))
+    bg_collision_system = prop(0x90, ptr_to(BgCollisionSystem))
     bloch = prop(0xa0, ptr_to(Bloch))
     rngplus = prop(0xf8, ptr_to(RNGPlus))
     tiler2 = prop(0x110, ptr_to(Tiler2))
@@ -797,6 +819,13 @@ def print_bg():
         _print_collider(bco.collider)
 
 @commandlike
+def print_bgcs():
+    bgcs = ActorMgr.get().cur_world.area_sys.bg_collision_system
+    for lst in [bgcs.colliders1, bgcs.colliders2]:
+        for entry in lst:
+            print(entry.owner)
+
+@commandlike
 def print_grid():
     seen = set()
     for x, y, square in ActorMgr.get().cur_world.area_sys.bg_collision_system.grid.squares():
@@ -808,3 +837,22 @@ def print_grid():
                 seen.add(collider)
                 _print_collider(collider)
 
+@commandlike
+def print_collider_sources():
+    world = ActorMgr.get().cur_world
+    area_sys = world.area_sys
+    bgcs = area_sys.bg_collision_system
+    sources = {
+        'bco': {bco.collider
+                    for bco in area_sys.bloch.block_collider_owners},
+        'bgcs1': {entry.owner for entry in bgcs.colliders1},
+        'bgcs2': {entry.owner for entry in bgcs.colliders2},
+        'grid': {entry.item.collider
+                    for x, y, square in bgcs.grid.squares()
+                    for slist in [square.list0, square.list1, square.list2]
+                    for entry in slist},
+    }
+    all_colliders = set().union(*sources.values())
+    for collider in sorted(all_colliders):
+        my_sources = [source for (source, sset) in sources.items() if collider in sset]
+        print(f'{collider}: {my_sources}')

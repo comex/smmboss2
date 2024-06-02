@@ -1,0 +1,1032 @@
+<style>
+#diagram {
+  border: 1px solid grey;
+}
+</style>
+
+<div id="overrun"></div>
+<svg width="500" height="500" id="diagram">
+</svg>
+
+<script>
+function hex(n) {
+  return '0x'+n.toString(16);
+}
+function assert(x) {
+  if (!(x)) {
+    throw new Error('assertion failed');
+  }
+}
+function sleep(n) {
+  let { promise, resolve, reject } = Promise.withResolvers();
+  setTimeout(resolve, n);
+  return promise;
+}
+
+async function doRead(addr, len) {
+  let resp = await theRPCConn.reqRead(addr, len);
+  if (resp.byteLength < len) {
+    throw new Error(`short read addr=${addr} len=${len} actual=${resp.byteLength}`);
+  }
+  return resp;
+}
+async function doWrite(addr, data) {
+  let [actual, len] = await theRPCConn.reqWrite(addr, data);
+  if (actual < len) {
+    throw new Error(`short write addr=${addr} len=${len} actual=${actual}`);
+  }
+}
+
+class BaseType {}
+class IntBaseType extends BaseType {
+  constructor(name, sizeof, dataViewName, {needBigWrap} = {}) {
+    super();
+    this.name = name;
+    this.sizeof = sizeof;
+    let getLocal = new Function(
+      'dv', 'off',
+      `return dv.get${dataViewName}(off, true);`
+    );
+    let xval = needBigWrap ? 'BigInt(val)' : 'val';
+    let setLocal = new Function(
+      'dv', 'off', 'val',
+      `return dv.set${dataViewName}(off, ${xval}, true);`
+    );
+
+    let size = parseInt(name.slice(1)) / 8;
+    // TODO: this kinda sucks, would be better to have a way to aggregate what's needed.  probably we don't even want this at all.  too slow and not synchronized. 
+    let getRemote = async (addr) => {
+      let dv = await doRead(addr, size);
+      return getLocal(dv, 0);
+    };
+    let setRemote = (addr, val) => {
+      let dv = new DataView(new ArrayBuffer(size));
+      setLocal(dv, 0, val);
+      return doWrite(addr, dv);
+    };
+
+    this.getLocal = getLocal;
+    this.getRemote = getRemote;
+    this.setLocal = setLocal;
+    this.setRemote = setRemote;
+
+  }
+}
+
+let u8  = new IntBaseType('u8',  1, 'Uint8');
+let u16 = new IntBaseType('u16', 2, 'Uint16');
+let u32 = new IntBaseType('u32', 4, 'Uint32');
+let u64 = new IntBaseType('u64', 8, 'BigUint64', {needBigWrap: true});
+let s8  = new IntBaseType('s8',  1, 'Int8');
+let s16 = new IntBaseType('s16', 2, 'Int16');
+let s32 = new IntBaseType('s32', 4, 'Int32');
+let s64 = new IntBaseType('s64', 8, 'BigInt64', {needBigWrap: true});
+let f32 = new IntBaseType('f32', 4, 'Float32');
+let f64 = new IntBaseType('f64', 8, 'Float64');
+
+
+let utf8Decoder = new TextDecoder();
+let CString = new BaseType;
+CString.getLocal = (dv, off) => {
+  let maxLen = Math.min(0x1000, dv.byteLength - off);
+  let len = 0;
+  while (len < maxLen && dv.getInt8(off + len) != 0) {
+    len++;
+  }
+  let u8 = new Uint8Array(dv.buffer, dv.byteOffset + off, len);
+  return utf8Decoder.decode(u8);
+};
+
+class CompoundType {}
+
+class FixedArrayLocal {
+  constructor(dv, off) {
+    this.dv = dv;
+    this.off = off;
+  }
+  serialize() {
+    return Array.from(Array(count), (_, i) => this.get(i));
+  }
+}
+
+class FixedArray extends CompoundType {
+  constructor(elmTy, count) {
+    super();
+    let elmTySizeof = elmTy.sizeof;
+    if (elmTySizeof !== null) {
+      assert(typeof elmTySizeof == 'number');
+      this.sizeof = elmTySizeof * count;
+    }
+    if (elmTy instanceof CompoundType) {
+      class Local extends FixedArrayLocal {
+        constructor(dv, off) {
+          super(dv, off);
+          this._cache = [];
+        }
+        get(i) {
+          assert(i >= 0 && i < count);
+          let ret = this._cache[i];
+          if (ret === undefined) {
+            ret = this._cache[i] = new elmTy(this.dv, this.off + i * elmTySizeof);
+          }
+          return ret;
+        }
+      }
+      this.Local = Local;
+    } else {
+      let getLocal = elmTy.getLocal;
+      class Local extends FixedArrayLocal {
+        constructor(dv, off) {
+          super(dv, off);
+        }
+        get(i) {
+          assert(i >= 0 && i < count);
+          return getLocal(this.dv, this.off + i * elmTySizeof);
+        }
+        // could implement set
+      }
+      this.Local = Local;
+    }
+  }
+}
+
+class StructLocal {
+  constructor(struct, dv, off) {
+    this.struct = struct;
+    this.dv = (dv instanceof DataView) ? dv : new DataView(dv);
+    assert(this.dv.byteLength >= off + struct.sizeof);
+    this.off = off;
+  }
+  serialize() {
+    let ret = {};
+    for (let [fieldName, ..._] of this.struct.fields) {
+      let val = this[fieldName];
+      if (val.serialize !== undefined) {
+        val = val.serialize();
+      }
+      ret[fieldName] = val;
+    }
+    return ret;
+  }
+
+}
+
+class Struct extends CompoundType {
+  constructor(name, sizeof, fields) {
+    super();
+    this.name = name;
+    this.sizeof = sizeof;
+    this.fields = fields;
+    this.doAutoSizes();
+    this.Local = this.makeLocalClass();
+    this.Remote = this.makeRemoteClass();
+  }
+  doAutoSizes() {
+    let prevOff = 0;
+    for (let i = 0; i < this.fields.length; i++) {
+      let [fieldName, off, ty] = this.fields[i];
+      if (off === 'auto') {
+        assert(prevOff !== null);
+        off = prevOff;
+        this.fields[i] = [fieldName, off, ty];
+      }
+      prevOff = ty.sizeof === null ? null : (off + ty.sizeof);
+    }
+    if (this.sizeof === 'auto') {
+      assert(prevOff !== null);
+      this.sizeof = prevOff;
+    }
+
+  }
+  makeLocalClass() {
+    let argNames = ['struct'];
+    let argVals = [this];
+    let code = `
+      class ${this.name}_Local extends StructLocal {
+        constructor(dv, off = 0) {
+          super(struct, dv, off);
+    `
+    for (let [fieldName, off, ty] of this.fields) {
+      if (ty instanceof CompoundType) {
+        code += `
+          this._${fieldName} = undefined;
+        `;
+      }
+    }
+    code += `
+        }
+    `;
+    for (let [fieldName, off, ty] of this.fields) {
+      if (ty instanceof BaseType) {
+        argNames.push(`getLocal_${fieldName}`, `setLocal_${fieldName}`);
+        argVals.push(ty.getLocal, ty.setLocal);
+        code += `
+          get ${fieldName}() { return getLocal_${fieldName}(this.dv, this.off + ${off}); }
+          set ${fieldName}(val) { return setLocal_${fieldName}(this.dv, this.off + ${off}, val); }
+        `
+      } else {
+        assert(ty instanceof CompoundType);
+        argNames.push(`ty_${fieldName}_Local`);
+        argVals.push(ty.Local);
+        // todo: cache
+        code += `
+          get ${fieldName}() {
+            if (this._${fieldName} === undefined) {
+              this._${fieldName} = new ty_${fieldName}_Local(this.dv, this.off + ${off});
+            }
+            return this._${fieldName};
+          }
+        `
+      }
+    }
+    code += `
+      }
+      return ${this.name}_Local;
+    `;
+    let cls = new Function(...argNames, code)(...argVals);
+    for (let [fieldName, off, ty] of this.fields) {
+      cls.prototype[`offsetof_${fieldName}`] = off;
+    }
+    return cls;
+  }
+  makeRemoteClass() {
+    // TODO: redo this to be more useful
+    let argNames = [];
+    let argVals = [];
+    let code = `
+      class ${this.name}_Remote {
+        constructor(addr) {
+          this.addr = addr;
+        }
+    `;
+    for (let [fieldName, off, ty] of this.fields) {
+      if (ty instanceof BaseType) {
+        argNames.push(`getRemote_${fieldName}`, `setRemote_${fieldName}`);
+        argVals.push(ty.getRemote, ty.setRemote);
+        let setterName = 'set' + fieldName[0].toUpperCase() + fieldName.slice(1);
+        code += `
+          ${fieldName}() { return getRemote_${fieldName}(this.addr + ${off}n); }
+          ${setterName}(val) { return setRemote_${fieldName}(this.addr + ${off}n, val); }
+        `
+      } else {
+        assert(ty instanceof CompoundType);
+        argNames.push(`ty_${fieldName}`);
+        argVals.push(ty);
+        code += `
+          ${fieldName}() { return new ty_${fieldName}(this.addr + ${off}n); }
+        `
+      }
+    }
+    code += `
+      }
+      return ${this.name}_Remote;
+    `;
+    return new Function(...argNames, code)(...argVals);
+  }
+}
+
+class Cond {
+  constructor() {
+    this.waiters = [];
+  }
+  broadcast() {
+    for (let waiter of this.waiters) {
+      waiter();
+    }
+  }
+  wait() {
+    let { promise, resolve, reject } = Promise.withResolvers();
+    this.waiters.push(resolve);
+    return promise;
+  }
+  then(f, r) {
+    return this.wait().then(f, r);
+  }
+}
+
+class Lock {
+  constructor() {
+    this.locked = false;
+    this.waiters = [];
+  };
+  lock() {
+    if (!this.locked) {
+      this.locked = true;
+      return Promise.resolve(undefined);
+    } else {
+      let { promise, resolve, reject } = Promise.withResolvers();
+      this.waiters.push(resolve);
+      return promise;
+    }
+  }
+  unlock() {
+    assert(this.locked);
+    this.locked = false;
+    let resolve = this.waiters.shift();
+    if (resolve !== undefined) {
+      resolve();
+    }
+  }
+  async with(cb) {
+    console.log('with entry');
+    await this.lock();
+    console.log('with got lock');
+    let isUnlocked = false;
+    let unlock = () => {
+      if (!isUnlocked) {
+        isUnlocked = true;
+        this.unlock();
+      }
+    };
+    try {
+      return await cb(unlock);
+    } finally {
+      unlock();
+    }
+  }
+}
+
+class Throttle {
+  constructor(name, defaultDelay = 100) {
+    this.defaultDelay = defaultDelay;
+    this.name = name;
+    this.reset();
+  }
+  reset() {
+    this.delay = this.defaultDelay;
+  }
+  then(f, r) {
+    let delay = this.delay;
+    this.delay *= 2;
+    console.log(`Throttle "${this.name}" waiting for ${delay} ms`);
+    return sleep(delay).then(f, r);
+  }
+}
+
+class WSWrapper {
+  constructor(url, delegate) {
+    this.wsURL = url;
+    this.delegate = delegate;
+    this.openThrottle = new Throttle('open');
+    this.state = 'idle';
+    this.ws = null;
+    this.wantOpen = false;
+  }
+  setWantOpen(wantOpen) {
+    this.wantOpen = wantOpen;
+    this.openCloseWSAsNeeded();
+  }
+  openCloseWSAsNeeded() {
+    if (this.state == 'idle' && this.wantOpen) {
+      this.openWS();
+    } else if (this.state == 'open' && !this.wantOpen) {
+      console.log(`closing ${this.wsURL}`);
+      this.ws.close();
+    }
+  }
+  openWS() {
+    assert(this.ws === null);
+    assert(this.state == 'idle');
+    console.log(`connecting to ${this.wsURL}`);
+    let ws = new WebSocket(this.wsURL);
+    this.ws = ws;
+    this.state = 'connecting';
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = (e) => {
+      assert(this.ws === ws);
+      this.state = 'open';
+      console.log(`opened connection to ${this.wsURL}`);
+      this.delegate.onOpen(e);
+      // if it doesn't close quickly, then reset throttle
+      setTimeout(() => {
+        if (this.ws === ws) {
+          this.openThrottle.reset();
+        }
+      }, 1000);
+    };
+    ws.onmessage = (e) => {
+      assert(this.ws === ws);
+      this.delegate.onMessage(e);
+    };
+    ws.onclose = (e) => {
+      assert(this.ws === ws);
+      console.log(`closed connection to ${this.wsURL}`);
+      this.ws = null;
+      if (this.wantOpen) {
+        this.state = 'openThrottle';
+        (async () => {
+          await this.openThrottle;
+          this.state = 'idle';
+          this.openCloseWSAsNeeded();
+        })();
+      } else {
+        this.state = 'idle';
+      }
+      this.delegate.onClose(e);
+    };
+  }
+}
+
+class RPCConn {
+  constructor(baseURL) {
+    this.wsw = new WSWrapper(`${baseURL}/ws/rpc`, this);
+    this.wsw.setWantOpen(true);
+    this.responseHandler = null;
+    this.updateCond = new Cond;
+    this.pendingResponses = [];
+    this.pendingResponseCond = new Cond;
+    this.rpcThrottle = new Throttle('rpc');
+    this.helloData = null;
+  }
+  onOpen(e) {
+    this.isOpen = true;
+    this.updateCond.broadcast();
+    this.pendingResponseCallbacks = [(data) => {
+      if (typeof data == 'string') {
+        console.log(`early error! ${data}`);
+        return;
+      }
+      assert(data instanceof ArrayBuffer);
+      let u64 = new BigUint64Array(data);
+      let i = 0;
+      let images = [];
+      while (i < u64.length) {
+        let image = {};
+        for (let prefix of ['image', 'text', 'rodata', 'data']) {
+          image[`${prefix}Start`] = u64[i++];
+          image[`${prefix}Size`] = u64[i++];
+        };
+        assert(i <= u64.length);
+        images.push(image);
+      }
+      console.log('hello', images);
+      this.updateCond.broadcast();
+    }];
+  }
+  onMessage(e) {
+    let cb = this.pendingResponseCallbacks.shift(1);
+    if (!cb) {
+      throw new Error('got unsolicited packet');
+    }
+    cb(e.data);
+  }
+  onClose(e) {
+    this.isOpen = false;
+    this.updateCond.broadcast();
+  }
+  async rawRequest(req) {
+    let resp = null;
+    outerLoop: while (1) {
+      if (!this.isOpen) {
+        console.log('RPC waiting for open');
+        while (!this.isOpen) {
+          await this.updateCond;
+        }
+      }
+
+      //console.log(`sending ${req.byteLength} ${req}`);
+      this.wsw.ws.send(req);
+      let haveResponse = false;
+      let response = null;
+      this.pendingResponseCallbacks.push((resp) => {
+        response = resp;
+        haveResponse = true;
+        this.updateCond.broadcast();
+      });
+
+      while (!haveResponse) {
+        if (!this.isOpen) {
+          console.log('RPC waiting for re-open');
+          continue outerLoop;
+        }
+        await this.updateCond;
+      }
+
+      if (typeof response == 'string') {
+        console.log(`RPC got error: '${resp}'`);
+        await this.rpcThrottle;
+        continue outerLoop;
+      }
+
+      assert(response instanceof ArrayBuffer);
+      this.rpcThrottle.reset();
+      //console.log(`RPC got good response: ${response}`);
+
+      return new DataView(response);
+    }
+  }
+  async reqRead(addr, len) {
+    let dv = new DataView(new ArrayBuffer(17));
+    dv.setInt8(0, 1); // RPC_REQ_READ
+    dv.setBigUint64(1, addr, true);
+    dv.setBigUint64(9, BigInt(len), true);
+    return await this.rawRequest(dv);
+  }
+  async reqWrite(addr, data) {
+    assert(ArrayBuffer.isView(data));
+    let headerLen = 9;
+    let len = data.byteLength;
+    let ab = new ArrayBuffer(headerLen + len);
+    new Uint8Array(ab, headerLen).set(new Uint8Array(data.buffer, data.byteOffset, len));
+    let dv = new DataView(ab);
+    dv.setInt8(0, 2); // RPC_REQ_WRITE
+    dv.setBigUint64(1, addr, true);
+    let resp = await this.rawRequest(dv);
+    assert(resp.byteLength == 8);
+    let actual = resp.getBigUint64(0, true);
+    assert(actual <= len);
+    return [actual, len];
+  }
+  async reqGetStats() {
+    let u8 = Uint8Array.of(3); // RPC_REQ_GET_STATS
+    let resp = await this.rawRequest(u8);
+    assert(resp.byteLength == 16);
+    return {
+      overrunBytes: resp.getBigUint64(0, true),
+      sentBytes: resp.getBigUint64(8, true),
+    }
+
+  }
+  async reqSetHashTweak(tweak) {
+    let dv = new DataView(new ArrayBuffer(9));
+    dv.setInt8(0, 4); // RPC_REQ_SET_HASH_TWEAK
+    dv.setBigUint64(1, tweak, true);
+    let resp = await this.rawRequest(dv);
+    assert(resp.byteLength == 0);
+  }
+  maybeSetHashTweak() {
+    if (!this.setHashTweakPending) {
+      this.setHashTweakPending = true;
+      let u64 = new BigUint64Array(1);
+      crypto.getRandomValues(u64);
+      let tweak = u64[0];
+      console.log(`new tweak: ${tweak}`);
+      (async () => {
+        await this.reqSetHashTweak(tweak);
+        await sleep(300);
+        this.setHashTweakPending = false;
+      })();
+    }
+  }
+}
+
+
+// --
+let mm_point2d = new Struct('mm_point2d', 8, [
+  ['x', 0x0, f32],
+  ['y', 0x4, f32],
+]);
+
+let mm_point3d = new Struct('mm_point3d', 0xc, [
+  ['x', 0x0, f32],
+  ['y', 0x4, f32],
+  ['z', 0x8, f32],
+]);
+
+let mm_size2d = new Struct('mm_size2d', 8, [
+  ['w', 0x0, f32],
+  ['h', 0x4, f32],
+]);
+
+
+let mm_rect = new Struct('mm_rect', 0x10, [
+  ['min', 0x0, mm_point2d],
+  ['max', 0x8, mm_point2d],
+]);
+mm_rect.Local.prototype.width = function() {
+  return this.max.x - this.min.x;
+}
+mm_rect.Local.prototype.height = function() {
+  return this.max.y - this.min.y;
+}
+
+let mm_hitbox_params = new Struct('mm_hitbox_params', 0x40, [
+  ['pos', 0x0, mm_point2d],
+  ['radius', 0x8, mm_size2d],
+  ['isCircle', 0x10, u32],
+  ['whichList', 0x14, u32],
+  ['f18', 0x18, u32],
+  ['f20', 0x20, u64],
+  ['f28', 0x28, u64],
+  ['flags', 0x30, u64],
+  ['callback', 0x38, u64],
+]);
+
+let mm_hitbox = new Struct('mm_hitbox', 0x1c8, [
+  ['params',     0x60,  mm_hitbox_params],
+  ['owner',      0xa8,  u64],
+  ['didCollide', 0x1b5, u8],
+  ['rect',       0x1b8, mm_rect],
+]);
+
+let mm_collider_segment = new Struct('mm_collider_segment', 0x18, [
+  ['whichSide', 0,    u8],
+  ['relPos1',   4,    mm_point2d],
+  ['relPos2',   0xc,  mm_point2d],
+  ['lastWord',  0x14, u32],
+]);
+
+// this is mm_normal_collider plus other stuff we append to it
+let mm_normal_collider_cached = new Struct('mm_normal_collider_cached', null, [
+  ['segmentsCurCount', 0x3c0, u32],
+  ['segmentsOldCount', 0x3d0, u32],
+]);
+mm_normal_collider_cached.Local.prototype.extraParse = function() {
+  let off = this.off + 0x3e0;
+  this.segmentsCur = [];
+  for (let i = 0, count = this.segmentsCurCount; i < count; i++) {
+    this.segmentsCur.push(new mm_collider_segment.Local(this.dv, off));
+    off += 0x18;
+  }
+  this.segmentsOld = [];
+  for (let i = 0, count = this.segmentsOldCount; i < count; i++) {
+    this.segmentsOld.push(new mm_collider_segment.Local(this.dv, off));
+    off += 0x18;
+  }
+  assert(off == this.dv.byteLength);
+}
+
+let mm_normal_collider_uncached = new Struct('mm_normal_collider_uncached', 'auto', [
+  ['extPosCur', 'auto', mm_point2d],
+  ['extPosOld', 'auto', mm_point2d],
+]);
+
+
+let mm_scol_collider_cached = new Struct('mm_scol_collider_cached', null, [
+  ['xxyPtrs', 0x1a8, new FixedArray(u64, 8)],
+  //['lineInfo', 
+]);
+mm_scol_collider_cached.Local.prototype.extraParse = function(ptr) {
+  this.addr = ptr;
+}
+mm_scol_collider_cached.Local.prototype.getPoint3D = function(i) {
+  let ptr = this.point3DPtrs.get(i);
+  if (!ptr) {
+    return null;
+  }
+  let offset = Number(ptr - this.addr);
+  assert(offset + this.off + 0xc <= this.dv.byteLength);
+  return new mm_point3d.Local(this.dv, this.off + offset);
+}
+mm_scol_collider_cached.Local.prototype.serializePoint3Ds = function() {
+    return Array.from(Array(8), (_, i) => this.getPoint3D(i).serialize());
+}
+
+let mm_scol_collider_uncached = new Struct('mm_scol_collider_uncached', 'auto', [
+  ['extPosCur', 'auto', mm_point2d],
+  ['extPosOld', 'auto', mm_point2d],
+]);
+
+// --
+
+let svgNS = 'http://www.w3.org/2000/svg';
+
+class DiagramThingKind {
+  constructor(diagram) {
+    this.diagram = diagram;
+    this.group = document.createElementNS(svgNS, 'g');
+    diagram.svg.appendChild(this.group);
+    this.elmsByPtr = new Map();
+  }
+  renderThings() {
+    let frameThings = this.getThingsFromFrame();
+    let seen = new Set();
+    this.seen = seen;
+    for (let [ptr, thing] of frameThings.entries()) {
+      this.renderThing(ptr, thing);
+    }
+    for (let elm of Array.from(this.group.children)) {
+      if (!this.seen.has(elm)) {
+        //console.log(`${this.diagram.curFrame.number}/${this.diagram.curFrame.worldID} removing stale ${elm} at ${elm.ptr} from ${elm.createdFrameNum}`);
+        elm.deleteMe();
+      }
+    }
+    this.seen = null;
+    //console.log(`now have ${this.group.childElementCount} children`);
+  }
+  getOrCreateElmFor(ptr, wantedTag) {
+    let elm = this.elmsByPtr.get(ptr);
+    //console.log(elm);
+    if (elm && elm.tagName != wantedTag) {
+      elm.deleteMe();
+      elm = null;
+    }
+    if (!elm) {
+      elm = document.createElementNS(svgNS, wantedTag);
+      assert(elm.tagName == wantedTag);
+      //console.log(`creating ${wantedTag}`);
+      elm.ptr = ptr;
+      elm.createdFrameNum = this.diagram.curFrame.number;
+      elm.deleteMe = () => {
+        //console.log(`** deleteMe for ${wantedTag} ptr=${ptr}`);
+        elm.parentNode.removeChild(elm);
+        this.elmsByPtr.delete(ptr);
+      };
+      this.group.appendChild(elm);
+      this.elmsByPtr.set(ptr, elm);
+    }
+    this.seen.add(elm);
+    return elm;
+  }
+}
+
+class DiagramHitboxes extends DiagramThingKind {
+  getThingsFromFrame() {
+    return this.diagram.curFrame.hitboxes;
+  }
+  renderThing(ptr, hitbox) {
+    let params = hitbox.params;
+    let isCircle = params.isCircle;
+    let x = hitbox.rect.min.x;
+    let y = hitbox.rect.min.y;
+    let w = hitbox.rect.width();
+    let h = hitbox.rect.height();
+
+    let dia = this.diagram;
+    let wantedTag = isCircle ? 'circle' : 'rect';
+    let elm = this.getOrCreateElmFor(ptr, wantedTag);
+    if (w < 0) {
+      // todo: DRY
+      elm.deleteMe();
+      return;
+    }
+    if (isCircle) {
+      assert(w == h);
+      elm.setAttribute('cx', dia.transformX(x + w/2));
+      elm.setAttribute('cy', dia.transformY(y + h/2));
+      elm.setAttribute('r', dia.transformSize(w/2));
+    } else {
+      elm.setAttribute('x', dia.transformX(x));
+      elm.setAttribute('y', dia.transformY(y + h));
+      elm.setAttribute('width', dia.transformSize(w));
+      elm.setAttribute('height', dia.transformSize(h));
+    }
+    elm.setAttribute('stroke', 'green');
+    elm.setAttribute('stroke-width', 4);
+    elm.setAttribute('fill', 'yellow');
+  }
+}
+
+class DiagramNormalColliders extends DiagramThingKind {
+  getThingsFromFrame() {
+    return this.diagram.curFrame.normalColliders;
+  }
+  renderThing(ptr, {cached, uncached, uniqueDumpId}) {
+    let extX = uncached.extPosCur.x;
+    let extY = uncached.extPosCur.y;
+    let dia = this.diagram;
+    for (let i = 0; i < cached.segmentsCur.length; i++) {
+      let seg = cached.segmentsCur[i];
+      let fakePtr = ptr + BigInt(i);
+      let line = this.getOrCreateElmFor(fakePtr, 'line');
+      if (line.drawnExtX === extX &&
+          line.drawnExtY === extY &&
+          line.drawnUniqueDumpId === uniqueDumpId) {
+        continue;
+      }
+      line.drawnExtX = extX;
+      line.drawnExtY = extY;
+      line.drawnUniqueDumpId = uniqueDumpId;
+      line.setAttribute('x1', dia.transformX(seg.relPos1.x + extX));
+      line.setAttribute('y1', dia.transformY(seg.relPos1.y + extY));
+      line.setAttribute('x2', dia.transformX(seg.relPos2.x + extX));
+      line.setAttribute('y2', dia.transformY(seg.relPos2.y + extY));
+      line.setAttribute('stroke', 'red');
+      line.setAttribute('stroke-width', 4);
+    }
+  }
+}
+
+class DiagramScolColliders extends DiagramThingKind {
+  getThingsFromFrame() {
+    return this.diagram.curFrame.normalColliders;
+  }
+  renderThing(ptr, {cached, uncached}) {
+    let dia = this.diagram;
+    for (let i = 0; i < cached.segmentsCur.length; i++) {
+      let seg = cached.segmentsCur[i];
+      let fakePtr = ptr + BigInt(i);
+      let line = this.getOrCreateElmFor(fakePtr, 'line');
+      line.setAttribute('x1', dia.transformX(seg.relPos1.x + uncached.extPosCur.x));
+      line.setAttribute('y1', dia.transformY(seg.relPos1.y + uncached.extPosCur.y));
+      line.setAttribute('x2', dia.transformX(seg.relPos2.x + uncached.extPosCur.x));
+      line.setAttribute('y2', dia.transformY(seg.relPos2.y + uncached.extPosCur.y));
+      line.setAttribute('stroke', 'red');
+      line.setAttribute('stroke-width', 4);
+    }
+  }
+}
+
+class Diagram {
+  constructor(svg) {
+    this.svg = svg;
+    this.hitboxes = new DiagramHitboxes(this);
+    this.normalColliders = new DiagramNormalColliders(this);
+  }
+  renderFrame(frame) {
+    this.curFrame = frame;
+    this.hitboxes.renderThings();
+    this.normalColliders.renderThings();
+    this.curFrame = null;
+  }
+  transformX(x) {
+    return this.transformSize(x);
+  }
+  transformY(y) {
+    return 400 - this.transformSize(y);
+  }
+  transformSize(size) {
+    return size; // todo: match camera
+  }
+};
+let diagram = new Diagram(document.getElementById('diagram'));
+
+class HoseFrame {
+  constructor(number, worldID) {
+    this.number = number;
+    this.worldID = worldID;
+    this.hitboxes = new Map();
+    this.normalColliders = new Map();
+    this.scolColliders = new Map();
+    this.collisions = [];
+  }
+};
+
+class HoseConn {
+  constructor(baseURL) {
+    this.wsw = new WSWrapper(`${baseURL}/ws/hose`, this);
+    this.prevFrameByWorldID = new Map();
+    this.cachedDumps = new Map();
+    this.nextUniqueDumpId = 0;
+  }
+  setWantOpen(wantOpen) {
+    this.wsw.setWantOpen(wantOpen);
+  }
+  onOpen(e) {
+  }
+  onMessage(e) {
+    assert(e.data instanceof ArrayBuffer);
+    let ab = e.data;
+    assert(ab.byteLength >= 8);
+    let tag = utf8Decoder.decode(new Uint8Array(ab, 0, 8));
+    switch (tag) {
+    case 'collisi\0':
+      this.parseCollision(ab);
+      break;
+    case 'do_many\0':
+      this.parseDoMany(ab);
+      break;
+    case 'hitbox\0\0':
+      this.parsemm_hitbox(ab);
+      break;
+    case 'normcl1\0':
+    case 'scolcl1\0':
+      this.parseSomeColliderCachedPart(ab);
+      break;
+    case 'normcl2\0':
+      this.parseNormalColliderUncachedPart(ab);
+      break;
+    case 'scolcl2\0':
+      this.parseScolColliderUncachedPart(ab);
+      break;
+    case 'overrun\0':
+      this.parseOverrun(ab);
+      break;
+    default:
+      console.log(`hose message with unknown tag ${JSON.stringify(tag)}`);
+    }
+
+    //console.log(`hose message ${new BigUint64Array(e.data)}`);
+  }
+  onClose(e) {
+  }
+
+  parseDoMany(ab) {
+    let u64 = new BigUint64Array(ab);
+    let worldID = u64[2];
+    if (this.curFrame) {
+      this.prevFrameByWorldID.set(this.curFrame.worldID, this.curFrame);
+      if (this.curFrame.worldID == 0) {
+        diagram.renderFrame(this.curFrame);
+      }
+    }
+    let prev = this.prevFrameByWorldID.get(worldID);
+    let number = prev ? prev.number + 1 : 0; // TODO: replace
+    this.curFrame = new HoseFrame(number, worldID);
+  }
+  parseCollision(ab) {
+    let u64 = new BigUint64Array(ab);
+    assert(u64.length == 4);
+    if (!this.curFrame) {
+      return;
+    }
+    this.curFrame.collisions.push({
+      hb1: u64[0],
+      hb2: u64[1],
+      ret: u64[2],
+    });
+  }
+  parsemm_hitbox(ab) {
+    let ptr = new BigUint64Array(ab)[1];
+    if (!this.curFrame) {
+      return;
+    }
+    this.curFrame.hitboxes.set(ptr, new mm_hitbox.Local(new DataView(ab, 0x10)));
+  }
+  parseSomeColliderCachedPart(ab) {
+    let ptr = new DataView(ab).getBigUint64(8, true);
+    let dump = new DataView(ab, 0x10);
+    dump.uniqueDumpId = ++this.nextUniqueDumpId;
+      //console.log(`GOT dump for ${hex(ptr)}`);
+    this.cachedDumps.set(ptr, dump);
+  }
+  parseSomeColliderUncachedPartCommon(dv) {
+    let ptr = dv.getBigUint64(8, true);
+    let dump = this.cachedDumps.get(ptr);
+    if (!dump) {
+      // scramble the hashes so we hopefully get everything again
+      g_rpcConn.maybeSetHashTweak();
+      //console.log(`missing dump for ${ptr}`);
+    }
+    return [ptr, dump];
+  }
+  parseNormalColliderUncachedPart(ab) {
+    let dv = new DataView(ab);
+    let [ptr, dump] = this.parseSomeColliderUncachedPartCommon(dv);
+    if (!dump) {
+      return;
+    }
+    let cached = new mm_normal_collider_cached.Local(dump, 0);
+    cached.extraParse();
+    this.curFrame.normalColliders.set(ptr, {
+      cached: cached,
+      uncached: new mm_normal_collider_uncached.Local(dv, 0x10),
+      uniqueDumpId: dump.uniqueDumpId,
+    });
+  }
+  parseScolColliderUncachedPart(ab) {
+    let dv = new DataView(ab);
+    let [ptr, dump] = this.parseSomeColliderUncachedPartCommon(dv);
+    if (!dump) {
+      //console.log(`missing scol ${ptr}`);
+      return;
+    }
+    let cached = new mm_scol_collider_cached.Local(dump, 0);
+    cached.extraParse(ptr);
+    this.curFrame.scolColliders.set(ptr, {
+      cached,
+      uncached: new mm_scol_collider_uncached.Local(dv, 0x10),
+    });
+  }
+  parseOverrun(ab) {
+    document.getElementById('overrun').innerHTML = 'got overrun!';
+  }
+}
+
+let theBaseURL = 'ws://neb-solidus:8000';
+
+async function go() {
+  g_rpcConn = new RPCConn(theBaseURL);
+  g_hoseConn = new HoseConn(theBaseURL);
+  g_hoseConn.setWantOpen(true);
+  (async () => {
+    let lastFrameNum = 0;
+    while (1) {
+      if (g_rpcConn.isOpen) {
+        let stats = await g_rpcConn.reqGetStats();
+        let frames = '?';
+        let frame;
+        if (frame = g_hoseConn.prevFrameByWorldID.get(0n)) {
+          frames = frame.number - lastFrameNum;
+          lastFrameNum = frame.number;
+        }
+        console.log(`stats: overrunBytes=${stats.overrunBytes} sentBytes=${stats.sentBytes} frames=${frames}`);
+      }
+      await sleep(1000);
+    }
+  })();
+
+
+}
+go();
+
+/*
+async function test() {
+  theRPCConn = new RPCConn(theBaseURL);
+  let rpc_req = new Struct('rpc_req', 17, [
+    ['type', 0, u8],
+    ['rw_addr', 1, u64],
+    ['dummy', 1, CString],
+    ['rw_len', 9, u64],
+  ]);
+  let rl = new rpc_req.Local(new ArrayBuffer(17));
+  rl.rw_addr = 0x41414141;
+  console.log(rl.rw_addr);
+  console.log(rl.dummy);
+  let rr = new rpc_req.Remote(0x1000n);
+  //console.log(await rr.rw_len());
+  console.log('all done');
+}
+test();
+*/
+</script>

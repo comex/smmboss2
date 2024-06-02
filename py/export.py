@@ -77,10 +77,35 @@ def get_it():
     )
 
 def main():
-    data = get_it()
     import json, sys
-    json.dump(data, sys.stdout, indent=2)
-    print()
+    from pathlib import Path
+    out_file = Path(sys.argv[1])
+    deps_file = Path(sys.argv[2]) if len(sys.argv) > 2 else None
+
+    data = get_it()
+    try:
+        with open(out_file, 'w') as fp:
+            json.dump(data, fp, indent=2)
+            fp.write('\n')
+        if deps_file is not None:
+            py_dir = Path(__file__).resolve().parent
+            with open(deps_file, 'w') as fp:
+                fp.write(f'{str(out_file)}: \\\n')
+                for mod in sys.modules.values():
+                    try:
+                        path = mod.__file__
+                    except AttributeError:
+                        continue
+                    path = Path(path).resolve()
+                    if not path.is_relative_to(py_dir):
+                        continue
+                    fp.write(f' {str(path)}\\\n')
+                fp.write('\n')
+    except:
+        out_file.unlink(missing_ok=True)
+        if deps_file is not None:
+            deps_file.unlink(missing_ok=True)
+        raise
 
 if __name__ == '__main__':
     main()

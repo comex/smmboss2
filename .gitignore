@@ -1,3 +1,5 @@
 .*.sw*
 .sw*
 __pycache__
+/webclient/build
+/exlaunch/for-gdb

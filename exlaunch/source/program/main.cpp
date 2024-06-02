@@ -2,6 +2,7 @@
 #include "lib.hpp"
 #include "serve.hpp"
 #include "stuff.hpp"
+#include "generated.hpp"
 #include <stdarg.h>
 #include <array>
 #include <variant>
@@ -10,6 +11,7 @@
 #include "../../externals/xxhash/xxhash.h"
 
 std::atomic<uint64_t> g_hash_tweak;
+std::array<std::optional<BuildId>, exl::util::mem_layout::s_MaxModules> g_build_ids;
 
 // TODO: move this
 
@@ -31,19 +33,8 @@ void xprintf(const char *fmt, ...) {
     log_str(buf);
 }
 
-enum mm_version {
-    VER_301,
-    VER_302,
-    VER_COUNT,
-};
-
-static const mm_version s_cur_mm_version = VER_301; // XXX
+static mm_version s_cur_mm_version;
 static uintptr_t s_target_start;
-
-static uintptr_t assert_nonzero(uintptr_t offset) {
-    assert(offset);
-    return offset;
-}
 
 // -- Naming
 //
@@ -204,14 +195,10 @@ struct mm_hitbox {
     PROP(vtable, 0x0, uintptr_t);
     PSEUDO_TYPE_SIZE(0x1c8);
 
-    static constexpr uintptr_t vtable_offset[VER_COUNT] = {
-        [VER_301] = 0x028694a0,
-    };
-
     void verify() {
-        uintptr_t offset = vtable() - s_target_start;
-        if (offset != assert_nonzero(vtable_offset[s_cur_mm_version])) {
-            panic("mm_hitbox unexpected vtable %#lx", offset);
+        uintptr_t addr = vtable();
+        if (addr != mm_addrs::hitbox_vtable()) {
+            panic("mm_hitbox unexpected vtable %#lx", addr);
         }
     }
 };
@@ -255,9 +242,9 @@ struct mm_some_collider {
     PSEUDO_TYPE_UNSIZED;
 
     std::variant<mm_normal_collider *, mm_scol_collider *, std::monostate> downcast();
-    uintptr_t vt20_offset() const {
-        uintptr_t vt20 = *(uintptr_t *)((char *)vtable() + 0x20);
-        return vt20 - s_target_start;
+    uintptr_t vt20() const {
+        // just a random vtable method that doesn't differ between subclasses too much
+        return *(uintptr_t *)((char *)vtable() + 0x20);
     }
 };
 
@@ -269,12 +256,6 @@ struct mm_normal_collider : public mm_some_collider {
     PROP(segments_old, 0x3d0, mm_count_ptr<mm_collider_segment>);
 
     static constexpr size_t initial_dump_size = 0x3e0;
-
-    // virtual method @ 0x20 for all subclasses:
-    // (we don't care about the specific subclass for now)
-    static constexpr uintptr_t vt20_offset[VER_COUNT] = {
-        [VER_301] = 0xdd0e00,
-    };
 };
 
 struct mm_scol_collider : public mm_some_collider {
@@ -282,27 +263,16 @@ struct mm_scol_collider : public mm_some_collider {
 
     PROP(ext_pos_cur, 0x2a0, float *);
     PROP(ext_pos_old, 0x2a8, float *);
-
-    // virtual method @ 0x20 for two subclasses:
-    // (we don't care about the specific subclass for now)
-    static constexpr uintptr_t vt20_offset_1[VER_COUNT] = {
-        [VER_301] = 0xe192e0,
-    };
-    // virtual method @ 0x20 for another subclass:
-    static constexpr uintptr_t vt20_offset_2[VER_COUNT] = {
-        [VER_301] = 0xe23a70,
-    };
-
 };
 
 // Figure out what type of object this is.
 std::variant<mm_normal_collider *, mm_scol_collider *, std::monostate>
 mm_some_collider::downcast() {
-    uintptr_t vt20_offset = this->vt20_offset();
-    if (vt20_offset == assert_nonzero(mm_normal_collider::vt20_offset[s_cur_mm_version])) {
+    uintptr_t vt20 = this->vt20();
+    if (vt20 == mm_addrs::normal_collider_vt20()) {
         return (mm_normal_collider *)this;
-    } else if (vt20_offset == assert_nonzero(mm_scol_collider::vt20_offset_1[s_cur_mm_version]) ||
-               vt20_offset == assert_nonzero(mm_scol_collider::vt20_offset_2[s_cur_mm_version])) {
+    } else if (vt20 == mm_addrs::scol_vt20() ||
+               vt20 == mm_addrs::scol_subclass_vt20()) {
         return (mm_scol_collider *)this;
     } else {
         // unknown type
@@ -394,16 +364,12 @@ HOOK_DEFINE_TRAMPOLINE(Stub_StateMachine_changeState) {
         );
         Orig(sm, state);
     }
-    static constexpr uintptr_t offset[VER_COUNT] = {
-        [VER_301] = 0x8b9280,
-    };
+    static constexpr auto GetAddr = &mm_addrs::StateMachine_changeState;
 };
 
 template <typename StubFoo>
 void install() {
-    uintptr_t offset = StubFoo::offset[s_cur_mm_version];
-    assert(offset);
-    StubFoo::InstallAtOffset(assert_nonzero(StubFoo::offset[s_cur_mm_version]));
+    StubFoo::InstallAtPtr(StubFoo::GetAddr());
 }
 
 // just a simple hash table with lazy clearing
@@ -511,9 +477,7 @@ HOOK_DEFINE_TRAMPOLINE(Stub_hitbox_collide) {
         });
         return ret;
     }
-    static constexpr uintptr_t offset[VER_COUNT] = {
-        [VER_301] = 0xe28a50,
-    };
+    static constexpr auto GetAddr = &mm_addrs::hitbox_collide;
 };
 
 static void report_all_hitboxes(mm_AreaSystem *as) {
@@ -620,22 +584,62 @@ HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
         report_all_hitboxes(self);
         Orig(self);
     }
-    static constexpr uintptr_t offset[VER_COUNT] = {
-        [VER_301] = 0xe44320,
-    };
+    static constexpr auto GetAddr = &mm_addrs::AreaSystem_do_many_collisions;
 };
 
+static void fetch_build_ids() {
+    for (int mod_idx = 0; mod_idx < exl::util::mem_layout::s_ModuleCount; mod_idx++) {
+        const exl::util::Range &rodata = exl::util::GetModuleInfo(mod_idx).m_Rodata;
+
+        constexpr char gnu_tag[4] = "GNU";
+        size_t needle_size = sizeof(gnu_tag) + sizeof(BuildId);
+        if (rodata.m_Size < needle_size) {
+            continue;
+        }
+        const size_t haystack_size = std::min(rodata.m_Size, (size_t)0x1000) - needle_size;
+        const uintptr_t haystack_ptr = rodata.GetEnd() - needle_size;
+        for (size_t i = 0; i < haystack_size; i++) {
+            if (!memcmp((void *)haystack_ptr, gnu_tag, sizeof(gnu_tag))) {
+                BuildId &build_id = g_build_ids.at(mod_idx).emplace();
+                memcpy(&build_id, (void *)(haystack_ptr + sizeof(gnu_tag)), sizeof(build_id));
+            }
+        }
+    }
+}
+
+static void init_version() {
+    const BuildId &build_id = g_build_ids.at(exl::util::mem_layout::s_MainModuleIdx).value();
+    for (uint8_t i = 0; i < VER_COUNT; i++) {
+        if (s_version_to_build_id[i] == build_id) {
+            s_cur_mm_version = (mm_version)i;
+            return;
+        }
+    }
+    panic("unknown build ID");
+}
+
+
+uintptr_t get_addr_impl(const uintptr_t (&by_ver)[VER_COUNT], const char *name) {
+    uintptr_t offset = by_ver[s_cur_mm_version];
+    if (offset == MISSING_ADDR) {
+        panic("missing %s in addrs.yaml for this version", name);
+    }
+    return offset + s_target_start;
+}
+
 extern "C" void exl_main(void* x0, void* x1) {
-    /* Setup hooking enviroment. */
     s_target_start = exl::util::modules::GetTargetStart();
     xprintf("exl_main, TS=%lx", s_target_start);
+    fetch_build_ids();
+    init_version();
+
     exl::hook::Initialize();
 
     serve_main();
 
     //install<Stub_StateMachine_changeState>();
 
-    // this is for 3.0.1:
+    // this is for 3.0.1 (TODO: make version-dependent):
 
     {
         // Patch to skip intro cutscene

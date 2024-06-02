@@ -417,7 +417,7 @@ class ColliderListNodeOuter(GuestStruct):
         vt20 = guest.read64(vtable + 0x20)
         if vt20 == mm.addr.scol_vt20 or vt20 == mm.addr.scol_subclass_vt20:
             return Scol(raw.addr)
-        elif vt20 == mm.addr.collider_vt20:
+        elif vt20 == mm.addr.normal_collider_vt20:
             return Collider(raw.addr)
         else:
             return raw

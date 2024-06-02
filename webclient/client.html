@@ -986,6 +986,7 @@ class HoseConn {
 let theBaseURL = 'ws://neb-solidus:8000';
 
 async function go() {
+  g_exportJson = await (await fetch('build/export.json')).json();
   g_rpcConn = new RPCConn(theBaseURL);
   g_hoseConn = new HoseConn(theBaseURL);
   g_hoseConn.setWantOpen(true);

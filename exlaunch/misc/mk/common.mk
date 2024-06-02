@@ -36,7 +36,7 @@ INCLUDES	:=	include
 #---------------------------------------------------------------------------------
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIC -fvisibility=hidden
 
-CFLAGS	:=	-g -Wall -Werror -O3 \
+CFLAGS	:=	-g -Wall -Werror -O2 \
 			-ffunction-sections \
 			-fdata-sections \
 			$(ARCH) \
@@ -163,6 +163,12 @@ $(OFILES_SRC)	: $(HFILES_BIN)
 	@$(bin2o)
 
 -include $(DEPENDS)
+
+# added by comex
+$(DEPSDIR)/generated.hpp:
+	python3 $(TOPDIR)/../py/export.py cpp_header $(DEPSDIR)/generated.hpp $(DEPSDIR)/generated.hpp.d
+-include $(DEPSDIR)/generated.hpp.d
+$(OFILES_SRC): $(DEPSDIR)/generated.hpp
 
 #---------------------------------------------------------------------------------------
 endif

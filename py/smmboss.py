@@ -6,10 +6,13 @@ from threading import Lock
 from binascii import hexlify
 from functools import cache
 
+def addrs_yaml_path():
+    return os.path.join(os.path.dirname(__file__), '..', 'addrs.yaml')
+
 @cache
 def get_addrs_yaml():
     import yaml
-    return yaml.safe_load(open(os.path.join(os.path.dirname(__file__), '..', 'addrs.yaml')))
+    return yaml.safe_load(open(addrs_yaml_path()))
 
 @cache
 def _dotnote_addrs():

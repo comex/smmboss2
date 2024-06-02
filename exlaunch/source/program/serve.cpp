@@ -506,20 +506,30 @@ private:
             }
         }
     }
+    __attribute__((noinline))
     void send_hello(struct mg_connection *c) {
-        std::vector<uint64_t> info;
+        struct hello_mod_info {
+            exl::util::Range total, text, rodata, data;
+            BuildId build_id;
+        };
+        std::array<hello_mod_info, exl::util::mem_layout::s_MaxModules> hmis;
         for (int i = 0; i < exl::util::mem_layout::s_ModuleCount; i++) {
+            auto &hmi = hmis[i];
             const exl::util::ModuleInfo &mod_info = exl::util::GetModuleInfo(i);
-            auto do_range = [&](exl::util::Range range) {
-                info.push_back(range.m_Start);
-                info.push_back(range.m_Size);
-            };
-            do_range(mod_info.m_Total);
-            do_range(mod_info.m_Text);
-            do_range(mod_info.m_Rodata);
-            do_range(mod_info.m_Data);
+            hmi.total = mod_info.m_Total;
+            hmi.text = mod_info.m_Text;
+            hmi.rodata = mod_info.m_Rodata;
+            hmi.data = mod_info.m_Data;
+            const std::optional<BuildId> &build_id_opt = g_build_ids.at(i);
+            if (build_id_opt.has_value()) {
+                hmi.build_id = build_id_opt.value();
+            } else {
+                hmi.build_id = {};
+            }
         }
-        mg_ws_send(c, info.data(), info.size() * sizeof(info[0]), WEBSOCKET_OP_BINARY);
+        mg_ws_send(c, hmis.data(),
+                   exl::util::mem_layout::s_ModuleCount * sizeof(hmis[0]),
+                   WEBSOCKET_OP_BINARY);
     }
 
     void setup_log() {

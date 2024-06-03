@@ -285,6 +285,12 @@ class Struct extends CompoundType {
   }
 }
 
+mm = {};
+function loadStructs(exportJson) {
+
+}
+
+
 class Cond {
   constructor() {
     this.waiters = [];
@@ -572,110 +578,6 @@ class RPCConn {
 
 
 // --
-let mm_point2d = new Struct('mm_point2d', 8, [
-  ['x', 0x0, f32],
-  ['y', 0x4, f32],
-]);
-
-let mm_point3d = new Struct('mm_point3d', 0xc, [
-  ['x', 0x0, f32],
-  ['y', 0x4, f32],
-  ['z', 0x8, f32],
-]);
-
-let mm_size2d = new Struct('mm_size2d', 8, [
-  ['w', 0x0, f32],
-  ['h', 0x4, f32],
-]);
-
-
-let mm_rect = new Struct('mm_rect', 0x10, [
-  ['min', 0x0, mm_point2d],
-  ['max', 0x8, mm_point2d],
-]);
-mm_rect.Local.prototype.width = function() {
-  return this.max.x - this.min.x;
-}
-mm_rect.Local.prototype.height = function() {
-  return this.max.y - this.min.y;
-}
-
-let mm_hitbox_params = new Struct('mm_hitbox_params', 0x40, [
-  ['pos', 0x0, mm_point2d],
-  ['radius', 0x8, mm_size2d],
-  ['isCircle', 0x10, u32],
-  ['whichList', 0x14, u32],
-  ['f18', 0x18, u32],
-  ['f20', 0x20, u64],
-  ['f28', 0x28, u64],
-  ['flags', 0x30, u64],
-  ['callback', 0x38, u64],
-]);
-
-let mm_hitbox = new Struct('mm_hitbox', 0x1c8, [
-  ['params',     0x60,  mm_hitbox_params],
-  ['owner',      0xa8,  u64],
-  ['didCollide', 0x1b5, u8],
-  ['rect',       0x1b8, mm_rect],
-]);
-
-let mm_collider_segment = new Struct('mm_collider_segment', 0x18, [
-  ['whichSide', 0,    u8],
-  ['relPos1',   4,    mm_point2d],
-  ['relPos2',   0xc,  mm_point2d],
-  ['lastWord',  0x14, u32],
-]);
-
-// this is mm_normal_collider plus other stuff we append to it
-let mm_normal_collider_cached = new Struct('mm_normal_collider_cached', null, [
-  ['segmentsCurCount', 0x3c0, u32],
-  ['segmentsOldCount', 0x3d0, u32],
-]);
-mm_normal_collider_cached.Local.prototype.extraParse = function() {
-  let off = this.off + 0x3e0;
-  this.segmentsCur = [];
-  for (let i = 0, count = this.segmentsCurCount; i < count; i++) {
-    this.segmentsCur.push(new mm_collider_segment.Local(this.dv, off));
-    off += 0x18;
-  }
-  this.segmentsOld = [];
-  for (let i = 0, count = this.segmentsOldCount; i < count; i++) {
-    this.segmentsOld.push(new mm_collider_segment.Local(this.dv, off));
-    off += 0x18;
-  }
-  assert(off == this.dv.byteLength);
-}
-
-let mm_normal_collider_uncached = new Struct('mm_normal_collider_uncached', 'auto', [
-  ['extPosCur', 'auto', mm_point2d],
-  ['extPosOld', 'auto', mm_point2d],
-]);
-
-
-let mm_scol_collider_cached = new Struct('mm_scol_collider_cached', null, [
-  ['xxyPtrs', 0x1a8, new FixedArray(u64, 8)],
-  //['lineInfo', 
-]);
-mm_scol_collider_cached.Local.prototype.extraParse = function(ptr) {
-  this.addr = ptr;
-}
-mm_scol_collider_cached.Local.prototype.getPoint3D = function(i) {
-  let ptr = this.point3DPtrs.get(i);
-  if (!ptr) {
-    return null;
-  }
-  let offset = Number(ptr - this.addr);
-  assert(offset + this.off + 0xc <= this.dv.byteLength);
-  return new mm_point3d.Local(this.dv, this.off + offset);
-}
-mm_scol_collider_cached.Local.prototype.serializePoint3Ds = function() {
-    return Array.from(Array(8), (_, i) => this.getPoint3D(i).serialize());
-}
-
-let mm_scol_collider_uncached = new Struct('mm_scol_collider_uncached', 'auto', [
-  ['extPosCur', 'auto', mm_point2d],
-  ['extPosOld', 'auto', mm_point2d],
-]);
 
 // --
 
@@ -986,9 +888,20 @@ class HoseConn {
 let theBaseURL = 'ws://neb-solidus:8000';
 
 async function go() {
-  g_exportJson = await (await fetch('build/export.json')).json();
   g_rpcConn = new RPCConn(theBaseURL);
   g_hoseConn = new HoseConn(theBaseURL);
+  await Promise.all([
+    async () => {
+      g_exportJson = await (await fetch('build/export.json')).json();
+    },
+    async () => {
+      while (g_rpcConn.helloData === null) {
+        await g_rpcConn.updateCond;
+      }
+    },
+  ]);
+  loadStructs(g_exportJson, g_rpcConn.helloData);
+  console.log(g_rpcConn.helloData);
   g_hoseConn.setWantOpen(true);
   (async () => {
     let lastFrameNum = 0;

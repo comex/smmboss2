@@ -93,6 +93,7 @@ RELEVANT_VERSIONS = [301, 302]
 ROOT_CLASSES = [
     'AreaSystem',
     'Hitbox',
+    'hello_mod_info',
 ]
 
 def json_info():
@@ -158,6 +159,8 @@ using BuildId = std::array<uint8_t, 16>;
         p(f'        return get_addr_impl(by_ver, "{name}");')
         p('    }')
     p('};')
+
+# TODO: support autogenerating C++ structs too
 
 def main():
     import json, sys

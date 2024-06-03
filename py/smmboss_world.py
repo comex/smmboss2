@@ -741,6 +741,20 @@ class BgUnitGroupMgr(GuestStruct):
 def block_kind_info_array():
     return fixed_array(BlockKindInfo, 0x1e)(mm.addr.block_kind_info_array)
 
+
+###
+# These are not real Nintendo types but are used as part of the protocol
+class exl_util_Range(GuestStruct):
+    start = prop(0, u64)
+    size = prop(8, u64)
+class hello_mod_info(GuestStruct):
+    total    = prop(0,    exl_util_Range)
+    text     = prop(0x10, exl_util_Range)
+    rodata   = prop(0x20, exl_util_Range)
+    data     = prop(0x30, exl_util_Range)
+    build_id = prop(0x40, fixed_array(u8, 16))
+###
+
 def commandlike(f):
     f.commandlike = True
     return f

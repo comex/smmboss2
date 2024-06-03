@@ -40,8 +40,15 @@ def json_info_for_build(build_id, classes_to_export):
         cls_infos[cls.__name__] = None
         if issubclass(cls, world.GuestStruct):
             base = cls._base_guest_struct()
+            if base is not None:
+                add_info_for(base)
+
+            sizeof = getattr(cls, 'sizeof_star', None)
+            if isinstance(sizeof, property):
+                sizeof = None
             cls_info = {
                 'kind': 'struct',
+                'sizeof': sizeof,
                 'base': base and base.__name__,
                 'props': {},
             }
@@ -60,6 +67,7 @@ def json_info_for_build(build_id, classes_to_export):
                 'val_cls': cls.val_ty.__name__,
             }
         elif issubclass(cls, world.GuestFixedArrayBase):
+            add_info_for(cls.val_ptr_ty)
             cls_info = {
                 'kind': 'fixed_array',
                 'count': cls.count,
@@ -94,6 +102,10 @@ ROOT_CLASSES = [
     'AreaSystem',
     'Hitbox',
     'hello_mod_info',
+    'ColliderCached',
+    'ColliderSegment',
+    'Scol',
+    'ScolCached',
 ]
 
 def json_info():

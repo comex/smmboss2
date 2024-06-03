@@ -168,7 +168,7 @@ $(OFILES_SRC)	: $(HFILES_BIN)
 $(DEPSDIR)/generated.hpp:
 	python3 $(TOPDIR)/../py/export.py cpp_header $(DEPSDIR)/generated.hpp $(DEPSDIR)/generated.hpp.d
 -include $(DEPSDIR)/generated.hpp.d
-$(OFILES_SRC): $(DEPSDIR)/generated.hpp
+main.o: $(DEPSDIR)/generated.hpp
 
 $(DEPSDIR)/export.json:
 	python3 $(TOPDIR)/../py/export.py json $(DEPSDIR)/export.json $(DEPSDIR)/export.json.d

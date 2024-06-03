@@ -1,9 +1,9 @@
 #pragma once
-#include "generated.hpp"
-
 #include <atomic>
 #include <array>
 #include <optional>
+
+using BuildId = std::array<uint8_t, 16>;
 
 #include <lib/util/sys/mem_layout.hpp>
 

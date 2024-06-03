@@ -344,13 +344,13 @@ class ColliderSegment(GuestStruct):
     which_side = prop(0, u8)
     rel_pos_1 = prop(4, Point2D)
     rel_pos_2 = prop(0xc, Point2D)
-    last_word = prop(0x14, u32)
+    angle = prop(0x14, u32)
     sizeof_star = 0x18
 
 class ScolMidNode(GuestStruct):
     node = prop(0, SeadListNode)
     owner = prop(0x10, lambda: ptr_to(Collider))
-    scol_mid = prop(0x18, lambda: ptr_to(ScolMid))
+    scol_mid = prop(0x18, GuestPtrPtr)
 
 class Collider(GuestStruct):
     # aka HasBlockInfo
@@ -382,6 +382,8 @@ class Collider(GuestStruct):
     ext_size = prop(0x3b8, ptr_to(fixed_array(f32, 4)), dump_deep=True)
     segments_cur = prop(0x3c0, count4_ptr(ColliderSegment))
     segments_old = prop(0x3d0, count4_ptr(ColliderSegment))
+
+    sizeof_star = 0x3e0 # not necessarily right
 
 class BlockColliderOwner(GuestStruct):
     # aka HBO1
@@ -753,6 +755,11 @@ class hello_mod_info(GuestStruct):
     rodata   = prop(0x20, exl_util_Range)
     data     = prop(0x30, exl_util_Range)
     build_id = prop(0x40, fixed_array(u8, 16))
+    sizeof_star = 0x50
+class ColliderCached(Collider):
+    pass
+class ScolCached(Scol):
+    pass
 ###
 
 def commandlike(f):
@@ -817,7 +824,7 @@ def _print_collider(collider):
         print(f'           bbox: x:{bbox.min.x}-{bbox.max.x} y:{bbox.min.y}-{bbox.max.y} size:{width},{height}')
         segments = getattr(collider, f'segments_{kind}')
         for i, seg in enumerate(segments):
-            print(f'           segments[{i}]: x:{seg.rel_pos_1.x:5} - {seg.rel_pos_2.x:5} y:{seg.rel_pos_1.y:5} - {seg.rel_pos_2.y:5} which={seg.which_side} last={seg.last_word:#x}')
+            print(f'           segments[{i}]: x:{seg.rel_pos_1.x:5} - {seg.rel_pos_2.x:5} y:{seg.rel_pos_1.y:5} - {seg.rel_pos_2.y:5} which={seg.which_side} angle={seg.angle:#x}')
     bbox = collider.bbox_both
     width, height = bbox.size()
     print(f'    bbox_both: x:{bbox.min.x}-{bbox.max.x} y:{bbox.min.y}-{bbox.max.y} size:{width},{height}')

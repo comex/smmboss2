@@ -498,7 +498,9 @@ static void write_cached_dump(SeenCache::Entry *entry, std::optional<uint64_t> o
             uint64_t new_hash = XXH3_64bits(buf, len) ^ g_hash_tweak.load(std::memory_order_relaxed);
             entry->value = new_hash;
             // only send if this is new
-            return old_hash != new_hash;
+            bool ret = old_hash != new_hash;
+            // if (ret) { xprintf("sending new %p", buf); }
+            return ret;
         }
     );
 }
@@ -520,15 +522,11 @@ static void report_some_collider(mm_some_collider *some, int which_list) {
     if (auto ncp = std::get_if<mm_normal_collider *>(&downcasted)) {
         mm_normal_collider *nc = *ncp;
         write_cached_dump(entry, old_hash, [&](auto &w) {
-            w.write_tag({"normcl1"});
+            w.write_tag({"normcol"});
             w.write_prim(nc);
             w.write_raw(nc, mm_normal_collider::initial_dump_size);
             w.write_n(nc->segments_cur().ptr, nc->segments_cur().count);
             w.write_n(nc->segments_old().ptr, nc->segments_old().count);
-        });
-        s_hose.write_packet([&](auto &w) {
-            w.write_tag({"normcl2"});
-            w.write_prim(nc);
             w.write_n(nc->ext_pos_cur() ?: dummy_pos, 2);
             w.write_n(nc->ext_pos_old() ?: dummy_pos, 2);
         });
@@ -536,13 +534,9 @@ static void report_some_collider(mm_some_collider *some, int which_list) {
         (void)scp;
         mm_scol_collider *sc = *scp;
         write_cached_dump(entry, old_hash, [&](auto &w) {
-            w.write_tag({"scolcl1"});
+            w.write_tag({"scolcol"});
             w.write_prim(sc);
             w.write_raw(sc, mm_scol_collider::initial_dump_size);
-        });
-        s_hose.write_packet([&](auto &w) {
-            w.write_tag({"scolcl2"});
-            w.write_prim(sc);
             w.write_n(sc->ext_pos_cur() ?: dummy_pos, 2);
             w.write_n(sc->ext_pos_old() ?: dummy_pos, 2);
         });
@@ -596,13 +590,14 @@ static void fetch_build_ids() {
         if (rodata.m_Size < needle_size) {
             continue;
         }
-        const size_t haystack_size = std::min(rodata.m_Size, (size_t)0x1000) - needle_size;
-        const uintptr_t haystack_ptr = rodata.GetEnd() - needle_size;
+        size_t haystack_size = std::min(rodata.m_Size, (size_t)0x1000) - needle_size;
+        uintptr_t haystack_ptr = rodata.GetEnd() - needle_size;
         for (size_t i = 0; i < haystack_size; i++) {
             if (!memcmp((void *)haystack_ptr, gnu_tag, sizeof(gnu_tag))) {
                 BuildId &build_id = g_build_ids.at(mod_idx).emplace();
                 memcpy(&build_id, (void *)(haystack_ptr + sizeof(gnu_tag)), sizeof(build_id));
             }
+            haystack_ptr--;
         }
     }
 }

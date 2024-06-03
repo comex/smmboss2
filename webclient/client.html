@@ -37,8 +37,8 @@ async function doWrite(addr, data) {
   }
 }
 
-class BaseType {}
-class IntBaseType extends BaseType {
+class Primitive {}
+class IntType extends Primitive {
   constructor(name, sizeof, dataViewName, {needBigWrap} = {}) {
     super();
     this.name = name;
@@ -73,29 +73,19 @@ class IntBaseType extends BaseType {
   }
 }
 
-let u8  = new IntBaseType('u8',  1, 'Uint8');
-let u16 = new IntBaseType('u16', 2, 'Uint16');
-let u32 = new IntBaseType('u32', 4, 'Uint32');
-let u64 = new IntBaseType('u64', 8, 'BigUint64', {needBigWrap: true});
-let s8  = new IntBaseType('s8',  1, 'Int8');
-let s16 = new IntBaseType('s16', 2, 'Int16');
-let s32 = new IntBaseType('s32', 4, 'Int32');
-let s64 = new IntBaseType('s64', 8, 'BigInt64', {needBigWrap: true});
-let f32 = new IntBaseType('f32', 4, 'Float32');
-let f64 = new IntBaseType('f64', 8, 'Float64');
-
 
 let utf8Decoder = new TextDecoder();
-let CString = new BaseType;
-CString.getLocal = (dv, off) => {
-  let maxLen = Math.min(0x1000, dv.byteLength - off);
-  let len = 0;
-  while (len < maxLen && dv.getInt8(off + len) != 0) {
-    len++;
+class CStringType extends Primitive {
+  getLocal(dv, off) {
+    let maxLen = Math.min(0x1000, dv.byteLength - off);
+    let len = 0;
+    while (len < maxLen && dv.getInt8(off + len) != 0) {
+      len++;
+    }
+    let u8 = new Uint8Array(dv.buffer, dv.byteOffset + off, len);
+    return utf8Decoder.decode(u8);
   }
-  let u8 = new Uint8Array(dv.buffer, dv.byteOffset + off, len);
-  return utf8Decoder.decode(u8);
-};
+}
 
 class CompoundType {}
 
@@ -105,7 +95,7 @@ class FixedArrayLocal {
     this.off = off;
   }
   serialize() {
-    return Array.from(Array(count), (_, i) => this.get(i));
+    return Array.from(Array(this.count), (_, i) => this.get(i));
   }
 }
 
@@ -127,11 +117,12 @@ class FixedArray extends CompoundType {
           assert(i >= 0 && i < count);
           let ret = this._cache[i];
           if (ret === undefined) {
-            ret = this._cache[i] = new elmTy(this.dv, this.off + i * elmTySizeof);
+            ret = this._cache[i] = new elmTy.Local(this.dv, this.off + i * elmTySizeof);
           }
           return ret;
         }
       }
+      Local.prototype.count = count;
       this.Local = Local;
     } else {
       let getLocal = elmTy.getLocal;
@@ -144,22 +135,33 @@ class FixedArray extends CompoundType {
           return getLocal(this.dv, this.off + i * elmTySizeof);
         }
         // could implement set
+        toHex() {
+          assert(elmTy == mm.u8);
+          let str = '';
+          for (let i = 0; i < count; i++) {
+            str += this.get(i).toString(16).padStart(2, '0');
+          }
+          return str;
+        }
       }
+      Local.prototype.count = count;
       this.Local = Local;
     }
   }
 }
 
 class StructLocal {
-  constructor(struct, dv, off) {
-    this.struct = struct;
+  constructor(dv, off) {
     this.dv = (dv instanceof DataView) ? dv : new DataView(dv);
-    assert(this.dv.byteLength >= off + struct.sizeof);
+    let sizeof = this.struct.sizeof;
+    if (sizeof !== null) {
+      assert(this.dv.byteLength >= off + this.struct.sizeof);
+    }
     this.off = off;
   }
   serialize() {
     let ret = {};
-    for (let [fieldName, ..._] of this.struct.fields) {
+    for (let {fieldName} of this.struct.fields) {
       let val = this[fieldName];
       if (val.serialize !== undefined) {
         val = val.serialize();
@@ -172,41 +174,40 @@ class StructLocal {
 }
 
 class Struct extends CompoundType {
-  constructor(name, sizeof, fields) {
+  constructor(name, info, extraLocalMethods) {
     super();
     this.name = name;
-    this.sizeof = sizeof;
-    this.fields = fields;
-    this.doAutoSizes();
-    this.Local = this.makeLocalClass();
-    this.Remote = this.makeRemoteClass();
+    this.sizeof = info.sizeof ?? null;
+    this.info = info;
+    this.extraLocalMethods = extraLocalMethods;
+    this.saneName = this.name.replaceAll(/[\(\),]/g, '_');
   }
-  doAutoSizes() {
-    let prevOff = 0;
-    for (let i = 0; i < this.fields.length; i++) {
-      let [fieldName, off, ty] = this.fields[i];
-      if (off === 'auto') {
-        assert(prevOff !== null);
-        off = prevOff;
-        this.fields[i] = [fieldName, off, ty];
-      }
-      prevOff = ty.sizeof === null ? null : (off + ty.sizeof);
-    }
-    if (this.sizeof === 'auto') {
-      assert(prevOff !== null);
-      this.sizeof = prevOff;
-    }
 
+  // lazy to avoid issues with recursion
+  get fields() {
+    if (this._fields !== undefined) {
+      return this._fields;
+    }
+    this._fields = [];
+    for (let [fieldName, {offset, ptr_cls}] of Object.entries(this.info.props)) {
+      this._fields.push({fieldName, off: offset, ty: mm.loadType(ptr_cls)});
+    }
+    return this._fields;
   }
-  makeLocalClass() {
-    let argNames = ['struct'];
-    let argVals = [this];
+
+  get Local() {
+    if (this._Local !== undefined) {
+      return this._Local;
+    }
+    let superclass = this.info.base ? mm.loadType(this.info.base).Local : StructLocal;
+    let argNames = ['superclass'];
+    let argVals = [superclass];
     let code = `
-      class ${this.name}_Local extends StructLocal {
+      class ${this.saneName}_Local extends superclass {
         constructor(dv, off = 0) {
-          super(struct, dv, off);
+          super(dv, off);
     `
-    for (let [fieldName, off, ty] of this.fields) {
+    for (let {fieldName, off, ty} of this.fields) {
       if (ty instanceof CompoundType) {
         code += `
           this._${fieldName} = undefined;
@@ -216,8 +217,8 @@ class Struct extends CompoundType {
     code += `
         }
     `;
-    for (let [fieldName, off, ty] of this.fields) {
-      if (ty instanceof BaseType) {
+    for (let {fieldName, off, ty} of this.fields) {
+      if (ty instanceof Primitive) {
         argNames.push(`getLocal_${fieldName}`, `setLocal_${fieldName}`);
         argVals.push(ty.getLocal, ty.setLocal);
         code += `
@@ -241,14 +242,21 @@ class Struct extends CompoundType {
     }
     code += `
       }
-      return ${this.name}_Local;
+      return ${this.saneName}_Local;
     `;
     let cls = new Function(...argNames, code)(...argVals);
-    for (let [fieldName, off, ty] of this.fields) {
+    cls.prototype.struct = this;
+    for (let {fieldName, off, ty} of this.fields) {
       cls.prototype[`offsetof_${fieldName}`] = off;
     }
+    if (this.extraLocalMethods) {
+      // inject a subclass
+      cls = this.extraLocalMethods(cls);
+    }
+    this._Local = cls;
     return cls;
   }
+  /*
   makeRemoteClass() {
     // TODO: redo this to be more useful
     let argNames = [];
@@ -260,7 +268,7 @@ class Struct extends CompoundType {
         }
     `;
     for (let [fieldName, off, ty] of this.fields) {
-      if (ty instanceof BaseType) {
+      if (ty instanceof Primitive) {
         argNames.push(`getRemote_${fieldName}`, `setRemote_${fieldName}`);
         argVals.push(ty.getRemote, ty.setRemote);
         let setterName = 'set' + fieldName[0].toUpperCase() + fieldName.slice(1);
@@ -283,12 +291,96 @@ class Struct extends CompoundType {
     `;
     return new Function(...argNames, code)(...argVals);
   }
+  */
 }
 
-mm = {};
-function loadStructs(exportJson) {
+class MM {
+  constructor() {
+    this.u8  = new IntType('u8',  1, 'Uint8');
+    this.u16 = new IntType('u16', 2, 'Uint16');
+    this.u32 = new IntType('u32', 4, 'Uint32');
+    this.u64 = new IntType('u64', 8, 'BigUint64', {needBigWrap: true});
+    this.s8  = new IntType('s8',  1, 'Int8');
+    this.s16 = new IntType('s16', 2, 'Int16');
+    this.s32 = new IntType('s32', 4, 'Int32');
+    this.s64 = new IntType('s64', 8, 'BigInt64', {needBigWrap: true});
+    this.f32 = new IntType('f32', 4, 'Float32');
+    this.f64 = new IntType('f64', 8, 'Float64');
+    this.CString = this.GuestCString = new CStringType;
+    this.GuestPtr = this.u64;
+    this.extraLocalMethodsFor = {};
+  }
 
+  loadType(name) {
+    if (this[name] !== undefined) {
+      return this[name];
+    }
+    let info = this.classes[name];
+    if (info === undefined) {
+      throw new Error(`struct ${name} not defined in json`);
+    }
+    let ty;
+    switch (info.kind) {
+    case 'primitive':
+      // should be predefined
+      throw new Error(`unknown primitive '${name}'`);
+    case 'fixed_array':
+      ty = new FixedArray(this.loadType(info.val_ptr_cls), info.count);
+      break;
+    case 'struct':
+      ty = new Struct(name, info, this.extraLocalMethodsFor[name]);
+      break;
+    case 'ptr':
+      ty = this.GuestPtr; // todo: typing
+      break;
+    default:
+      throw new Error(`unknown kind '${info.kind}'`);
+    }
+    this[name] = ty;
+    return ty;
+  }
+
+  loadHelloDataAndTypes(helloData, exportJson) {
+    // Temporarily choose an arbitrary version in order to pick up the protocol structs:
+    this.classes = Object.values(exportJson)[0].classes;
+    this.loadType('hello_mod_info');
+    let count = helloData.byteLength / this.hello_mod_info.sizeof;
+    this.theHelloModInfo = new (new FixedArray(this.hello_mod_info, count).Local)(helloData, 0);
+    let buildId = this.theHelloModInfo.get(1).build_id.toHex() + '00000000000000000000000000000000';
+    assert(buildId in exportJson);
+    this.export = exportJson[buildId];
+    this.classes = this.export.classes;
+    for (let name in this.classes) {
+      this.loadType(name);
+    }
+  }
 }
+mm = new MM;
+mm.extraLocalMethodsFor.Rect = (base) => class extends base {
+  width() {
+    return this.max.x - this.min.x;
+  }
+  height() {
+    return this.max.y - this.min.y;
+  }
+};
+mm.extraLocalMethodsFor.ColliderCached = (base) => class extends base {
+  constructor(dv, baseOff) {
+    super(dv, baseOff);
+    let off = baseOff + this.struct.sizeof;
+    this.segmentsCur = [];
+    for (let i = 0, count = this.segments_cur.count; i < count; i++) {
+      this.segmentsCur.push(new mm.ColliderSegment.Local(this.dv, off));
+      off += mm.ColliderSegment.sizeof;
+    }
+    this.segmentsOld = [];
+    for (let i = 0, count = this.segments_old.count; i < count; i++) {
+      this.segmentsOld.push(new mm.ColliderSegment.Local(this.dv, off));
+      off += mm.ColliderSegment.sizeof;
+    }
+    assert(off == this.dv.byteLength);
+  }
+};
 
 
 class Cond {
@@ -662,8 +754,8 @@ class DiagramNormalColliders extends DiagramThingKind {
     return this.diagram.curFrame.normalColliders;
   }
   renderThing(ptr, {cached, uncached, uniqueDumpId}) {
-    let extX = uncached.extPosCur.x;
-    let extY = uncached.extPosCur.y;
+    let extX = uncached.ext_pos_cur.x;
+    let extY = uncached.ext_pos_cur.y;
     let dia = this.diagram;
     for (let i = 0; i < cached.segmentsCur.length; i++) {
       let seg = cached.segmentsCur[i];
@@ -677,10 +769,10 @@ class DiagramNormalColliders extends DiagramThingKind {
       line.drawnExtX = extX;
       line.drawnExtY = extY;
       line.drawnUniqueDumpId = uniqueDumpId;
-      line.setAttribute('x1', dia.transformX(seg.relPos1.x + extX));
-      line.setAttribute('y1', dia.transformY(seg.relPos1.y + extY));
-      line.setAttribute('x2', dia.transformX(seg.relPos2.x + extX));
-      line.setAttribute('y2', dia.transformY(seg.relPos2.y + extY));
+      line.setAttribute('x1', dia.transformX(seg.rel_pos_1.x + extX));
+      line.setAttribute('y1', dia.transformY(seg.rel_pos_1.y + extY));
+      line.setAttribute('x2', dia.transformX(seg.rel_pos_2.x + extX));
+      line.setAttribute('y2', dia.transformY(seg.rel_pos_2.y + extY));
       line.setAttribute('stroke', 'red');
       line.setAttribute('stroke-width', 4);
     }
@@ -697,10 +789,10 @@ class DiagramScolColliders extends DiagramThingKind {
       let seg = cached.segmentsCur[i];
       let fakePtr = ptr + BigInt(i);
       let line = this.getOrCreateElmFor(fakePtr, 'line');
-      line.setAttribute('x1', dia.transformX(seg.relPos1.x + uncached.extPosCur.x));
-      line.setAttribute('y1', dia.transformY(seg.relPos1.y + uncached.extPosCur.y));
-      line.setAttribute('x2', dia.transformX(seg.relPos2.x + uncached.extPosCur.x));
-      line.setAttribute('y2', dia.transformY(seg.relPos2.y + uncached.extPosCur.y));
+      line.setAttribute('x1', dia.transformX(seg.rel_pos_1.x + uncached.ext_pos_cur.x));
+      line.setAttribute('y1', dia.transformY(seg.rel_pos_1.y + uncached.ext_pos_cur.y));
+      line.setAttribute('x2', dia.transformX(seg.rel_pos_2.x + uncached.ext_pos_cur.x));
+      line.setAttribute('y2', dia.transformY(seg.rel_pos_2.y + uncached.ext_pos_cur.y));
       line.setAttribute('stroke', 'red');
       line.setAttribute('stroke-width', 4);
     }
@@ -767,7 +859,7 @@ class HoseConn {
       this.parseDoMany(ab);
       break;
     case 'hitbox\0\0':
-      this.parsemm_hitbox(ab);
+      this.parseHitbox(ab);
       break;
     case 'normcl1\0':
     case 'scolcl1\0':
@@ -816,12 +908,12 @@ class HoseConn {
       ret: u64[2],
     });
   }
-  parsemm_hitbox(ab) {
+  parseHitbox(ab) {
     let ptr = new BigUint64Array(ab)[1];
     if (!this.curFrame) {
       return;
     }
-    this.curFrame.hitboxes.set(ptr, new mm_hitbox.Local(new DataView(ab, 0x10)));
+    this.curFrame.hitboxes.set(ptr, new mm.Hitbox.Local(new DataView(ab, 0x10)));
   }
   parseSomeColliderCachedPart(ab) {
     let ptr = new DataView(ab).getBigUint64(8, true);
@@ -846,11 +938,10 @@ class HoseConn {
     if (!dump) {
       return;
     }
-    let cached = new mm_normal_collider_cached.Local(dump, 0);
-    cached.extraParse();
+    let cached = new mm.ColliderCached.Local(dump, 0);
     this.curFrame.normalColliders.set(ptr, {
       cached: cached,
-      uncached: new mm_normal_collider_uncached.Local(dv, 0x10),
+      uncached: new mm.ColliderUncached.Local(dv, 0x10),
       uniqueDumpId: dump.uniqueDumpId,
     });
   }
@@ -861,11 +952,10 @@ class HoseConn {
       //console.log(`missing scol ${ptr}`);
       return;
     }
-    let cached = new mm_scol_collider_cached.Local(dump, 0);
-    cached.extraParse(ptr);
+    let cached = new mm.Scol.Local(dump, 0);
     this.curFrame.scolColliders.set(ptr, {
       cached,
-      uncached: new mm_scol_collider_uncached.Local(dv, 0x10),
+      uncached: new mm.ColliderUncached.Local(dv, 0x10),
     });
   }
   parseOverrun(ab) {
@@ -888,8 +978,7 @@ async function go() {
       }
     })(),
   ]);
-  loadStructs(g_exportJson, g_rpcConn.helloData);
-  console.log(g_rpcConn.helloData);
+  mm.loadHelloDataAndTypes(g_rpcConn.helloData, g_exportJson);
   g_hoseConn.setWantOpen(true);
   (async () => {
     let lastFrameNum = 0;

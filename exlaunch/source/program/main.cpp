@@ -11,7 +11,6 @@
 #include "../../externals/xxhash/xxhash.h"
 #include "stupid_hash.hpp"
 
-std::atomic<uint64_t> g_hash_tweak;
 std::array<std::optional<BuildId>, exl::util::mem_layout::s_MaxModules> g_build_ids;
 
 // TODO: move this
@@ -373,85 +372,14 @@ void install() {
     StubFoo::InstallAtPtr(StubFoo::GetAddr());
 }
 
-// just a simple hash table with lazy clearing
-struct SeenCache {
-    struct Entry {
-        uint64_t key:48,
-                 epoch:16;
-        uint64_t value;
-    };
-
-    std::pair<Entry *, bool> lookup(void *object, bool insert) {
-        assert(object != nullptr);
-        uint64_t key = form_key(object);
-        size_t idx = (size_t)(key % NUM_ENTRIES);
-        size_t nchecked = 0;
-        uint64_t cur_epoch = cur_epoch_;
-        while (nchecked < NUM_ENTRIES) {
-            Entry *ent = &entries_[idx];
-            if (ent->key == 0 || ent->epoch != cur_epoch) {
-                if (!insert) {
-                    ent = nullptr;
-                } else if (count_ == MAX_COUNT) {
-                    xprintf("hash was full");
-                    // TODO: report this better
-                    ent = nullptr;
-                } else {
-                    ent->epoch = cur_epoch;
-                    ent->key = key;
-                    count_++;
-                }
-                return std::make_pair(ent, false);
-            }
-            if (ent->key == key) {
-                return std::make_pair(ent, true);
-            }
-
-            idx = (idx + 1) % NUM_ENTRIES;
-            nchecked++;
-        }
-        panic("table was unexpectedly full");
-    }
-
-    uint64_t form_key(/*uint32_t world_id, */ void *object) {
-        uintptr_t object_up = (uintptr_t)object;
-        uint64_t mask = ((uint64_t)1 << 48) - 1;//((uint64_t)1 << 2);
-        if ((object_up & ~mask) || object_up == 0) {
-            panic("bad object pointer %p (mask=%#lx)", object, mask);
-        }
-        //assert(world_id < (1 << 2));
-        return object_up /*| world_id*/;
-    }
-
-    void clear() {
-        cur_epoch_++;
-        count_ = 0;
-
-        // clear out entries on a rolling basis
-        size_t possible_epochs = 1 << 16;
-        size_t to_clear_per_epoch = (NUM_ENTRIES + possible_epochs - 1) / possible_epochs;
-        // ^ might just be 1
-        for (size_t i = cur_epoch_ * to_clear_per_epoch;
-                    i < (cur_epoch_ + 1) * to_clear_per_epoch && i < NUM_ENTRIES;
-                    i++) {
-            entries_[i] = Entry{};
-        }
-    }
-
-    static constexpr size_t NUM_ENTRIES = 24593;
-    static constexpr size_t MAX_COUNT = NUM_ENTRIES / 2;
-    std::array<Entry, NUM_ENTRIES> entries_{};
-    uint16_t cur_epoch_ = 0;
-    size_t count_ = 0;
-};
-
-static SeenCache s_seen_caches[2];
-static SeenCache *s_seen_cache_cur = &s_seen_caches[0];
-static SeenCache *s_seen_cache_old = &s_seen_caches[1];
+StupidHash<UInt48, Packed<uint64_t>, 1023> s_hashed_colliders;
+std::atomic<bool> g_hashed_colliders_want_clear;
+StupidHash<UInt48, Nothing, 1023> s_hitboxes_this_frame;
 
 static void report_hitbox(mm_hitbox *hb, bool surprise) {
     hb->verify();
-    if (s_seen_cache_cur->lookup(hb, /*insert*/ true).second) {
+    UInt48 hb_compressed((uintptr_t)hb);
+    if (s_hitboxes_this_frame.lookup(hb_compressed, /*insert*/ true).second) {
         // already seen
         return;
     }
@@ -461,7 +389,7 @@ static void report_hitbox(mm_hitbox *hb, bool surprise) {
     s_hose.write_packet([&](auto &w) {
         w.write_tag({"hitbox"});
         w.write_prim(hb);
-        w.write_range(hb, (char *)hb + pt_size_of<mm_hitbox>);
+        w.write_prim(*hb);
     });
 }
 
@@ -492,7 +420,7 @@ static void report_all_hitboxes(mm_AreaSystem *as) {
     }
 }
 
-static void write_cached_dump(SeenCache::Entry *entry, std::optional<uint64_t> old_hash, auto &&write_callback) {
+static void write_cached_dump(decltype(s_hashed_colliders)::Entry *entry, std::optional<uint64_t> old_hash, auto &&write_callback) {
     s_hose.write_packet(
         std::move(write_callback),
         [&](uint8_t *buf, size_t len) -> bool {
@@ -508,14 +436,14 @@ static void write_cached_dump(SeenCache::Entry *entry, std::optional<uint64_t> o
 
 static void report_some_collider(mm_some_collider *some, int which_list) {
     static const float dummy_pos[2]{};
-    auto [entry, found] = s_seen_cache_cur->lookup(some, /*insert*/ true);
-    if (found || !entry) {
+    UInt48 some_compressed((uintptr_t)some);
+    auto [entry, found] = s_hashed_colliders.lookup(some_compressed, /*insert*/ true);
+    if (!entry) {
         return;
     }
     std::optional<uint64_t> old_hash;
-    if (auto [old_entry, old_found] = s_seen_cache_old->lookup(some, /*insert*/ false);
-        old_found) {
-        old_hash = old_entry->value;
+    if (found) {
+        old_hash = entry->value;
     }
 
     auto downcasted = some->downcast();
@@ -575,11 +503,17 @@ static void report_all_colliders(mm_AreaSystem *as) {
     }
 }
 
+static void frame_start_actions() {
+    s_hitboxes_this_frame.clear();
+    if (g_hashed_colliders_want_clear.load(std::memory_order_relaxed)) {
+        s_hashed_colliders.clear();
+    }
+}
+
 HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
     static void Callback(mm_AreaSystem *self) {
         if (self->world_id() == 0) {
-            std::swap(s_seen_cache_cur, s_seen_cache_old);
-            s_seen_cache_cur->clear();
+            frame_start_actions();
         }
         s_hose.write_packet([&](auto &w) {
             w.write_tag({"do_many"});
@@ -672,6 +606,4 @@ extern "C" NORETURN void exl_exception_entry() {
     log_str("exl_exception_entry");
     EXL_ABORT(0x420);
 }
-
-// tilted blocks: p/x *(int*)($slide+0x00da3ae8 ) = 0x1e2a1000
 

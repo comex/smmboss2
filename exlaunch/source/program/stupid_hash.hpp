@@ -4,11 +4,12 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 #include <utility>
 #ifdef FUZZ_TEST
 #include <assert.h>
 #else
-#include "stuff.h"
+#include "stuff.hpp"
 #endif
 
 template <typename T>
@@ -20,6 +21,20 @@ struct __attribute__((packed)) Packed {
     Packed &operator=(const T &t) {
         val_ = t;
         return *this;
+    }
+};
+
+struct UInt48 {
+    uint8_t bytes[6];
+    UInt48() : bytes{{}} {}
+    UInt48(const uint64_t &val) {
+        assert(val >> 48 == 0);
+        memcpy(bytes, &val, sizeof(bytes));
+    }
+    operator uint64_t() const {
+        uint64_t val = 0;
+        memcpy(&val, bytes, sizeof(bytes));
+        return val;
     }
 };
 
@@ -42,7 +57,7 @@ struct StupidHash {
         }
     }
 
-    Packed<EntryIdx> * nexts_prev(Entry *entry) {
+    Packed<EntryIdx> *nexts_prev(Entry *entry) {
         if (entry->next == 0) {
             return nullptr;
         } else {
@@ -153,10 +168,17 @@ clang++ -std=c++20 -o /tmp/sh-fuzz -fsanitize=fuzzer -DFUZZ_TEST -x c++ stupid_h
 #include <span>
 #include <vector>
 namespace fuzz {
-    using KeyTy = uint32_t;
-    using ValTy = uint32_t;
+    using KeyTy = UInt48;
+    using ValTy = Packed<uint32_t>;
+
+    struct HashKeyTy {
+        size_t operator()(const KeyTy &key) const {
+            return key;
+        }
+    };
+
     using SH = StupidHash<KeyTy, ValTy, 3000, 3000>;
-    using UM = std::unordered_map<KeyTy, ValTy>;
+    using UM = std::unordered_map<KeyTy, ValTy, HashKeyTy>;
 
     template <typename T>
     T shift(std::span<const uint8_t> *span) {
@@ -229,6 +251,7 @@ namespace fuzz {
                 auto [entry2, was_found2] = sh.find_entry(key, false);
                 assert(!was_found2);
                 assert(um.erase(key) == 1);
+                break;
             }
             }
 

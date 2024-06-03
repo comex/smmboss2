@@ -9,6 +9,7 @@
 #include <optional>
 #include <utility>
 #include "../../externals/xxhash/xxhash.h"
+#include "stupid_hash.hpp"
 
 std::atomic<uint64_t> g_hash_tweak;
 std::array<std::optional<BuildId>, exl::util::mem_layout::s_MaxModules> g_build_ids;

@@ -1,14 +1,20 @@
 #include "serve.hpp"
-#include "common.hpp"
 #include "stuff.hpp"
 #include "main.hpp"
+#include "syscalls.h"
+
+#include <string.h>
+
 #include <vector>
 #include <algorithm>
-#include <string.h>
 #include <mutex>
+
+#include "common.hpp"
 #include "util/modules.hpp"
-#include "syscalls.h"
+
 #include "../../externals/mongoose/mongoose.h"
+
+#include "nn/time/time_timespan.hpp"
 
 size_t add_ws_header_size(size_t size) {
     if (size < 126) {
@@ -171,6 +177,10 @@ static size_t safe_memcpy(void *dst, bool check_dst,
 #define offsetof_end(ty, what) \
     (offsetof(ty, what) + sizeof(((ty *)0)->what))
 
+void hose::init() {
+    nn::os::InitializeEvent(&sent_event_, /*signaled*/ false, nn::os::EventClearMode_AutoClear);
+}
+
 void hose::push_fd(int fd) {
     xprintf("hose::push_fd(%d)", fd);
     // disable nonblock
@@ -203,8 +213,10 @@ void hose::do_iter() {
             close(cur_fd_);
         }
         cur_fd_ = new_fd;
-        // drop existing buffer srince it might have a half-sent frame
+        // drop existing buffer since it might have a half-sent packet
         read_offset_.store(write_info.write_offset, std::memory_order_release);
+
+        note_new_hose_connection();
         return;
     }
 
@@ -247,6 +259,7 @@ void hose::do_iter() {
     read_offset += (size_t)actual;
     assert(read_offset <= sizeof(buf_));
     read_offset_.store(read_offset, std::memory_order_release);
+    nn::os::SignalEvent(&sent_event_);
 }
 
 void hose::do_sleep() {
@@ -255,7 +268,7 @@ void hose::do_sleep() {
 
 std::tuple<bool, hose::write_info> hose::reserve_space_and_write_header(size_t body_size, bool for_overrun) {
     assert_on_write_thread();
-
+retry:
     uint32_t read_offset = read_offset_.load(std::memory_order_acquire);
     write_info write_info = write_info_.load(std::memory_order_relaxed);
 
@@ -285,6 +298,9 @@ std::tuple<bool, hose::write_info> hose::reserve_space_and_write_header(size_t b
         fill_ws_header(buf_ + write_info.write_offset, body_size);
     } else {
         assert(!for_overrun);
+        if (backpressure()) {
+            goto retry;
+        }
         if (!write_info.just_wrote_overrun) {
             write_overrun();
         }
@@ -295,6 +311,31 @@ std::tuple<bool, hose::write_info> hose::reserve_space_and_write_header(size_t b
     write_info.just_wrote_overrun = for_overrun;
     write_info.wrap_offset = std::max(write_info.wrap_offset, write_info.write_offset);
     return std::make_tuple(ok, write_info);
+}
+
+bool hose::backpressure() {
+    if (enable_backpressure_.load(std::memory_order_seq_cst)) {
+        const auto &tick_manager = nn::os::detail::GetTickManager();
+        auto before = tick_manager.GetTick();
+        // use a timed wait so that we still increase backpressured_nsec
+        // periodically while waiting
+        nn::os::TimedWaitEvent(&sent_event_, nn::TimeSpan::FromNanoSeconds(500'000'000));
+        auto after = tick_manager.GetTick();
+        int64_t ns = (after - before).ToTimeSpan().GetNanoSeconds();
+        assert(ns >= 0);
+        backpressured_nsec_.fetch_add((uint64_t)ns, std::memory_order_relaxed);
+        return true; // retry
+    }
+    return false;
+}
+
+void hose::set_enable_backpressure(bool enable) {
+    // seq_cst here and above since this would need to be
+    // load-release/store-acquire otherwise
+    enable_backpressure_.store(enable, std::memory_order_seq_cst);
+    if (!enable) {
+        nn::os::SignalEvent(&sent_event_);
+    }
 }
 
 void hose::write_overrun() {
@@ -355,7 +396,7 @@ private:
         RPC_REQ_READ = 1,
         RPC_REQ_WRITE = 2,
         RPC_REQ_GET_STATS = 3,
-        RPC_REQ_SET_HASH_TWEAK = 4,
+        RPC_REQ_SET_ENABLE_BACKPRESSURE = 4,
     };
 
     struct rpc_req {
@@ -372,8 +413,8 @@ private:
             } __attribute__((packed)) write;
             char get_stats[0];
             struct {
-                uint64_t tweak;
-            } __attribute__((packed)) set_hash_tweak;
+                uint8_t enabled;
+            } __attribute__((packed)) set_enable_backpressure;
         };
 
     } __attribute__((packed));
@@ -438,23 +479,24 @@ private:
             struct {
                 uint64_t overrun_bytes;
                 uint64_t written_bytes;
+                uint64_t backpressured_nsec;
             } resp;
             resp.overrun_bytes = s_hose.total_overrun_bytes_.exchange(0, std::memory_order_relaxed);
             resp.written_bytes = s_hose.total_written_bytes_.exchange(0, std::memory_order_relaxed);
+            resp.backpressured_nsec = s_hose.backpressured_nsec_.exchange(0, std::memory_order_relaxed);
             mg_ws_send(c, &resp, sizeof(resp), WEBSOCKET_OP_BINARY);
             return;
         }
 
-        case RPC_REQ_SET_HASH_TWEAK: {
-            if (len != offsetof_end(rpc_req, set_hash_tweak)) {
-                err = "wrong len for set_hash_tweak";
+        case RPC_REQ_SET_ENABLE_BACKPRESSURE: {
+            if (len != offsetof_end(rpc_req, set_enable_backpressure)) {
+                err = "wrong len for set_enable_backpressure";
                 goto err;
             }
-            g_hash_tweak.store(req->set_hash_tweak.tweak, std::memory_order_relaxed);
+            s_hose.set_enable_backpressure(req->set_enable_backpressure.enabled);
             mg_ws_send(c, nullptr, 0, WEBSOCKET_OP_BINARY);
             return;
         }
-
         default:
             err = "unknown req type";
             goto err;
@@ -555,6 +597,7 @@ void serve_main() {
         panic("nnsocketInitialize failed: %x", e);
     }
     s_main_thread = pthread_self();
+    s_hose.init();
     start_thread("hose", [](void *ignored) -> void * {
         s_hose.thread_func();
         return nullptr;

@@ -5,6 +5,10 @@
 #include <string.h>
 #include "stuff.hpp"
 
+#include "nn/os/os_condition_variable_common.hpp"
+#include "nn/os/os_event_types.hpp"
+#include "nn/os/os_event_api.hpp"
+
 constexpr size_t OUTGOING_WS_HEADER_SIZE = 10;
 
 size_t add_ws_header_size(size_t size);
@@ -54,6 +58,8 @@ struct hose {
         return true;
     };
 
+    void init();
+
     void push_fd(int fd);
 
     // reader thread func:
@@ -88,9 +94,13 @@ struct hose {
 
     }
 
+    // callable from any thread
+    void set_enable_backpressure(bool enable);
+
     // any thread, used for stats:
     std::atomic<uint64_t> total_overrun_bytes_{0};
     std::atomic<uint64_t> total_written_bytes_{0};
+    std::atomic<uint64_t> backpressured_nsec_{0};
 
 private:
     // shared data:
@@ -105,6 +115,11 @@ private:
     std::atomic<int> new_fd_{-1};
     std::atomic<write_info> write_info_{{.wrap_offset = sizeof(buf_)}};
     std::atomic<uint32_t> read_offset_{0};
+
+    nn::os::EventType sent_event_;
+
+    std::atomic<bool> enable_backpressure_{false};
+
     _Alignas(16) uint8_t buf_[2 * 1024 * 1024];
 
     // reader thread data:
@@ -118,7 +133,10 @@ private:
 
     std::tuple<bool, write_info> reserve_space_and_write_header(size_t size, bool for_overrun);
 
+    bool backpressure();
+
     void write_overrun();
+
 
     void assert_on_write_thread();
 };

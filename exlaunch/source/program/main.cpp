@@ -373,8 +373,13 @@ void install() {
 }
 
 StupidHash<UInt48, Packed<uint64_t>, 1023> s_hashed_colliders;
-std::atomic<bool> g_hashed_colliders_want_clear;
+std::atomic<bool> s_hashed_colliders_want_clear;
 StupidHash<UInt48, Nothing, 1023> s_hitboxes_this_frame;
+
+// run on hose thread
+void note_new_hose_connection() {
+    s_hashed_colliders_want_clear.store(true, std::memory_order_relaxed);
+}
 
 static void report_hitbox(mm_hitbox *hb, bool surprise) {
     hb->verify();
@@ -424,7 +429,7 @@ static void write_cached_dump(decltype(s_hashed_colliders)::Entry *entry, std::o
     s_hose.write_packet(
         std::move(write_callback),
         [&](uint8_t *buf, size_t len) -> bool {
-            uint64_t new_hash = XXH3_64bits(buf, len) ^ g_hash_tweak.load(std::memory_order_relaxed);
+            uint64_t new_hash = XXH3_64bits(buf, len);
             entry->value = new_hash;
             // only send if this is new
             bool ret = old_hash != new_hash;
@@ -505,7 +510,7 @@ static void report_all_colliders(mm_AreaSystem *as) {
 
 static void frame_start_actions() {
     s_hitboxes_this_frame.clear();
-    if (g_hashed_colliders_want_clear.load(std::memory_order_relaxed)) {
+    if (s_hashed_colliders_want_clear.load(std::memory_order_relaxed)) {
         s_hashed_colliders.clear();
     }
 }

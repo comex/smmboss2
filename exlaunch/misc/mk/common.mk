@@ -135,6 +135,10 @@ clean:
 	@echo clean ...
 	@rm -fr $(BUILD) $(TARGET).nso $(TARGET).npdm $(TARGET).elf
 
+.PHONY: web
+web:
+	@[ -d $@ ] || mkdir -p $@
+	@$(MAKE) --no-print-directory -C $(BUILD) -f $(MK_PATH)/common.mk $(DEPSDIR)/export.json
 
 #---------------------------------------------------------------------------------
 else

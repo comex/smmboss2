@@ -241,7 +241,7 @@ class ScolResult(GuestStruct):
     f2 = prop(2, u8)
     f3 = prop(3, u8)
     f4 = prop(4, u32)
-    f8 = prop(8, u32)
+    angle = prop(8, u32)
     point1 = prop(0xc, Point2D)
     point2 = prop(0x14, Point2D)
     f1c = prop(0x1c, u32)
@@ -382,8 +382,6 @@ class Collider(GuestStruct):
     ext_size = prop(0x3b8, ptr_to(fixed_array(f32, 4)), dump_deep=True)
     segments_cur = prop(0x3c0, count4_ptr(ColliderSegment))
     segments_old = prop(0x3d0, count4_ptr(ColliderSegment))
-
-    sizeof_star = 0x3e0 # not necessarily right
 
 class BlockColliderOwner(GuestStruct):
     # aka HBO1
@@ -757,9 +755,14 @@ class hello_mod_info(GuestStruct):
     build_id = prop(0x40, fixed_array(u8, 16))
     sizeof_star = 0x50
 class ColliderCached(Collider):
-    pass
+    sizeof_star = 0x3f0
+    ext_pos_cur_val = prop(0x3e0, Point2D)
+    ext_pos_old_val = prop(0x3e8, Point2D)
 class ScolCached(Scol):
-    pass
+    initial_dump_size = 0x103c
+    sizeof_star = initial_dump_size + 0x10
+    ext_pos_cur_val = prop(initial_dump_size, Point2D)
+    ext_pos_old_val = prop(initial_dump_size + 8, Point2D)
 ###
 
 def commandlike(f):

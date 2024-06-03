@@ -1,8 +1,11 @@
 import functools, struct, os
 
+extra_dep_filenames = set()
+
 class World:
     def _import(self, filename):
         filename = os.path.join(os.path.dirname(__file__), filename)
+        extra_dep_filenames.add(filename) # used by export.py
         code = compile(open(filename).read(), filename, 'exec')
         exec(code, self.__dict__)
 

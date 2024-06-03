@@ -259,7 +259,7 @@ struct mm_normal_collider : public mm_some_collider {
 };
 
 struct mm_scol_collider : public mm_some_collider {
-    static constexpr size_t initial_dump_size = 0x3e8;
+    static constexpr size_t initial_dump_size = 0x103c;
 
     PROP(ext_pos_cur, 0x2a0, float *);
     PROP(ext_pos_old, 0x2a8, float *);
@@ -521,14 +521,21 @@ static void report_some_collider(mm_some_collider *some, int which_list) {
 
     if (auto ncp = std::get_if<mm_normal_collider *>(&downcasted)) {
         mm_normal_collider *nc = *ncp;
+        // TODO: even 16 bytes is kind of a lot for ~500 items (or potentially
+        // many times more), 60 times a second.  let's scrap this whole thing
+        // and hook the functions that add/remove/update colliders
         write_cached_dump(entry, old_hash, [&](auto &w) {
             w.write_tag({"normcol"});
             w.write_prim(nc);
             w.write_raw(nc, mm_normal_collider::initial_dump_size);
-            w.write_n(nc->segments_cur().ptr, nc->segments_cur().count);
-            w.write_n(nc->segments_old().ptr, nc->segments_old().count);
             w.write_n(nc->ext_pos_cur() ?: dummy_pos, 2);
             w.write_n(nc->ext_pos_old() ?: dummy_pos, 2);
+            w.write_n(nc->segments_cur().ptr, nc->segments_cur().count);
+            w.write_n(nc->segments_old().ptr, nc->segments_old().count);
+        });
+        s_hose.write_packet([&](auto &w) {
+            w.write_tag({"normclp"});
+            w.write_prim(nc);
         });
     } else if (auto scp = std::get_if<mm_scol_collider *>(&downcasted)) {
         (void)scp;
@@ -539,6 +546,10 @@ static void report_some_collider(mm_some_collider *some, int which_list) {
             w.write_raw(sc, mm_scol_collider::initial_dump_size);
             w.write_n(sc->ext_pos_cur() ?: dummy_pos, 2);
             w.write_n(sc->ext_pos_old() ?: dummy_pos, 2);
+        });
+        s_hose.write_packet([&](auto &w) {
+            w.write_tag({"scolclp"});
+            w.write_prim(sc);
         });
     } else {
         s_hose.write_packet([&](auto &w) {

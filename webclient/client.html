@@ -94,9 +94,6 @@ class FixedArrayLocal {
     this.dv = dv;
     this.off = off;
   }
-  serialize() {
-    return Array.from(Array(this.count), (_, i) => this.get(i));
-  }
 }
 
 class FixedArray extends CompoundType {
@@ -121,6 +118,9 @@ class FixedArray extends CompoundType {
           }
           return ret;
         }
+        serialize() {
+          return Array.from(Array(this.count), (_, i) => this.get(i).serialize());
+        }
       }
       Local.prototype.count = count;
       this.Local = Local;
@@ -142,6 +142,9 @@ class FixedArray extends CompoundType {
             str += this.get(i).toString(16).padStart(2, '0');
           }
           return str;
+        }
+        serialize() {
+          return Array.from(Array(this.count), (_, i) => this.get(i));
         }
       }
       Local.prototype.count = count;
@@ -368,14 +371,14 @@ mm.extraLocalMethodsFor.ColliderCached = (base) => class extends base {
   constructor(dv, baseOff) {
     super(dv, baseOff);
     let off = baseOff + this.struct.sizeof;
-    this.segmentsCur = [];
+    this.segments_cur_vals = [];
     for (let i = 0, count = this.segments_cur.count; i < count; i++) {
-      this.segmentsCur.push(new mm.ColliderSegment.Local(this.dv, off));
+      this.segments_cur_vals.push(new mm.ColliderSegment.Local(this.dv, off));
       off += mm.ColliderSegment.sizeof;
     }
-    this.segmentsOld = [];
+    this.segments_old_vals = [];
     for (let i = 0, count = this.segments_old.count; i < count; i++) {
-      this.segmentsOld.push(new mm.ColliderSegment.Local(this.dv, off));
+      this.segments_old_vals.push(new mm.ColliderSegment.Local(this.dv, off));
       off += mm.ColliderSegment.sizeof;
     }
     assert(off == this.dv.byteLength);
@@ -753,22 +756,22 @@ class DiagramNormalColliders extends DiagramThingKind {
   getThingsFromFrame() {
     return this.diagram.curFrame.normalColliders;
   }
-  renderThing(ptr, {cached, uncached, uniqueDumpId}) {
-    let extX = uncached.ext_pos_cur.x;
-    let extY = uncached.ext_pos_cur.y;
+  renderThing(ptr, col) {
+    let extX = col.ext_pos_cur_val.x;
+    let extY = col.ext_pos_cur_val.y;
     let dia = this.diagram;
-    for (let i = 0; i < cached.segmentsCur.length; i++) {
-      let seg = cached.segmentsCur[i];
+    for (let i = 0; i < col.segments_cur_vals.length; i++) {
+      let seg = col.segments_cur_vals[i];
       let fakePtr = ptr + BigInt(i);
       let line = this.getOrCreateElmFor(fakePtr, 'line');
       if (line.drawnExtX === extX &&
           line.drawnExtY === extY &&
-          line.drawnUniqueDumpId === uniqueDumpId) {
+          line.drawnUniqueDumpId === col.uniqueDumpId) {
         continue;
       }
       line.drawnExtX = extX;
       line.drawnExtY = extY;
-      line.drawnUniqueDumpId = uniqueDumpId;
+      line.drawnUniqueDumpId = col.uniqueDumpId;
       line.setAttribute('x1', dia.transformX(seg.rel_pos_1.x + extX));
       line.setAttribute('y1', dia.transformY(seg.rel_pos_1.y + extY));
       line.setAttribute('x2', dia.transformX(seg.rel_pos_2.x + extX));
@@ -783,10 +786,10 @@ class DiagramScolColliders extends DiagramThingKind {
   getThingsFromFrame() {
     return this.diagram.curFrame.normalColliders;
   }
-  renderThing(ptr, {cached, uncached}) {
+  renderThing(ptr, col) {
     let dia = this.diagram;
-    for (let i = 0; i < cached.segmentsCur.length; i++) {
-      let seg = cached.segmentsCur[i];
+    for (let i = 0; i < col.segments_cur_vals.length; i++) {
+      let seg = col.segmentsCur[i];
       let fakePtr = ptr + BigInt(i);
       let line = this.getOrCreateElmFor(fakePtr, 'line');
       line.setAttribute('x1', dia.transformX(seg.rel_pos_1.x + uncached.ext_pos_cur.x));
@@ -840,6 +843,7 @@ class HoseConn {
     this.prevFrameByWorldID = new Map();
     this.cachedDumps = new Map();
     this.nextUniqueDumpId = 0;
+    this.tagStats = {};
   }
   setWantOpen(wantOpen) {
     this.wsw.setWantOpen(wantOpen);
@@ -850,28 +854,33 @@ class HoseConn {
     assert(e.data instanceof ArrayBuffer);
     let ab = e.data;
     assert(ab.byteLength >= 8);
-    let tag = utf8Decoder.decode(new Uint8Array(ab, 0, 8));
+    let tag = utf8Decoder.decode(new Uint8Array(ab, 0, 8)).replace(/\0+$/, '');
+
+    this.tagStats[tag] ??= [0, 0];
+    this.tagStats[tag][0] += ab.byteLength; // total length
+    this.tagStats[tag][1]++; // message count
+
     switch (tag) {
-    case 'collisi\0':
+    case 'collisi':
       this.parseCollision(ab);
       break;
-    case 'do_many\0':
+    case 'do_many':
       this.parseDoMany(ab);
       break;
-    case 'hitbox\0\0':
+    case 'hitbox':
       this.parseHitbox(ab);
       break;
-    case 'normcl1\0':
-    case 'scolcl1\0':
+    case 'normcol':
+    case 'scolcol':
       this.parseSomeColliderCachedPart(ab);
       break;
-    case 'normcl2\0':
-      this.parseNormalColliderUncachedPart(ab);
+    case 'normclp':
+      this.parseNormalCollider(ab);
       break;
-    case 'scolcl2\0':
-      this.parseScolColliderUncachedPart(ab);
+    case 'scolclp':
+      this.parseScolCollider(ab);
       break;
-    case 'overrun\0':
+    case 'overrun':
       this.parseOverrun(ab);
       break;
     default:
@@ -922,7 +931,7 @@ class HoseConn {
       //console.log(`GOT dump for ${hex(ptr)}`);
     this.cachedDumps.set(ptr, dump);
   }
-  parseSomeColliderUncachedPartCommon(dv) {
+  parseSomeColliderCommon(dv) {
     let ptr = dv.getBigUint64(8, true);
     let dump = this.cachedDumps.get(ptr);
     if (!dump) {
@@ -932,31 +941,27 @@ class HoseConn {
     }
     return [ptr, dump];
   }
-  parseNormalColliderUncachedPart(ab) {
+  parseNormalCollider(ab) {
     let dv = new DataView(ab);
-    let [ptr, dump] = this.parseSomeColliderUncachedPartCommon(dv);
+    let [ptr, dump] = this.parseSomeColliderCommon(dv);
     if (!dump) {
       return;
     }
     let cached = new mm.ColliderCached.Local(dump, 0);
-    this.curFrame.normalColliders.set(ptr, {
-      cached: cached,
-      uncached: new mm.ColliderUncached.Local(dv, 0x10),
-      uniqueDumpId: dump.uniqueDumpId,
-    });
+    cached.uniqueDumpId = dump.uniqueDumpId;
+    cached.addrof = ptr;
+    this.curFrame.normalColliders.set(ptr, cached);
   }
-  parseScolColliderUncachedPart(ab) {
+  parseScolCollider(ab) {
     let dv = new DataView(ab);
-    let [ptr, dump] = this.parseSomeColliderUncachedPartCommon(dv);
+    let [ptr, dump] = this.parseSomeColliderCommon(dv);
     if (!dump) {
       //console.log(`missing scol ${ptr}`);
       return;
     }
-    let cached = new mm.Scol.Local(dump, 0);
-    this.curFrame.scolColliders.set(ptr, {
-      cached,
-      uncached: new mm.ColliderUncached.Local(dv, 0x10),
-    });
+    let cached = new mm.ScolCached.Local(dump, 0);
+    cached.uniqueDumpId = dump.uniqueDumpId;
+    this.curFrame.scolColliders.set(ptr, cached);
   }
   parseOverrun(ab) {
     document.getElementById('overrun').innerHTML = 'got overrun!';
@@ -964,6 +969,7 @@ class HoseConn {
 }
 
 let theBaseURL = 'ws://neb-solidus:8000';
+g_statsOn = true;
 
 async function go() {
   g_rpcConn = new RPCConn(theBaseURL);
@@ -991,7 +997,10 @@ async function go() {
           frames = frame.number - lastFrameNum;
           lastFrameNum = frame.number;
         }
-        console.log(`stats: overrunBytes=${stats.overrunBytes} sentBytes=${stats.sentBytes} frames=${frames}`);
+        if (g_statsOn) {
+          console.log(`stats: overrunBytes=${stats.overrunBytes} sentBytes=${stats.sentBytes} frames=${frames} tagStats=${JSON.stringify(g_hoseConn.tagStats)}`);
+        }
+        g_hoseConn.tagStats = {};
       }
       await sleep(1000);
     }
@@ -1001,23 +1010,4 @@ async function go() {
 }
 go();
 
-/*
-async function test() {
-  theRPCConn = new RPCConn(theBaseURL);
-  let rpc_req = new Struct('rpc_req', 17, [
-    ['type', 0, u8],
-    ['rw_addr', 1, u64],
-    ['dummy', 1, CString],
-    ['rw_len', 9, u64],
-  ]);
-  let rl = new rpc_req.Local(new ArrayBuffer(17));
-  rl.rw_addr = 0x41414141;
-  console.log(rl.rw_addr);
-  console.log(rl.dummy);
-  let rr = new rpc_req.Remote(0x1000n);
-  //console.log(await rr.rw_len());
-  console.log('all done');
-}
-test();
-*/
 </script>

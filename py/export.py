@@ -1,4 +1,5 @@
 import smmboss
+import guest_access
 
 def all_keys(iterable_of_iterables):
     return list({key: None
@@ -201,6 +202,8 @@ def main():
                 if path.is_relative_to(py_dir):
                     dep_paths.append(path)
             dep_paths.append(Path(smmboss.addrs_yaml_path()).resolve())
+
+            dep_paths.extend(map(Path, guest_access.extra_dep_filenames))
 
             with open(deps_file, 'w') as fp:
                 fp.write(f'{str(out_file)}: \\\n')

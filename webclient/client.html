@@ -453,19 +453,7 @@ class RPCConn {
         return;
       }
       assert(data instanceof ArrayBuffer);
-      let u64 = new BigUint64Array(data);
-      let i = 0;
-      let images = [];
-      while (i < u64.length) {
-        let image = {};
-        for (let prefix of ['image', 'text', 'rodata', 'data']) {
-          image[`${prefix}Start`] = u64[i++];
-          image[`${prefix}Size`] = u64[i++];
-        };
-        assert(i <= u64.length);
-        images.push(image);
-      }
-      console.log('hello', images);
+      this.helloData = new DataView(data);
       this.updateCond.broadcast();
     }];
   }
@@ -891,14 +879,14 @@ async function go() {
   g_rpcConn = new RPCConn(theBaseURL);
   g_hoseConn = new HoseConn(theBaseURL);
   await Promise.all([
-    async () => {
-      g_exportJson = await (await fetch('build/export.json')).json();
-    },
-    async () => {
+    (async () => {
+      g_exportJson = await (await fetch('../exlaunch/build/export.json')).json();
+    })(),
+    (async () => {
       while (g_rpcConn.helloData === null) {
         await g_rpcConn.updateCond;
       }
-    },
+    })(),
   ]);
   loadStructs(g_exportJson, g_rpcConn.helloData);
   console.log(g_rpcConn.helloData);

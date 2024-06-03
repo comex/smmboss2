@@ -170,6 +170,11 @@ $(DEPSDIR)/generated.hpp:
 -include $(DEPSDIR)/generated.hpp.d
 $(OFILES_SRC): $(DEPSDIR)/generated.hpp
 
+$(DEPSDIR)/export.json:
+	python3 $(TOPDIR)/../py/export.py json $(DEPSDIR)/export.json $(DEPSDIR)/export.json.d
+-include $(DEPSDIR)/export.json.d
+all: $(DEPSDIR)/export.json
+
 #---------------------------------------------------------------------------------------
 endif
 #---------------------------------------------------------------------------------------

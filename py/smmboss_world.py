@@ -430,9 +430,14 @@ class ColliderListNodeOuter(GuestStruct):
 class BlockColliderListItem(GuestStruct):
     # aka 24k_item
     collider = prop(0x8, ptr_to(Collider), dump_deep=True)
+    entries = prop(0x10, lambda: fixed_array(BlockColliderListEntry, 2))
 
 class BlockColliderListEntry(GuestStruct):
+    node = prop(0, SeadListNode)
+    # points to the struct that contains me:
     item = prop(0x10, ptr_to(BlockColliderListItem), dump_deep=True)
+    list_ = prop(0x18, lambda: ptr_to(sead_list(BlockColliderListEntry)))
+    sizeof_star = 0x20
 
 class BgCollisionGridSquare(GuestStruct):
     # aka triple_24klist
@@ -440,8 +445,15 @@ class BgCollisionGridSquare(GuestStruct):
     list1 = prop(0x18, sead_list(BlockColliderListEntry))
     list2 = prop(0x30, sead_list(BlockColliderListEntry))
     sizeof_star = 0x48
+
     def any_nonempty(self):
         return self.list0.count or self.list1.count or self.list2.count
+    def contains_collider(self, collider):
+        for lst in (self.list0, self.list1, self.list2):
+            for entry in lst:
+                if entry.item.collider == collider:
+                    return True
+        return False
 
 class BgCollisionGrid(GuestStruct, GuestArray):
     # Grid coordinates are in units of blocks.
@@ -489,6 +501,11 @@ class BgCollisionGrid(GuestStruct, GuestArray):
     def nonempty_squares(self):
         for (x, y, square) in self.squares():
             if square.any_nonempty() != 0:
+                yield (x, y, square)
+
+    def squares_containing_collider(self, collider):
+        for (x, y, square) in self.squares():
+            if square.contains_collider(collider) != 0:
                 yield (x, y, square)
 
     def dump(self, fp, indent, **opts):
@@ -834,12 +851,13 @@ def print_bgcs():
 def print_grid():
     seen = set()
     for x, y, square in ActorMgr.get().cur_world.area_sys.bg_collision_system.grid.squares():
-        for slist in [square.list0, square.list1, square.list2]:
+        for i, slist in enumerate([square.list0, square.list1, square.list2]):
             for entry in slist:
                 collider = entry.item.collider
                 if collider in seen:
                     continue
                 seen.add(collider)
+                print(f'in ({x}, {y}) list{i}:')
                 _print_collider(collider)
 
 @commandlike

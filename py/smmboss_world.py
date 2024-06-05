@@ -742,29 +742,6 @@ def block_kind_info_array():
     return fixed_array(BlockKindInfo, 0x1e)(mm.addr.block_kind_info_array)
 
 
-###
-# These are not real Nintendo types but are used as part of the protocol
-class exl_util_Range(GuestStruct):
-    start = prop(0, u64)
-    size = prop(8, u64)
-class hello_mod_info(GuestStruct):
-    total    = prop(0,    exl_util_Range)
-    text     = prop(0x10, exl_util_Range)
-    rodata   = prop(0x20, exl_util_Range)
-    data     = prop(0x30, exl_util_Range)
-    build_id = prop(0x40, fixed_array(u8, 16))
-    sizeof_star = 0x50
-class ColliderCached(Collider):
-    sizeof_star = 0x3f0
-    ext_pos_cur_val = prop(0x3e0, Point2D)
-    ext_pos_old_val = prop(0x3e8, Point2D)
-class ScolCached(Scol):
-    initial_dump_size = 0x103c
-    sizeof_star = initial_dump_size + 0x10
-    ext_pos_cur_val = prop(initial_dump_size, Point2D)
-    ext_pos_old_val = prop(initial_dump_size + 8, Point2D)
-###
-
 def commandlike(f):
     f.commandlike = True
     return f

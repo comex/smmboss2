@@ -102,11 +102,8 @@ RELEVANT_VERSIONS = [301, 302]
 ROOT_CLASSES = [
     'AreaSystem',
     'Hitbox',
-    'hello_mod_info',
-    'ColliderCached',
     'ColliderSegment',
     'Scol',
-    'ScolCached',
 ]
 
 def json_info():

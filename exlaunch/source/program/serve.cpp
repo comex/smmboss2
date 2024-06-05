@@ -245,6 +245,9 @@ void hose::do_iter() {
         // nobody to send to; just discard data
         actual = to_send;
     } else {
+        // limit latency at least a little
+        to_send = std::min(to_send, (size_t)(128 * 1024));
+
         actual = send(cur_fd_, buf_ + read_offset, to_send, 0);
         if (actual == -1) {
             xprintf("send() failed: %s", strerror(errno));
@@ -314,7 +317,7 @@ retry:
 }
 
 bool hose::backpressure() {
-    if (enable_backpressure_.load(std::memory_order_seq_cst)) {
+    if (enable_backpressure_.load(std::memory_order_relaxed)) {
         const auto &tick_manager = nn::os::detail::GetTickManager();
         auto before = tick_manager.GetTick();
         // use a timed wait so that we still increase backpressured_nsec
@@ -330,11 +333,9 @@ bool hose::backpressure() {
 }
 
 void hose::set_enable_backpressure(bool enable) {
-    // seq_cst here and above since this would need to be
-    // load-release/store-acquire otherwise
-    enable_backpressure_.store(enable, std::memory_order_seq_cst);
+    enable_backpressure_.store(enable, std::memory_order_relaxed);
     if (!enable) {
-        nn::os::SignalEvent(&sent_event_);
+        nn::os::SignalEvent(&sent_event_); // this is like a release operation
     }
 }
 

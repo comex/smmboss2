@@ -135,14 +135,6 @@ class FixedArray extends CompoundType {
           return getLocal(this.dv, this.off + i * elmTySizeof);
         }
         // could implement set
-        toHex() {
-          assert(elmTy == mm.u8);
-          let str = '';
-          for (let i = 0; i < count; i++) {
-            str += this.get(i).toString(16).padStart(2, '0');
-          }
-          return str;
-        }
         serialize() {
           return Array.from(Array(this.count), (_, i) => this.get(i));
         }
@@ -295,6 +287,10 @@ class Struct extends CompoundType {
     return new Function(...argNames, code)(...argVals);
   }
   */
+
+  getLocal(dv, off) {
+    return new this.Local(dv, off);
+  }
 }
 
 class MM {
@@ -343,13 +339,8 @@ class MM {
     return ty;
   }
 
-  loadHelloDataAndTypes(helloData, exportJson) {
-    // Temporarily choose an arbitrary version in order to pick up the protocol structs:
-    this.classes = Object.values(exportJson)[0].classes;
-    this.loadType('hello_mod_info');
-    let count = helloData.byteLength / this.hello_mod_info.sizeof;
-    this.theHelloModInfo = new (new FixedArray(this.hello_mod_info, count).Local)(helloData, 0);
-    let buildId = this.theHelloModInfo.get(1).build_id.toHex() + '00000000000000000000000000000000';
+  loadTypes(helloInfo, exportJson) {
+    let buildId = toHex(helloInfo[1].buildId) + '00000000000000000000000000000000';
     assert(buildId in exportJson);
     this.export = exportJson[buildId];
     this.classes = this.export.classes;
@@ -367,6 +358,77 @@ mm.extraLocalMethodsFor.Rect = (base) => class extends base {
     return this.max.y - this.min.y;
   }
 };
+
+class Reader {
+  constructor(dv, off = 0) {
+    assert(dv instanceof DataView);
+    this.dv = dv;
+    this.off = off;
+    this.size = this.dv.byteLength;
+  }
+  readOff(size) {
+    let off = this.off;
+    assert(size <= this.size - off);
+    this.off = off + size;
+    return off;
+  }
+  read(ty, size = null) {
+    if (size === null) {
+      size = ty.sizeof;
+    }
+    assert(typeof size == 'number');
+    let off = this.readOff(size);
+    return ty.getLocal(this.dv, off);
+  }
+  readArrayUnbounded(callback) {
+    let out = [];
+    while (this.off < this.size) {
+      out.push(callback());
+    }
+    return out;
+  }
+  readArray(count, callback) {
+    let out = [];
+    for (let i = 0; i < count; i++) {
+      out.push(callback());
+    }
+    return out;
+  }
+}
+
+// These could be structs but using Reader avoids a circular dependency
+function readExlUtilRange(r) {
+  return {start: r.read(mm.u64), size: r.read(mm.u64)}
+}
+function readHelloModInfo(r) {
+  return r.readArrayUnbounded(() => {
+    total: readExlUtilRange(r),
+    text: readExlUtilRange(r),
+    rodata: readExlUtilRange(r),
+    data: readExlUtilRange(r),
+    buildId: r.readArray(16, mm.u8),
+  });
+}
+
+function readColliderCached(r) {
+  return {
+    col: r.read(mm.Collider, 0x3e0),
+    extPosCur: r.read(mm.Point2D),
+    extPosOld: r.read(mm.Point2D),
+  };
+}
+function readScolCached(r) {
+  return {
+    col: r.read(mm.Scol, 0x103c),
+    extPosCur: r.read(mm.Point2D),
+    extPosOld: r.read(mm.Point2D),
+  };
+}
+
+function toHex(array) {
+  return array.map(num => num.toString(16).padStart(2, '0')).join('');
+}
+
 mm.extraLocalMethodsFor.ColliderCached = (base) => class extends base {
   constructor(dv, baseOff) {
     super(dv, baseOff);
@@ -537,7 +599,7 @@ class RPCConn {
     this.pendingResponses = [];
     this.pendingResponseCond = new Cond;
     this.rpcThrottle = new Throttle('rpc');
-    this.helloData = null;
+    this.helloInfo = null;
   }
   onOpen(e) {
     this.isOpen = true;
@@ -548,7 +610,7 @@ class RPCConn {
         return;
       }
       assert(data instanceof ArrayBuffer);
-      this.helloData = new DataView(data);
+      this.helloInfo = readHelloModInfo(new Reader(new DataView(data)));
       this.updateCond.broadcast();
     }];
   }
@@ -979,12 +1041,12 @@ async function go() {
       g_exportJson = await (await fetch('../exlaunch/build/export.json')).json();
     })(),
     (async () => {
-      while (g_rpcConn.helloData === null) {
+      while (g_rpcConn.helloInfo === null) {
         await g_rpcConn.updateCond;
       }
     })(),
   ]);
-  mm.loadHelloDataAndTypes(g_rpcConn.helloData, g_exportJson);
+  mm.loadTypes(g_rpcConn.helloInfo, g_exportJson);
   g_hoseConn.setWantOpen(true);
   (async () => {
     let lastFrameNum = 0;

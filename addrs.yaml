@@ -36,6 +36,8 @@ edb8feede2bfa3ffd1adf65a4424361a00000000000000000000000000000000:
         Collider_add_to_collision_grid: 0xe26540
         Collider_remove_from_collision_grid_and_lists: 0xe26390
         scol_true_outmost: 0xe192f0
+        cctx_bg_collide_against_twopoint: 0xe2d240
+        cctx_bg_collide_against_point: 0xe2dc60
 
 aac32b77fb8e040b18e5940f37ca6c7f00000000000000000000000000000000:
     version: 302

@@ -355,9 +355,9 @@ class Collider(GuestStruct):
     vtable = prop(0, GuestPtrPtr)
     scol_mid_node = prop(0x20, ScolMidNode, dump=False)
     # nodes for BgCollisionSystem colliders1 and colliders2
-    bgcs_list_nodes = prop(0x58, fixed_array(ColliderListNodeOuter, 2))
+    bgcs_list_nodes = prop(0x58, lambda: fixed_array(ColliderListNodeOuter, 2))
     # nodes for scol sublists 0, 2, 1
-    scol_sublist_nodes = prop(0x118, fixed_array(ColliderListNodeOuter, 3))
+    scol_sublist_nodes = prop(0x118, lambda: fixed_array(ColliderListNodeOuter, 3))
     bbox_cur = prop(0x238, Rect)
     bbox_old = prop(0x248, Rect)
     bbox_both = prop(0x258, Rect)

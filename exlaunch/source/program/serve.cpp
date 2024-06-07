@@ -397,7 +397,7 @@ private:
         RPC_REQ_READ = 1,
         RPC_REQ_WRITE = 2,
         RPC_REQ_GET_STATS = 3,
-        RPC_REQ_SET_ENABLE_BACKPRESSURE = 4,
+        RPC_REQ_SET_FLAGS = 4,
     };
 
     struct rpc_req {
@@ -414,8 +414,9 @@ private:
             } __attribute__((packed)) write;
             char get_stats[0];
             struct {
-                uint8_t enabled;
-            } __attribute__((packed)) set_enable_backpressure;
+                uint64_t clear;
+                uint64_t set;
+            } __attribute__((packed)) set_flags;
         };
 
     } __attribute__((packed));
@@ -489,13 +490,18 @@ private:
             return;
         }
 
-        case RPC_REQ_SET_ENABLE_BACKPRESSURE: {
-            if (len != offsetof_end(rpc_req, set_enable_backpressure)) {
-                err = "wrong len for set_enable_backpressure";
+        case RPC_REQ_SET_FLAGS: {
+            if (len != offsetof_end(rpc_req, set_flags)) {
+                err = "wrong len for set_flags";
                 goto err;
             }
-            s_hose.set_enable_backpressure(req->set_enable_backpressure.enabled);
-            mg_ws_send(c, nullptr, 0, WEBSOCKET_OP_BINARY);
+            uint64_t expected = 0, desired;
+            do {
+                desired = (expected & ~req->set_flags.clear) | req->set_flags.set;
+            } while (!g_cur_rpc_flags.compare_exchange_weak(expected, desired, std::memory_order_acq_rel));
+
+            s_hose.set_enable_backpressure(desired & RPC_FLAG_BACKPRESSURE);
+            mg_ws_send(c, &desired, sizeof(desired), WEBSOCKET_OP_BINARY);
             return;
         }
         default:
@@ -608,3 +614,5 @@ void serve_main() {
         return nullptr;
     }, nullptr);
 }
+
+std::atomic<uint64_t> g_cur_rpc_flags = 0;

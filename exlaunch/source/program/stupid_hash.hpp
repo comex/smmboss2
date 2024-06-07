@@ -33,10 +33,15 @@ struct UInt48 {
         assert(val >> 48 == 0);
         memcpy(bytes, &val, sizeof(bytes));
     }
+    explicit UInt48(const void *ptr) : UInt48((uint64_t)(uintptr_t)ptr) {}
     operator uint64_t() const {
         uint64_t val = 0;
         memcpy(&val, bytes, sizeof(bytes));
         return val;
+    }
+    template <typename T>
+    explicit operator T *() const {
+        return (T *)(uintptr_t)((uint64_t)*this);
     }
 };
 

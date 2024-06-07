@@ -372,19 +372,18 @@ void install() {
     StubFoo::InstallAtPtr(StubFoo::GetAddr());
 }
 
-StupidHash<UInt48, Packed<uint64_t>, 1023> s_hashed_colliders;
-std::atomic<bool> s_hashed_colliders_want_clear;
-StupidHash<UInt48, Nothing, 1023> s_hitboxes_this_frame;
+// https://planetmath.org/goodhashtableprimes
+static StupidHash<UInt48, Nothing, 12289> s_colliders;
+static StupidHash<UInt48, uint64_t, 3079> s_hashed_scols;
+static StupidHash<UInt48, Nothing, 3079> s_hitboxes_this_frame;
 
-// run on hose thread
-void note_new_hose_connection() {
-    s_hashed_colliders_want_clear.store(true, std::memory_order_relaxed);
+void note_new_hose_connection() { // run on hose thread
+    g_cur_rpc_flags.fetch_or(RPC_FLAG_SEND_COLLS, std::memory_order_release);
 }
 
 static void report_hitbox(mm_hitbox *hb, bool surprise) {
     hb->verify();
-    UInt48 hb_compressed((uintptr_t)hb);
-    if (s_hitboxes_this_frame.lookup(hb_compressed, /*insert*/ true).second) {
+    if (s_hitboxes_this_frame.lookup(UInt48(hb), /*insert*/ true).second) {
         // already seen
         return;
     }
@@ -425,95 +424,103 @@ static void report_all_hitboxes(mm_AreaSystem *as) {
     }
 }
 
-static void write_cached_dump(decltype(s_hashed_colliders)::Entry *entry, std::optional<uint64_t> old_hash, auto &&write_callback) {
-    s_hose.write_packet(
-        std::move(write_callback),
-        [&](uint8_t *buf, size_t len) -> bool {
-            uint64_t new_hash = XXH3_64bits(buf, len);
-            entry->value = new_hash;
-            // only send if this is new
-            bool ret = old_hash != new_hash;
-            // if (ret) { xprintf("sending new %p", buf); }
-            return ret;
-        }
-    );
-}
-
-static void report_some_collider(mm_some_collider *some, int which_list) {
-    static const float dummy_pos[2]{};
-    UInt48 some_compressed((uintptr_t)some);
-    auto [entry, found] = s_hashed_colliders.lookup(some_compressed, /*insert*/ true);
-    if (!entry) {
-        return;
-    }
+static bool write_cached_dump(auto *entry, bool found, auto &&write_callback) {
     std::optional<uint64_t> old_hash;
     if (found) {
         old_hash = entry->value;
     }
-
-    auto downcasted = some->downcast();
-
-    if (auto ncp = std::get_if<mm_normal_collider *>(&downcasted)) {
-        mm_normal_collider *nc = *ncp;
-        // TODO: even 16 bytes is kind of a lot for ~500 items (or potentially
-        // many times more), 60 times a second.  let's scrap this whole thing
-        // and hook the functions that add/remove/update colliders
-        write_cached_dump(entry, old_hash, [&](auto &w) {
-            w.write_tag({"normcol"});
-            w.write_prim(nc);
-            w.write_raw(nc, mm_normal_collider::initial_dump_size);
-            w.write_n(nc->ext_pos_cur() ?: dummy_pos, 2);
-            w.write_n(nc->ext_pos_old() ?: dummy_pos, 2);
-            w.write_n(nc->segments_cur().ptr, nc->segments_cur().count);
-            w.write_n(nc->segments_old().ptr, nc->segments_old().count);
-        });
-        s_hose.write_packet([&](auto &w) {
-            w.write_tag({"normclp"});
-            w.write_prim(nc);
-        });
-    } else if (auto scp = std::get_if<mm_scol_collider *>(&downcasted)) {
-        (void)scp;
-        mm_scol_collider *sc = *scp;
-        write_cached_dump(entry, old_hash, [&](auto &w) {
-            w.write_tag({"scolcol"});
-            w.write_prim(sc);
-            w.write_raw(sc, mm_scol_collider::initial_dump_size);
-            w.write_n(sc->ext_pos_cur() ?: dummy_pos, 2);
-            w.write_n(sc->ext_pos_old() ?: dummy_pos, 2);
-        });
-        s_hose.write_packet([&](auto &w) {
-            w.write_tag({"scolclp"});
-            w.write_prim(sc);
-        });
-    } else {
-        s_hose.write_packet([&](auto &w) {
-            w.write_tag({"unkcol"});
-            w.write_prim(some);
-        });
-    }
+    bool ret;
+    s_hose.write_packet(
+        std::move(write_callback),
+        [&](uint8_t *buf, size_t len) -> bool {
+            uint64_t new_hash = XXH3_64bits(buf, len);
+            if (entry) {
+                entry->value = new_hash;
+            }
+            // only send if this is new
+            ret = old_hash != new_hash;
+            // if (ret) { xprintf("sending new %p", buf); }
+            return ret;
+        }
+    );
+    return ret;
 }
 
-static void report_all_colliders_in(mm_list<mm_some_collider_node> *cnlist, int which_list) {
-    for (mm_some_collider_node &cn : *cnlist) {
-        mm_some_collider *some = cn.outer()->owner();
-        report_some_collider(some, which_list);
-    }
-}
+static const float s_dummy_pos[2]{};
 
-static void report_all_colliders(mm_AreaSystem *as) {
-    report_all_colliders_in(&as->bg_collision_system()->colliders1(), 1);
-    report_all_colliders_in(&as->bg_collision_system()->colliders2(), 2);
-    for (mm_block_collider_owner *owner : as->terrain_mgr()->block_collider_owners()) {
-        report_some_collider(&owner->collider(), 2);
-    }
+static void write_normal_collider(mm_normal_collider *nc, tag8 tag) {
+    s_hose.write_packet([&](auto &w) {
+        w.write_tag(tag);
+        w.write_prim(nc);
+        w.write_raw(nc, mm_normal_collider::initial_dump_size);
+        w.write_n(nc->ext_pos_cur() ?: s_dummy_pos, 2);
+        w.write_n(nc->ext_pos_old() ?: s_dummy_pos, 2);
+        w.write_n(nc->segments_cur().ptr, nc->segments_cur().count);
+        w.write_n(nc->segments_old().ptr, nc->segments_old().count);
+    });
 }
 
 static void frame_start_actions() {
     s_hitboxes_this_frame.clear();
-    if (s_hashed_colliders_want_clear.load(std::memory_order_relaxed)) {
-        s_hashed_colliders.clear();
+    if (test_and_clear_rpc_flag(RPC_FLAG_SEND_COLLS)) {
+        s_hashed_scols.clear();
+        for (auto &entry : s_colliders) {
+            auto nc = (mm_normal_collider *)entry.key;
+            write_normal_collider(nc, {"normco*"});
+        }
+
     }
 }
+
+HOOK_DEFINE_TRAMPOLINE(Stub_Collider_add_to_collision_grid) {
+    static void Callback(mm_normal_collider *self) {
+        Orig(self);
+        if (s_colliders.lookup(UInt48(self), /*insert*/ true).second) {
+            xprintf("%p added but already in s_colliders", self);
+        }
+        write_normal_collider(self, {"normco+"});
+    }
+    static constexpr auto GetAddr = &mm_addrs::Collider_add_to_collision_grid;
+};
+
+HOOK_DEFINE_TRAMPOLINE(Stub_Collider_remove_from_collision_grid_and_lists) {
+    static void Callback(mm_normal_collider *self) {
+        auto [entry, _] = s_colliders.lookup(UInt48(self), /*insert*/ false);
+        if (entry) {
+            s_colliders.remove(entry);
+            s_hose.write_packet([&](auto &w) {
+                w.write_tag({"normco-"});
+                w.write_prim(self);
+            });
+        } else {
+            // this happens at startup.
+            //xprintf("%p removed but not in s_colliders", self);
+        }
+        Orig(self);
+    }
+    static constexpr auto GetAddr = &mm_addrs::Collider_remove_from_collision_grid_and_lists;
+};
+
+HOOK_DEFINE_TRAMPOLINE(Stub_scol_true_outmost) {
+    static void Callback(mm_scol_collider *self) {
+        Orig(self);
+        auto [entry, found] = s_hashed_scols.lookup(UInt48(self), /*insert*/ true);
+        bool sent = write_cached_dump(entry, found, [&](auto &w){
+            w.write_tag({"scolcol"});
+            w.write_prim(self);
+            w.write_raw(self, mm_scol_collider::initial_dump_size);
+            w.write_n(self->ext_pos_cur() ?: s_dummy_pos, 2);
+            w.write_n(self->ext_pos_old() ?: s_dummy_pos, 2);
+        });
+        if (!sent) {
+            s_hose.write_packet([&](auto &w) {
+                w.write_tag({"scolco~"});
+                w.write_prim(self);
+            });
+        }
+    }
+    static constexpr auto GetAddr = &mm_addrs::scol_true_outmost;
+};
 
 HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
     static void Callback(mm_AreaSystem *self) {
@@ -525,7 +532,6 @@ HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
             w.write_prim(self);
             w.write_prim((uint64_t)self->world_id());
         });
-        report_all_colliders(self);
         report_all_hitboxes(self);
         Orig(self);
     }
@@ -603,6 +609,9 @@ extern "C" void exl_main(void* x0, void* x1) {
     // TODO: make these dynamic hooks
     install<Stub_hitbox_collide>();
     install<Stub_AreaSystem_do_many_collisions>();
+    install<Stub_Collider_add_to_collision_grid>();
+    install<Stub_Collider_remove_from_collision_grid_and_lists>();
+    install<Stub_scol_true_outmost>();
     log_str("done hooking");
 }
 

@@ -14,6 +14,7 @@ constexpr size_t OUTGOING_WS_HEADER_SIZE = 10;
 size_t add_ws_header_size(size_t size);
 uint8_t *fill_ws_header(uint8_t *p, size_t size);
 
+// TODO: figure out a capitalization scheme ffs
 template <typename self_t>
 struct writer_base {
     template <typename T>
@@ -25,7 +26,7 @@ struct writer_base {
     }
     template <typename T>
     void write_n(const T *ts, size_t n) {
-        ((self_t *)this)->write_raw(ts, n * sizeof(T));
+        ((self_t *)this)->write_raw(ts, n * pt_size_of<T>);
     }
     template <typename T>
     void write_n(pt_pointer<T> ts, size_t n) {
@@ -144,3 +145,20 @@ private:
 extern hose s_hose;
 
 void serve_main();
+
+enum rpc_flags : uint64_t {
+    RPC_FLAG_BACKPRESSURE = 1,
+    RPC_FLAG_SEND_COLLS = 2,
+};
+extern std::atomic<uint64_t> g_cur_rpc_flags;
+static inline bool test_and_clear_rpc_flag(uint64_t flag) {
+    uint64_t flags = g_cur_rpc_flags.load(std::memory_order_relaxed);
+    bool ret = (flags & flag) == flag;
+    if (ret) {
+        flags = g_cur_rpc_flags.fetch_and(~flag, std::memory_order_acq_rel);
+        ret = (flags & flag) == flag;
+    }
+    return ret;
+}
+
+

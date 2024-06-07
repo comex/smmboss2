@@ -76,23 +76,43 @@ class IntType extends Primitive {
 
 let utf8Decoder = new TextDecoder();
 class CStringType extends Primitive {
+  // ??
+}
+
+class Tag8Type extends Primitive {
+  sizeof = 8;
   getLocal(dv, off) {
-    let maxLen = Math.min(0x1000, dv.byteLength - off);
-    let len = 0;
-    while (len < maxLen && dv.getInt8(off + len) != 0) {
-      len++;
+    let bytes = [];
+    for (let i = 0; i < 8; i++) {
+      bytes.push(dv.getUint8(off + i));
     }
-    let u8 = new Uint8Array(dv.buffer, dv.byteOffset + off, len);
-    return utf8Decoder.decode(u8);
+    while (bytes.length > 0 && bytes[bytes.length - 1] == 0) {
+      bytes.pop();
+    }
+    return String.fromCharCode(...bytes);
   }
 }
 
-class CompoundType {}
+class CompoundType {
+}
 
-class FixedArrayLocal {
+class CompoundTypeLocal {
   constructor(dv, off) {
-    this.dv = dv;
+    this.dv = (dv instanceof DataView) ? dv : new DataView(dv);
     this.off = off;
+  }
+  readPtrFromWithin(ptr, ty) {
+    // this assumes someone wrote the _ptr field on this.
+    assert(this._ptr !== undefined);
+    let offset = ptr - this._ptr;
+    assert(offset >= 0n && offset < 0x100000n);
+    return ty.getLocal(this.dv, this.off + Number(offset)); 
+  }
+}
+
+class FixedArrayLocal extends CompoundTypeLocal {
+  constructor(dv, off) {
+    super(dv, off);
   }
 }
 
@@ -145,14 +165,13 @@ class FixedArray extends CompoundType {
   }
 }
 
-class StructLocal {
+class StructLocal extends CompoundTypeLocal {
   constructor(dv, off) {
-    this.dv = (dv instanceof DataView) ? dv : new DataView(dv);
+    super(dv, off);
     let sizeof = this.struct.sizeof;
     if (sizeof !== null) {
       assert(this.dv.byteLength >= off + this.struct.sizeof);
     }
-    this.off = off;
   }
   serialize() {
     let ret = {};
@@ -305,6 +324,7 @@ class MM {
     this.s64 = new IntType('s64', 8, 'BigInt64', {needBigWrap: true});
     this.f32 = new IntType('f32', 4, 'Float32');
     this.f64 = new IntType('f64', 8, 'Float64');
+    this.tag8 = new Tag8Type;
     this.CString = this.GuestCString = new CStringType;
     this.GuestPtr = this.u64;
     this.extraLocalMethodsFor = {};
@@ -368,7 +388,9 @@ class Reader {
   }
   readOff(size) {
     let off = this.off;
-    assert(size <= this.size - off);
+    if (size > this.size - off) {
+      throw new Error(`Reader overread`);
+    }
     this.off = off + size;
     return off;
   }
@@ -394,6 +416,20 @@ class Reader {
     }
     return out;
   }
+  expectEnd() {
+    if (this.size != this.off) {
+      throw new Error(`Reader underread by ${this.size - this.off}`);
+    }
+  }
+  static with(dv, off, callback) {
+    let self = new Reader(dv, off);
+    let ret = callback(self);
+    self.expectEnd();
+    return ret;
+  }
+  remaining() {
+    return this.size - this.off;
+  }
 }
 
 // These could be structs but using Reader avoids a circular dependency
@@ -401,51 +437,18 @@ function readExlUtilRange(r) {
   return {start: r.read(mm.u64), size: r.read(mm.u64)}
 }
 function readHelloModInfo(r) {
-  return r.readArrayUnbounded(() => {
+  return r.readArrayUnbounded(() => ({
     total: readExlUtilRange(r),
     text: readExlUtilRange(r),
     rodata: readExlUtilRange(r),
     data: readExlUtilRange(r),
-    buildId: r.readArray(16, mm.u8),
-  });
-}
-
-function readColliderCached(r) {
-  return {
-    col: r.read(mm.Collider, 0x3e0),
-    extPosCur: r.read(mm.Point2D),
-    extPosOld: r.read(mm.Point2D),
-  };
-}
-function readScolCached(r) {
-  return {
-    col: r.read(mm.Scol, 0x103c),
-    extPosCur: r.read(mm.Point2D),
-    extPosOld: r.read(mm.Point2D),
-  };
+    buildId: r.readArray(16, () => r.read(mm.u8)),
+  }));
 }
 
 function toHex(array) {
   return array.map(num => num.toString(16).padStart(2, '0')).join('');
 }
-
-mm.extraLocalMethodsFor.ColliderCached = (base) => class extends base {
-  constructor(dv, baseOff) {
-    super(dv, baseOff);
-    let off = baseOff + this.struct.sizeof;
-    this.segments_cur_vals = [];
-    for (let i = 0, count = this.segments_cur.count; i < count; i++) {
-      this.segments_cur_vals.push(new mm.ColliderSegment.Local(this.dv, off));
-      off += mm.ColliderSegment.sizeof;
-    }
-    this.segments_old_vals = [];
-    for (let i = 0, count = this.segments_old.count; i < count; i++) {
-      this.segments_old_vals.push(new mm.ColliderSegment.Local(this.dv, off));
-      off += mm.ColliderSegment.sizeof;
-    }
-    assert(off == this.dv.byteLength);
-  }
-};
 
 
 class Cond {
@@ -626,7 +629,6 @@ class RPCConn {
     this.updateCond.broadcast();
   }
   async rawRequest(req) {
-    let resp = null;
     outerLoop: while (1) {
       if (!this.isOpen) {
         console.log('RPC waiting for open');
@@ -691,33 +693,21 @@ class RPCConn {
   async reqGetStats() {
     let u8 = Uint8Array.of(3); // RPC_REQ_GET_STATS
     let resp = await this.rawRequest(u8);
-    assert(resp.byteLength == 16);
-    return {
-      overrunBytes: resp.getBigUint64(0, true),
-      sentBytes: resp.getBigUint64(8, true),
-    }
+    return Reader.with(resp, 0, (r) => ({
+      overrunBytes: r.read(mm.u64),
+      sentBytes: r.read(mm.u64),
+      backpressuredNsec: r.read(mm.u64),
+    }));
 
   }
-  async reqSetHashTweak(tweak) {
+  async reqSetFlags(clear, set) {
     let dv = new DataView(new ArrayBuffer(9));
-    dv.setInt8(0, 4); // RPC_REQ_SET_HASH_TWEAK
-    dv.setBigUint64(1, tweak, true);
+    dv.setInt8(0, 4); // RPC_REQ_SET_FLAGS
+    dv.setBigUint64(1, clear, true);
+    dv.setBigUint64(9, set, true);
     let resp = await this.rawRequest(dv);
-    assert(resp.byteLength == 0);
-  }
-  maybeSetHashTweak() {
-    if (!this.setHashTweakPending) {
-      this.setHashTweakPending = true;
-      let u64 = new BigUint64Array(1);
-      crypto.getRandomValues(u64);
-      let tweak = u64[0];
-      console.log(`new tweak: ${tweak}`);
-      (async () => {
-        await this.reqSetHashTweak(tweak);
-        await sleep(300);
-        this.setHashTweakPending = false;
-      })();
-    }
+    assert(resp.byteLength == 8);
+    return resp.getBigUint64(0, true);
   }
 }
 
@@ -736,11 +726,10 @@ class DiagramThingKind {
     this.elmsByPtr = new Map();
   }
   renderThings() {
-    let frameThings = this.getThingsFromFrame();
     let seen = new Set();
     this.seen = seen;
-    for (let [ptr, thing] of frameThings.entries()) {
-      this.renderThing(ptr, thing);
+    for (let thing of this.getThingsFromFrame()) {
+      this.renderThing(thing);
     }
     for (let elm of Array.from(this.group.children)) {
       if (!this.seen.has(elm)) {
@@ -779,9 +768,9 @@ class DiagramThingKind {
 
 class DiagramHitboxes extends DiagramThingKind {
   getThingsFromFrame() {
-    return this.diagram.curFrame.hitboxes;
+    return this.diagram.curFrame.hitboxes.entries();
   }
-  renderThing(ptr, hitbox) {
+  renderThing([ptr, hitbox]) {
     let params = hitbox.params;
     let isCircle = params.isCircle;
     let x = hitbox.rect.min.x;
@@ -818,13 +807,13 @@ class DiagramNormalColliders extends DiagramThingKind {
   getThingsFromFrame() {
     return this.diagram.curFrame.normalColliders;
   }
-  renderThing(ptr, col) {
-    let extX = col.ext_pos_cur_val.x;
-    let extY = col.ext_pos_cur_val.y;
+  renderThing(col) {
+    let extX = col.extPosCur.x;
+    let extY = col.extPosCur.y;
     let dia = this.diagram;
-    for (let i = 0; i < col.segments_cur_vals.length; i++) {
-      let seg = col.segments_cur_vals[i];
-      let fakePtr = ptr + BigInt(i);
+    for (let i = 0; i < col.segmentsCur.length; i++) {
+      let seg = col.segmentsCur[i];
+      let fakePtr = col.ptr + BigInt(i);
       let line = this.getOrCreateElmFor(fakePtr, 'line');
       if (line.drawnExtX === extX &&
           line.drawnExtY === extY &&
@@ -846,19 +835,22 @@ class DiagramNormalColliders extends DiagramThingKind {
 
 class DiagramScolColliders extends DiagramThingKind {
   getThingsFromFrame() {
-    return this.diagram.curFrame.normalColliders;
+    return this.diagram.curFrame.scolColliders;
   }
-  renderThing(ptr, col) {
+  renderThing(data) {
     let dia = this.diagram;
-    for (let i = 0; i < col.segments_cur_vals.length; i++) {
-      let seg = col.segmentsCur[i];
-      let fakePtr = ptr + BigInt(i);
+    let scol = data.scol;
+    for (let i = 0; i < 4; i++) {
+      let fakePtr = data.ptr + BigInt(i);
+      let xxy = scol.readPtrFromWithin(scol.xxy_ptrs_cur.get(i), mm.XXY);
+
       let line = this.getOrCreateElmFor(fakePtr, 'line');
-      line.setAttribute('x1', dia.transformX(seg.rel_pos_1.x + uncached.ext_pos_cur.x));
-      line.setAttribute('y1', dia.transformY(seg.rel_pos_1.y + uncached.ext_pos_cur.y));
-      line.setAttribute('x2', dia.transformX(seg.rel_pos_2.x + uncached.ext_pos_cur.x));
-      line.setAttribute('y2', dia.transformY(seg.rel_pos_2.y + uncached.ext_pos_cur.y));
-      line.setAttribute('stroke', 'red');
+      let y = dia.transformY(xxy.y + data.extPosCur.y);
+      line.setAttribute('x1', dia.transformX(xxy.x_left + data.extPosCur.x));
+      line.setAttribute('y1', y);
+      line.setAttribute('x2', dia.transformX(xxy.x_right + data.extPosCur.x));
+      line.setAttribute('y2', y);
+      line.setAttribute('stroke', ['pink', 'green', 'blue', 'orange'][i]);
       line.setAttribute('stroke-width', 4);
     }
   }
@@ -869,11 +861,13 @@ class Diagram {
     this.svg = svg;
     this.hitboxes = new DiagramHitboxes(this);
     this.normalColliders = new DiagramNormalColliders(this);
+    this.scolColliders = new DiagramScolColliders(this);
   }
   renderFrame(frame) {
     this.curFrame = frame;
     this.hitboxes.renderThings();
     this.normalColliders.renderThings();
+    this.scolColliders.renderThings();
     this.curFrame = null;
   }
   transformX(x) {
@@ -893,8 +887,8 @@ class HoseFrame {
     this.number = number;
     this.worldID = worldID;
     this.hitboxes = new Map();
-    this.normalColliders = new Map();
-    this.scolColliders = new Map();
+    this.normalColliders = [];
+    this.scolColliders = [];
     this.collisions = [];
   }
 };
@@ -903,8 +897,10 @@ class HoseConn {
   constructor(baseURL) {
     this.wsw = new WSWrapper(`${baseURL}/ws/hose`, this);
     this.prevFrameByWorldID = new Map();
-    this.cachedDumps = new Map();
-    this.nextUniqueDumpId = 0;
+
+    this.normalColliderMap = new Map();
+    this.scolColliderMap = new Map();
+
     this.tagStats = {};
   }
   setWantOpen(wantOpen) {
@@ -914,50 +910,62 @@ class HoseConn {
   }
   onMessage(e) {
     assert(e.data instanceof ArrayBuffer);
-    let ab = e.data;
-    assert(ab.byteLength >= 8);
-    let tag = utf8Decoder.decode(new Uint8Array(ab, 0, 8)).replace(/\0+$/, '');
+    let r = new Reader(new DataView(e.data), 0);
+    let tag = r.read(mm.tag8);
 
     this.tagStats[tag] ??= [0, 0];
-    this.tagStats[tag][0] += ab.byteLength; // total length
+    this.tagStats[tag][0] += r.size; // total length
     this.tagStats[tag][1]++; // message count
 
     switch (tag) {
     case 'collisi':
-      this.parseCollision(ab);
+      this.parseCollision(r);
       break;
     case 'do_many':
-      this.parseDoMany(ab);
+      this.parseDoMany(r);
       break;
     case 'hitbox':
-      this.parseHitbox(ab);
+      this.parseHitbox(r);
       break;
-    case 'normcol':
+    case 'normco+':
+    case 'normco*':
+      this.parseNormalCollider(r);
+      break;
+    case 'normco-':
+      this.parseNormalColliderGone(r);
+      break;
     case 'scolcol':
-      this.parseSomeColliderCachedPart(ab);
+      this.parseScolCollider(r);
       break;
-    case 'normclp':
-      this.parseNormalCollider(ab);
-      break;
-    case 'scolclp':
-      this.parseScolCollider(ab);
+    case 'scolco~':
+      this.parseHashedScolCollider(r);
       break;
     case 'overrun':
-      this.parseOverrun(ab);
+      this.parseOverrun(r);
       break;
     default:
       console.log(`hose message with unknown tag ${JSON.stringify(tag)}`);
     }
+    r.expectEnd();
 
     //console.log(`hose message ${new BigUint64Array(e.data)}`);
   }
   onClose(e) {
   }
 
-  parseDoMany(ab) {
-    let u64 = new BigUint64Array(ab);
-    let worldID = u64[2];
+  finalizeFrame() {
+    for (let data of this.normalColliderMap.values()) {
+      if (data.firstSeenFrameNumber !== this.curFrame.number) {
+        this.curFrame.normalColliders.push(data);
+      }
+    }
+  }
+
+  parseDoMany(r) {
+    let areaSys = r.read(mm.u64);
+    let worldID = r.read(mm.u64);
     if (this.curFrame) {
+      this.finalizeFrame();
       this.prevFrameByWorldID.set(this.curFrame.worldID, this.curFrame);
       if (this.curFrame.worldID == 0) {
         diagram.renderFrame(this.curFrame);
@@ -967,65 +975,76 @@ class HoseConn {
     let number = prev ? prev.number + 1 : 0; // TODO: replace
     this.curFrame = new HoseFrame(number, worldID);
   }
-  parseCollision(ab) {
-    let u64 = new BigUint64Array(ab);
-    assert(u64.length == 4);
+  parseCollision(r) {
+    let info = {
+      hb1: r.read(mm.u64),
+      hb2: r.read(mm.u64),
+      ret: r.read(mm.u64),
+    };
     if (!this.curFrame) {
       return;
     }
-    this.curFrame.collisions.push({
-      hb1: u64[0],
-      hb2: u64[1],
-      ret: u64[2],
-    });
+    this.curFrame.collisions.push(info);
   }
-  parseHitbox(ab) {
-    let ptr = new BigUint64Array(ab)[1];
+  parseHitbox(r) {
+    let ptr = r.read(mm.u64);
+    let hb = r.read(mm.Hitbox, r.remaining());
     if (!this.curFrame) {
       return;
     }
-    this.curFrame.hitboxes.set(ptr, new mm.Hitbox.Local(new DataView(ab, 0x10)));
+    this.curFrame.hitboxes.set(ptr, hb);
   }
-  parseSomeColliderCachedPart(ab) {
-    let ptr = new DataView(ab).getBigUint64(8, true);
-    let dump = new DataView(ab, 0x10);
-    dump.uniqueDumpId = ++this.nextUniqueDumpId;
-      //console.log(`GOT dump for ${hex(ptr)}`);
-    this.cachedDumps.set(ptr, dump);
-  }
-  parseSomeColliderCommon(dv) {
-    let ptr = dv.getBigUint64(8, true);
-    let dump = this.cachedDumps.get(ptr);
-    if (!dump) {
-      // scramble the hashes so we hopefully get everything again
-      g_rpcConn.maybeSetHashTweak();
-      //console.log(`missing dump for ${ptr}`);
+  parseNormalCollider(r) {
+    let data = {
+      ptr: r.read(mm.u64),
+      col: r.read(mm.Collider, 0x3e0),
+      extPosCur: r.read(mm.Point2D),
+      extPosOld: r.read(mm.Point2D),
+      firstSeenFrameNumber: this.curFrame ? this.curFrame.number : null,
+      segmentsCur: [],
+      segmentsOld: [],
+    };
+    for (let i = 0, count = data.col.segments_cur.count; i < count; i++) {
+      data.segmentsCur.push(r.read(mm.ColliderSegment));
     }
-    return [ptr, dump];
-  }
-  parseNormalCollider(ab) {
-    let dv = new DataView(ab);
-    let [ptr, dump] = this.parseSomeColliderCommon(dv);
-    if (!dump) {
-      return;
+    for (let i = 0, count = data.col.segments_old.count; i < count; i++) {
+      data.segmentsOld.push(r.read(mm.ColliderSegment));
     }
-    let cached = new mm.ColliderCached.Local(dump, 0);
-    cached.uniqueDumpId = dump.uniqueDumpId;
-    cached.addrof = ptr;
-    this.curFrame.normalColliders.set(ptr, cached);
-  }
-  parseScolCollider(ab) {
-    let dv = new DataView(ab);
-    let [ptr, dump] = this.parseSomeColliderCommon(dv);
-    if (!dump) {
-      //console.log(`missing scol ${ptr}`);
-      return;
+    this.normalColliderMap.set(data.ptr, data);
+    if (this.curFrame) {
+      this.curFrame.normalColliders.push(data);
     }
-    let cached = new mm.ScolCached.Local(dump, 0);
-    cached.uniqueDumpId = dump.uniqueDumpId;
-    this.curFrame.scolColliders.set(ptr, cached);
   }
-  parseOverrun(ab) {
+  parseNormalColliderGone(r) {
+    let ptr = r.read(mm.u64);
+    this.normalColliderMap.delete(ptr);
+  }
+  parseScolCollider(r) {
+    let data = {
+      ptr: r.read(mm.u64),
+      scol: r.read(mm.Scol, 0x103c),
+      extPosCur: r.read(mm.Point2D),
+      extPosOld: r.read(mm.Point2D),
+    };
+    data.scol._ptr = data.ptr;
+    this.scolColliderMap.set(data.ptr, data);
+    if (this.curFrame) {
+      this.curFrame.scolColliders.push(data);
+    }
+  }
+  parseHashedScolCollider(r) {
+    let ptr = r.read(mm.u64);
+    let data = this.scolColliderMap.get(ptr);
+    if (data !== undefined) {
+      if (this.curFrame) {
+        this.curFrame.scolColliders.push(data);
+      }
+    } else {
+      // this could happen right when connecting
+      console.log(`!! missing scol for ${ptr}`);
+    }
+  }
+  parseOverrun(r) {
     document.getElementById('overrun').innerHTML = 'got overrun!';
   }
 }
@@ -1060,7 +1079,7 @@ async function go() {
           lastFrameNum = frame.number;
         }
         if (g_statsOn) {
-          console.log(`stats: overrunBytes=${stats.overrunBytes} sentBytes=${stats.sentBytes} frames=${frames} tagStats=${JSON.stringify(g_hoseConn.tagStats)}`);
+          console.log(`stats: overrunBytes=${stats.overrunBytes} sentBytes=${stats.sentBytes} bp=${stats.backpressuredNsec} frames=${frames} tagStats=${JSON.stringify(g_hoseConn.tagStats)}`);
         }
         g_hoseConn.tagStats = {};
       }

@@ -261,9 +261,7 @@ class Scol(GuestStruct):
     h60 = prop(0x28, lambda: ColliderListNodeOuter, dump=False)
     nodes = prop(0x88, fixed_array(ScolNode, 4), dump=False)
     mid = prop(0x108, lambda: sead_list(ScolMidNode)) # contains Colliders
-    sublist_120 = prop(0x120, ScolSublist) # contains Collider h60_2
-    sublist_140 = prop(0x140, ScolSublist) # contains Collider h60_4
-    sublist_160 = prop(0x160, ScolSublist) # contains Collider h60_3
+    sublists = prop(0x120, fixed_array(ScolSublist, 3))
     should_check_list1_mask = prop(0x180, u32)
     should_tick_38s = prop(0x184, u32)
     owner = prop(0x188, ptr_to(Actor))
@@ -356,8 +354,10 @@ class Collider(GuestStruct):
     # aka HasBlockInfo
     vtable = prop(0, GuestPtrPtr)
     scol_mid_node = prop(0x20, ScolMidNode, dump=False)
-    # nodes[0] is for BgCollisionSystem's colliders1; nodes[1] is for colliders2
-    nodes = prop(0x58, lambda: fixed_array(ColliderListNodeOuter, 5))
+    # nodes for BgCollisionSystem colliders1 and colliders2
+    bgcs_list_nodes = prop(0x58, fixed_array(ColliderListNodeOuter, 2))
+    # nodes for scol sublists 0, 2, 1
+    scol_sublist_nodes = prop(0x118, fixed_array(ColliderListNodeOuter, 3))
     bbox_cur = prop(0x238, Rect)
     bbox_old = prop(0x248, Rect)
     bbox_both = prop(0x258, Rect)
@@ -436,7 +436,7 @@ class BlockColliderListEntry(GuestStruct):
     node = prop(0, SeadListNode)
     # points to the struct that contains me:
     item = prop(0x10, ptr_to(BlockColliderListItem), dump_deep=True)
-    list_ = prop(0x18, lambda: ptr_to(sead_list(BlockColliderListEntry)))
+    list = prop(0x18, lambda: ptr_to(sead_list(BlockColliderListEntry)))
     sizeof_star = 0x20
 
 class BgCollisionGridSquare(GuestStruct):
@@ -860,12 +860,11 @@ def print_grid():
                 print(f'in ({x}, {y}) list{i}:')
                 _print_collider(collider)
 
-@commandlike
-def print_collider_sources():
+def collider_sources():
     world = ActorMgr.get().cur_world
     area_sys = world.area_sys
     bgcs = area_sys.bg_collision_system
-    sources = {
+    return {
         'bco': {bco.collider
                     for bco in area_sys.bloch.block_collider_owners},
         'bgcs1': {entry.owner for entry in bgcs.colliders1},
@@ -875,7 +874,19 @@ def print_collider_sources():
                     for slist in [square.list0, square.list1, square.list2]
                     for entry in slist},
     }
-    all_colliders = set().union(*sources.values())
-    for collider in sorted(all_colliders):
+
+def all_colliders_from(sources):
+    return sorted(set().union(*sources.values()))
+
+@commandlike
+def print_collider_sources():
+    sources = collider_sources()
+    all_colliders = all_colliders_from(sources)
+    for collider in all_colliders:
         my_sources = [source for (source, sset) in sources.items() if collider in sset]
         print(f'{collider}: {my_sources}')
+
+@commandlike
+def print_all_colliders():
+    for collider in all_colliders_from(collider_sources()):
+        dump(collider)

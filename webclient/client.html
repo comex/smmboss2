@@ -828,6 +828,34 @@ class DiagramThingKind {
     this.seen.add(elm);
     return elm;
   }
+
+  poly(key, points, {fill = 'none', stroke, strokeWidth}) {
+    let dia = this.diagram;
+    let stringified = '';
+    for (let i = 0, len = points.length; i < len; i += 2) {
+      let x = dia.transformX(points[i]);
+      let y = dia.transformY(points[i+1]);
+      stringified += ` ${x},${y}`;
+    }
+    let polygon = this.getOrCreateElmFor(key, 'polygon');
+    if (polygon._fill === fill &&
+        polygon._stroke === stroke &&
+        polygon._strokeWidth === strokeWidth &&
+        polygon.getAttribute('points') === stringified) {
+      return;
+    }
+    polygon.setAttribute('points', stringified);
+    polygon.setAttribute('fill', fill);
+    if (stroke !== undefined) {
+      polygon.setAttribute('stroke', stroke);
+      polygon.setAttribute('stroke-width', strokeWidth);
+      polygon.setAttribute('stroke-linejoin', 'bevel');
+    }
+    polygon._fill = fill;
+    polygon._stroke = stroke;
+    polygon._strokeWidth = strokeWidth;
+  }
+
   line(key, x1, y1, x2, y2, {stroke, strokeWidth}) {
     let dia = this.diagram;
     let line = this.getOrCreateElmFor(key, 'line');
@@ -857,6 +885,7 @@ class DiagramThingKind {
     line.stroke = stroke;
     line.strokeWidth = strokeWidth;
   }
+
   circle(key, cx, cy, r, {fill, stroke, strokeWidth}) {
     let dia = this.diagram;
     let circle = this.getOrCreateElmFor(key, 'circle');
@@ -934,6 +963,34 @@ class DiagramNormalColliders extends DiagramThingKind {
     return col.worldID;
   }
   renderThing(col) {
+    if (col.segmentsCur.length == 0) {
+      return;
+    }
+    let extX = col.extPosCur.x;
+    let extY = col.extPosCur.y;
+    let dia = this.diagram;
+    let points = [];
+    let prevSeg = col.segmentsCur[col.segmentsCur.length - 1], seg;
+    for (let i = 0, len = col.segmentsCur.length; i < len; i++, prevSeg = seg) {
+      seg = col.segmentsCur[i];
+      if (seg.rel_pos_1.x != prevSeg.rel_pos_2.x ||
+          seg.rel_pos_1.y != prevSeg.rel_pos_2.y) {
+        return this.renderAsLines(col);
+      }
+      points.push(
+        seg.rel_pos_1.x + extX,
+        seg.rel_pos_1.y + extY,
+        seg.rel_pos_2.x + extX,
+        seg.rel_pos_2.y + extY,
+      );
+    }
+    this.poly(
+      col.ptr,
+      points,
+      this.myStroke
+    );
+  }
+  renderAsLines(col) {
     let extX = col.extPosCur.x;
     let extY = col.extPosCur.y;
     let dia = this.diagram;
@@ -946,13 +1003,14 @@ class DiagramNormalColliders extends DiagramThingKind {
         seg.rel_pos_1.y + extY,
         seg.rel_pos_2.x + extX,
         seg.rel_pos_2.y + extY,
-        {
-          stroke: 'red',
-          strokeWidth: 4,
-        }
+        this.myStroke
       );
     }
   }
+  myStroke = {
+    stroke: 'red',
+    strokeWidth: 2,
+  };
 }
 
 class DiagramScolColliders extends DiagramThingKind {
@@ -965,23 +1023,35 @@ class DiagramScolColliders extends DiagramThingKind {
   renderThing(data) {
     let dia = this.diagram;
     let scol = data.scol;
+    if (0) {
+      for (let i = 0; i < 4; i++) {
+        let fakePtr = data.ptr + BigInt(i);
+        let xxy = scol.readPtrFromWithin(scol.xxy_ptrs_cur.get(i), mm.XXY);
+
+        this.line(
+          fakePtr,
+
+          xxy.x_left + data.extPosCur.x,
+          xxy.y + data.extPosCur.y,
+          xxy.x_right + data.extPosCur.x,
+          xxy.y + data.extPosCur.y,
+
+          {
+            stroke: ['pink', 'green', 'blue', 'orange'][i],
+            strokeWidth: 4,
+          }
+        );
+      }
+    }
     for (let i = 0; i < 4; i++) {
-      let fakePtr = data.ptr + BigInt(i);
-      let xxy = scol.readPtrFromWithin(scol.xxy_ptrs_cur.get(i), mm.XXY);
+      let resultListIdx = scol.result_list_idxs_cur.get(i);
+      let resultList = scol.result_lists_cur.get(i);
+      let result = resultList.get(resultListIdx);
+      if (result.valid) {
+        console.log(result.angle);
 
-      this.line(
-        fakePtr,
+      }
 
-        xxy.x_left + data.extPosCur.x,
-        xxy.y + data.extPosCur.y,
-        xxy.x_right + data.extPosCur.x,
-        xxy.y + data.extPosCur.y,
-
-        {
-          stroke: ['pink', 'green', 'blue', 'orange'][i],
-          strokeWidth: 4,
-        }
-      );
     }
   }
 }
@@ -1014,17 +1084,18 @@ class DiagramBGCollisionTwoPoints extends DiagramThingKind {
     return data.worldID;
   }
   renderThing(data) {
-      this.line(
-        fakePtr,
-
-        xxy.x_left + data.extPosCur.x,
-        xxy.y + data.extPosCur.y,
-        xxy.x_right + data.extPosCur.x,
-        xxy.y + data.extPosCur.y,
-
-        ['pink', 'green', 'blue', 'orange'][i],
-        4
-      );
+    let hit = data.ret;
+    this.line(
+      this.genericElmsCount++,
+      data.xy1.x,
+      data.xy1.y,
+      data.xy2.x,
+      data.xy2.y,
+      {
+        stroke: hit ? 'black' : 'rgba(0, 0, 0, 0.25)',
+        strokeWidth: 1,
+      }
+    );
   }
 }
 class Diagram {
@@ -1035,6 +1106,7 @@ class Diagram {
       this.normalColliders = new DiagramNormalColliders(this),
       this.scolColliders = new DiagramScolColliders(this),
       this.bgCollisionPoints = new DiagramBGCollisionPoints(this),
+      this.bgCollisionTwoPoints = new DiagramBGCollisionTwoPoints(this),
     ];
     this.worldID = 0;
   }
@@ -1055,7 +1127,10 @@ class Diagram {
     return size; // todo: match camera
   }
 };
-let diagram = new Diagram(document.getElementById('diagram'));
+let g_diagram = new Diagram(document.getElementById('diagram'));
+
+class NormalCollider {
+}
 
 class HoseFrame {
   constructor(number) {
@@ -1153,7 +1228,7 @@ class HoseConn {
     if (worldID == 0) {
       this.finalizeFrame();
       let oldFrame = this.curFrame;
-      diagram.renderFrame(oldFrame);
+      g_diagram.renderFrame(oldFrame);
       this.curFrame = new HoseFrame(oldFrame.number + 1);
       this.prevFrame = oldFrame;
     };
@@ -1183,7 +1258,8 @@ class HoseConn {
     this.curFrame.hitboxes.set(ptr, hb);
   }
   parseNormalCollider(r) {
-    let data = {
+    let data = new NormalCollider;
+    Object.assign(data, {
       ptr: r.read(mm.u64),
       col: r.read(mm.Collider, 0x3e0),
       extPosCur: r.read(mm.Point2D),
@@ -1191,7 +1267,7 @@ class HoseConn {
       firstSeenFrameNumber: this.curFrame.number,
       segmentsCur: [],
       segmentsOld: [],
-    };
+    });
     for (let i = 0, count = data.col.segments_cur.count; i < count; i++) {
       data.segmentsCur.push(r.read(mm.ColliderSegment));
     }

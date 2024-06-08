@@ -241,17 +241,11 @@ struct mm_collision_ctx {
 };
 
 struct mm_collision_bic {
-    uint32_t block_info;
-    uint32_t maybe_pad;
-    mm_normal_collider *collider;
+    PSEUDO_TYPE_SIZE(0x10);
 };
 
 struct mm_collision_point {
-    char segment_which_side;
-    float intersection_x;
-    float intersection_y;
-    uint32_t angle;
-    mm_collision_bic bic;
+    PSEUDO_TYPE_SIZE(0x20);
 };
 
 struct mm_point2d {
@@ -395,17 +389,19 @@ HOOK_DEFINE_TRAMPOLINE(Stub_StateMachine_changeState) {
 HOOK_DEFINE_TRAMPOLINE(Stub_cctx_bg_collide_against_twopoint) {
     static bool Callback(mm_collision_ctx *self, mm_collision_point *cp, const mm_point2d *xy1, const mm_point2d *xy2, int shapemask, bool enable1, bool enable2) {
         bool ret = Orig(self, cp, xy1, xy2, shapemask, enable1, enable2);
-        s_hose.write_packet([&](auto &w) {
-            w.write_tag({"bgcol2p"});
-            w.write_prim((uint8_t)self->area_system()->world_id());
-            w.write_prim(*xy1);
-            w.write_prim(*xy2);
-            w.write_prim(shapemask);
-            w.write_prim(enable1);
-            w.write_prim(enable2);
-            w.write_prim(ret);
-            w.write_prim(*cp);
-        });
+        if (test_rpc_flag(RPC_FLAG_SEND_BG_EVENTS)) {
+            s_hose.write_packet([&](auto &w) {
+                w.write_tag({"bgcol2p"});
+                w.write_prim((uint8_t)self->area_system()->world_id());
+                w.write_prim(*xy1);
+                w.write_prim(*xy2);
+                w.write_prim(shapemask);
+                w.write_prim(enable1);
+                w.write_prim(enable2);
+                w.write_prim(ret);
+                w.write_prim(*cp);
+            });
+        }
         return ret;
     }
     static constexpr auto GetAddr = &mm_addrs::cctx_bg_collide_against_twopoint;
@@ -414,15 +410,17 @@ HOOK_DEFINE_TRAMPOLINE(Stub_cctx_bg_collide_against_twopoint) {
 HOOK_DEFINE_TRAMPOLINE(Stub_cctx_bg_collide_against_point) {
     static bool Callback(mm_collision_ctx *self, mm_collision_bic *bic, const mm_point2d *xy, bool enable1, bool enable2) {
         bool ret = Orig(self, bic, xy, enable1, enable2);
-        s_hose.write_packet([&](auto &w) {
-            w.write_tag({"bgcol1p"});
-            w.write_prim((uint8_t)self->area_system()->world_id());
-            w.write_prim(*xy);
-            w.write_prim(enable1);
-            w.write_prim(enable2);
-            w.write_prim(ret);
-            w.write_prim(*bic);
-        });
+        if (test_rpc_flag(RPC_FLAG_SEND_BG_EVENTS)) {
+            s_hose.write_packet([&](auto &w) {
+                w.write_tag({"bgcol1p"});
+                w.write_prim((uint8_t)self->area_system()->world_id());
+                w.write_prim(*xy);
+                w.write_prim(enable1);
+                w.write_prim(enable2);
+                w.write_prim(ret);
+                w.write_prim(*bic);
+            });
+        }
         return ret;
     }
     static constexpr auto GetAddr = &mm_addrs::cctx_bg_collide_against_point;

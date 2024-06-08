@@ -528,6 +528,19 @@ class BgCollisionSystem(GuestStruct):
 
     grid = prop(0x18, ptr_to(BgCollisionGrid))
 
+class CollisionBIC(GuestStruct):
+    block_info = prop(0, u32)
+    pad = prop(4, u32)
+    collider = prop(8, Collider)
+    sizeof_star = 0x10
+
+class CollisionPoint(GuestStruct):
+    segment_which_side = prop(0, u8)
+    intersection_point = prop(4, Point2D)
+    angle = prop(0xc, u32)
+    bic = prop(0x10, CollisionBIC)
+    sizeof_star = 0x20
+
 class Tile(GuestStruct):
     what_to_draw = prop(0, u32)
     field_4 = prop(4, u32)

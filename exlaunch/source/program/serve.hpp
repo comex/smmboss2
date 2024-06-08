@@ -149,6 +149,7 @@ void serve_main();
 enum rpc_flags : uint64_t {
     RPC_FLAG_BACKPRESSURE = 1,
     RPC_FLAG_SEND_COLLS = 2,
+    RPC_FLAG_SEND_BG_EVENTS = 4,
 };
 extern std::atomic<uint64_t> g_cur_rpc_flags;
 static inline bool test_and_clear_rpc_flag(uint64_t flag) {
@@ -161,4 +162,8 @@ static inline bool test_and_clear_rpc_flag(uint64_t flag) {
     return ret;
 }
 
+static inline bool test_rpc_flag(uint64_t flag) {
+    uint64_t flags = g_cur_rpc_flags.load(std::memory_order_acquire);
+    return (flags & flag) == flag;
+}
 

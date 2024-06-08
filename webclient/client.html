@@ -940,6 +940,12 @@ class HoseConn {
     case 'scolco~':
       this.parseHashedScolCollider(r);
       break;
+    case 'bgcol2p':
+      this.parseBGCollisionTwoPoint(r);
+      break;
+    case 'bgcol1p':
+      this.parseBGCollisionPoint(r);
+      break;
     case 'overrun':
       this.parseOverrun(r);
       break;
@@ -1042,6 +1048,37 @@ class HoseConn {
     } else {
       // this could happen right when connecting
       console.log(`!! missing scol for ${ptr}`);
+    }
+  }
+  parseBGCollisionTwoPoint(r) {
+    let data = {
+      kind: 'bgcol2p',
+      worldID: r.read(mm.u64),
+      xy1: r.read(mm.Point2D),
+      xy2: r.read(mm.Point2D),
+      shapemask: r.read(mm.u32),
+      enable1: r.read(mm.u8),
+      enable2: r.read(mm.u8),
+      ret: r.read(mm.u8),
+      cp: r.read(mm.CollisionPoint),
+    };
+    data.bic = data.cp.bic;
+    if (this.curFrame) {
+      this.curFrame.events.push(data);
+    }
+  }
+  parseBGCollisionPoint(r) {
+    let data = {
+      kind: 'bgcol1p',
+      worldID: r.read(mm.u64),
+      xy: r.read(mm.Point2D),
+      enable1: r.read(mm.u8),
+      enable2: r.read(mm.u8),
+      ret: r.read(mm.u8),
+      bic: r.read(mm.CollisionBIC),
+    };
+    if (this.curFrame) {
+      this.curFrame.events.push(data);
     }
   }
   parseOverrun(r) {

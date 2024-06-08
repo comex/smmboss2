@@ -151,7 +151,7 @@ class CompoundTypeLocal {
     assert(this._ptr !== undefined);
     let offset = ptr - this._ptr;
     assert(offset >= 0n && offset < 0x100000n);
-    return ty.getLocal(this.dv, this.off + Number(offset)); 
+    return ty.getLocal(this.dv, this.off + Number(offset));
   }
 }
 
@@ -183,8 +183,11 @@ class FixedArray extends CompoundType {
           }
           return ret;
         }
+        map(f) {
+          return Array.from(Array(this.count), (_, i) => f(this.get(i), i));
+        }
         serialize() {
-          return Array.from(Array(this.count), (_, i) => this.get(i).serialize());
+          return this.map((x) => x.serialize());
         }
       }
       Local.prototype.count = count;
@@ -200,8 +203,11 @@ class FixedArray extends CompoundType {
           return getLocal(this.dv, this.off + i * elmTySizeof);
         }
         // could implement set
+        map(f) {
+          return Array.from(Array(this.count), (_, i) => f(this.get(i), i));
+        }
         serialize() {
-          return Array.from(Array(this.count), (_, i) => this.get(i));
+          return this.map((x) => x);
         }
       }
       Local.prototype.count = count;
@@ -357,22 +363,36 @@ class Struct extends CompoundType {
   }
 }
 
-class MM {
-  constructor() {
-    this.u8  = new IntType('u8',  1, 'Uint8');
-    this.u16 = new IntType('u16', 2, 'Uint16');
-    this.u32 = new IntType('u32', 4, 'Uint32');
-    this.u64 = new IntType('u64', 8, 'BigUint64', {needBigWrap: true});
-    this.s8  = new IntType('s8',  1, 'Int8');
-    this.s16 = new IntType('s16', 2, 'Int16');
-    this.s32 = new IntType('s32', 4, 'Int32');
-    this.s64 = new IntType('s64', 8, 'BigInt64', {needBigWrap: true});
-    this.f32 = new IntType('f32', 4, 'Float32');
-    this.f64 = new IntType('f64', 8, 'Float64');
-    this.tag8 = new Tag8Type;
-    this.CString = this.GuestCString = new CStringType;
-    this.GuestPtr = this.u64;
-    this.extraLocalMethodsFor = {};
+let ty = {
+  u8:  new IntType('u8',  1, 'Uint8'),
+  u16: new IntType('u16', 2, 'Uint16'),
+  u32: new IntType('u32', 4, 'Uint32'),
+  u64: new IntType('u64', 8, 'BigUint64', {needBigWrap: true}),
+  s8 : new IntType('s8',  1, 'Int8'),
+  s16: new IntType('s16', 2, 'Int16'),
+  s32: new IntType('s32', 4, 'Int32'),
+  s64: new IntType('s64', 8, 'BigInt64', {needBigWrap: true}),
+  f32: new IntType('f32', 4, 'Float32'),
+  f64: new IntType('f64', 8, 'Float64'),
+  tag8: new Tag8Type,
+  CString: new CStringType,
+  GuestCString: CString,
+  GuestPtr: u64,
+};
+
+class MMTypes {
+  static extraLocalMethodsFor = {};
+
+  constructor(helloInfo, exportJson) {
+    Object.assign(this, ty);
+
+    let buildId = toHex(helloInfo[1].buildId) + '00000000000000000000000000000000';
+    assert(buildId in exportJson);
+    this.export = exportJson[buildId];
+    this.classes = this.export.classes;
+    for (let name in this.classes) {
+      this.loadType(name);
+    }
   }
 
   loadType(name) {
@@ -404,18 +424,8 @@ class MM {
     return ty;
   }
 
-  loadTypes(helloInfo, exportJson) {
-    let buildId = toHex(helloInfo[1].buildId) + '00000000000000000000000000000000';
-    assert(buildId in exportJson);
-    this.export = exportJson[buildId];
-    this.classes = this.export.classes;
-    for (let name in this.classes) {
-      this.loadType(name);
-    }
-  }
 }
-mm = new MM;
-mm.extraLocalMethodsFor.Rect = (base) => class extends base {
+MMTypes.extraLocalMethodsFor.Rect = (base) => class extends base {
   width() {
     return this.max.x - this.min.x;
   }
@@ -479,7 +489,7 @@ class Reader {
 
 // These could be structs but using Reader avoids a circular dependency
 function readExlUtilRange(r) {
-  return {start: r.read(mm.u64), size: r.read(mm.u64)}
+  return {start: r.read(ty.u64), size: r.read(ty.u64)}
 }
 function readHelloModInfo(r) {
   return r.readArrayUnbounded(() => ({
@@ -487,7 +497,7 @@ function readHelloModInfo(r) {
     text: readExlUtilRange(r),
     rodata: readExlUtilRange(r),
     data: readExlUtilRange(r),
-    buildId: r.readArray(16, () => r.read(mm.u8)),
+    buildId: r.readArray(16, () => r.read(ty.u8)),
   }));
 }
 
@@ -597,6 +607,13 @@ class WSWrapper {
     this.wantOpen = wantOpen;
     this.openCloseWSAsNeeded();
   }
+  kill() {
+    if (this.state == 'open') {
+      this.ws.close();
+    }
+    this.state = 'dead';
+    this.ws = null;
+  }
   openCloseWSAsNeeded() {
     if (this.state == 'idle' && this.wantOpen) {
       this.openWS();
@@ -652,38 +669,46 @@ class RPCConn {
   constructor(baseURL) {
     this.wsw = new WSWrapper(`${baseURL}/ws/rpc`, this);
     this.wsw.setWantOpen(true);
-    this.responseHandler = null;
-    this.updateCond = new Cond;
-    this.openedCond = new Cond;
-    this.pendingResponses = [];
-    this.pendingResponseCond = new Cond;
     this.rpcThrottle = new Throttle('rpc');
-    this.helloInfo = null;
+    this.helloInfoPR = Promise.withResolvers();
+    this.openedCond = new Cond;
+  }
+  kill() {
+    this.wsw.kill();
+    this.helloInfoPR.reject('RPCConn killed');
   }
   onOpen(e) {
     this.isOpen = true;
-    this.updateCond.broadcast();
+    this.pendingResponsePRs = [this.helloPendingResponsePR()];
     this.openedCond.broadcast();
-    this.pendingResponseCallbacks = [(data) => {
+  }
+  helloPendingResponsePR() {
+    let pr = Promise.withResolvers();
+    pr.then((data) => {
       if (typeof data == 'string') {
-        console.log(`early error! ${data}`);
+        this.helloInfoPR.reject(`early error! ${data}`);
         return;
       }
       assert(data instanceof ArrayBuffer);
-      this.helloInfo = readHelloModInfo(new Reader(new DataView(data)));
-      this.updateCond.broadcast();
-    }];
+      this.helloInfoPR.resolve(readHelloModInfo(new Reader(new DataView(data))));
+    }, (reason) => {
+      // TODO: check for closed
+      this.helloInfoPR.reject(reason);
+    });
   }
   onMessage(e) {
-    let cb = this.pendingResponseCallbacks.shift(1);
-    if (!cb) {
+    let pr = this.pendingResponsePRs.shift();
+    if (!pr) {
       throw new Error('got unsolicited packet');
     }
-    cb(e.data);
+    pr.resolve(e.data);
   }
   onClose(e) {
     this.isOpen = false;
-    this.updateCond.broadcast();
+    while (this.pendingResponsePRs.length) {
+      let pr = this.pendingResponsePRs.shift();
+      pr.reject('closed');
+    }
   }
   async rawRequest(req) {
     outerLoop: while (1) {
@@ -698,18 +723,16 @@ class RPCConn {
       this.wsw.ws.send(req);
       let haveResponse = false;
       let response = null;
-      this.pendingResponseCallbacks.push((resp) => {
-        response = resp;
-        haveResponse = true;
-        this.updateCond.broadcast();
-      });
-
-      while (!haveResponse) {
-        if (!this.isOpen) {
-          console.log('RPC waiting for re-open');
-          continue outerLoop;
-        }
-        await this.updateCond;
+      let pr = Promise.withResolvers();
+      this.pendingResponsePRs.push(pr);
+      let response;
+      try {
+        response = await pr.promise;
+      } catch (e) {
+        console.log(`well it didn't happen because: ${e}`);
+        // TODO: 
+        //console.log('RPC waiting for re-open');
+        //continue outerLoop;
       }
 
       if (typeof response == 'string') {
@@ -751,9 +774,9 @@ class RPCConn {
     let u8 = Uint8Array.of(3); // RPC_REQ_GET_STATS
     let resp = await this.rawRequest(u8);
     return Reader.with(resp, 0, (r) => ({
-      overrunBytes: r.read(mm.u64),
-      sentBytes: r.read(mm.u64),
-      backpressuredNsec: r.read(mm.u64),
+      overrunBytes: r.read(ty.u64),
+      sentBytes: r.read(ty.u64),
+      backpressuredNsec: r.read(ty.u64),
     }));
 
   }
@@ -1136,6 +1159,7 @@ class HoseFrame {
   constructor(number) {
     this.number = number;
     this.hitboxes = new Map();
+    this.relevantHoseMessages = [];
     this.normalColliders = [];
     this.scolColliders = [];
     this.bgCollisionPointEvents = [];
@@ -1145,11 +1169,32 @@ class HoseFrame {
   toString() {
     return `frame[${this.number}]`;
   }
+
+  static saveFrames(frames) {
+    let bufferToId = new Map;
+    let idToContentString = [];
+    let frameInfos = [];
+    for (let frame of frames) {
+      let frameBufferIds = [];
+      for (let buffer of frame.relevantHoseMessages) {
+        let bufferId = bufferToId.get(buffer);
+        if (bufferId === undefined) {
+          bufferId = idToContentString.length;
+          idToContentString.push(String.fromCharCode(...new Uint8Array(buffer)));
+        }
+      }
+      let frameInfo = {number: frame.number, bufferIds: frameBufferIds};
+      frameInfos.push(frameInfo);
+    }
+    return {
+      frameInfos,
+      idToContentString,
+    };
+  }
 };
 
-class HoseConn {
-  constructor(baseURL) {
-    this.wsw = new WSWrapper(`${baseURL}/ws/hose`, this);
+class HoseParser {
+  constructor() {
     this.prevFrame = null;
     this.curFrame = new HoseFrame(0);
 
@@ -1158,19 +1203,16 @@ class HoseConn {
 
     this.tagStats = {};
   }
-  setWantOpen(wantOpen) {
-    this.wsw.setWantOpen(wantOpen);
-  }
-  onOpen(e) {
-  }
-  onMessage(e) {
-    assert(e.data instanceof ArrayBuffer);
-    let r = new Reader(new DataView(e.data), 0);
+  parse(buffer) {
+    assert(buffer instanceof ArrayBuffer);
+    let r = new Reader(new DataView(buffer), 0);
     let tag = r.read(mm.tag8);
 
     this.tagStats[tag] ??= [0, 0];
     this.tagStats[tag][0] += r.size; // total length
     this.tagStats[tag][1]++; // message count
+
+    let bufferToSave = null;
 
     switch (tag) {
     case 'collisi':
@@ -1193,7 +1235,7 @@ class HoseConn {
       this.parseScolCollider(r);
       break;
     case 'scolco~':
-      this.parseHashedScolCollider(r);
+      bufferToSave = this.parseHashedScolCollider(r);
       break;
     case 'bgcol2p':
       this.parseBGCollisionTwoPoint(r);
@@ -1209,9 +1251,14 @@ class HoseConn {
     }
     r.expectEnd();
 
+    if (bufferToSave === null) {
+      // either not scol, or parseScolCollider returned null
+      bufferToSave = buffer;
+    }
+    assert(bufferToSave instanceof ArrayBuffer);
+    this.curFrame.relevantHoseMessages.push(bufferToSave);
+
     //console.log(`hose message ${new BigUint64Array(e.data)}`);
-  }
-  onClose(e) {
   }
 
   finalizeFrame() {
@@ -1223,8 +1270,8 @@ class HoseConn {
   }
 
   parseDoMany(r) {
-    let areaSys = r.read(mm.u64);
-    let worldID = r.read(mm.u64);
+    let areaSys = r.read(ty.u64);
+    let worldID = r.read(ty.u64);
     if (worldID == 0) {
       this.finalizeFrame();
       let oldFrame = this.curFrame;
@@ -1234,9 +1281,9 @@ class HoseConn {
     };
   }
   parseCollision(r) {
-    let hb1 = r.read(mm.u64);
-    let hb2 = r.read(mm.u64);
-    let ret = r.read(mm.u64);
+    let hb1 = r.read(ty.u64);
+    let hb2 = r.read(ty.u64);
+    let ret = r.read(ty.u64);
     let data = {
       hb1: this.curFrame.hitboxes.get(hb1),
       hb2: this.curFrame.hitboxes.get(hb2),
@@ -1252,15 +1299,15 @@ class HoseConn {
     this.curFrame.hitboxCollisionEvents.push(data);
   }
   parseHitbox(r) {
-    let ptr = r.read(mm.u64);
+    let ptr = r.read(ty.u64);
     let hb = r.read(mm.Hitbox, r.remaining() - 1);
-    hb.worldID = r.read(mm.s8);
+    hb.worldID = r.read(ty.s8);
     this.curFrame.hitboxes.set(ptr, hb);
   }
   parseNormalCollider(r) {
     let data = new NormalCollider;
     Object.assign(data, {
-      ptr: r.read(mm.u64),
+      ptr: r.read(ty.u64),
       col: r.read(mm.Collider, 0x3e0),
       extPosCur: r.read(mm.Point2D),
       extPosOld: r.read(mm.Point2D),
@@ -1274,45 +1321,49 @@ class HoseConn {
     for (let i = 0, count = data.col.segments_old.count; i < count; i++) {
       data.segmentsOld.push(r.read(mm.ColliderSegment));
     }
-    data.worldID = r.read(mm.s8);
+    data.worldID = r.read(ty.s8);
     this.normalColliderMap.set(data.ptr, data);
     this.curFrame.normalColliders.push(data);
   }
   parseNormalColliderGone(r) {
-    let ptr = r.read(mm.u64);
+    let ptr = r.read(ty.u64);
     this.normalColliderMap.delete(ptr);
   }
   parseScolCollider(r) {
     let data = {
-      ptr: r.read(mm.u64),
+      ptr: r.read(ty.u64),
       scol: r.read(mm.Scol, 0x103c),
       extPosCur: r.read(mm.Point2D),
       extPosOld: r.read(mm.Point2D),
-      worldID: r.read(mm.s8),
+      worldID: r.read(ty.s8),
+      originalMessage: r.dv.buffer,
     };
     data.scol._ptr = data.ptr;
     this.scolColliderMap.set(data.ptr, data);
     this.curFrame.scolColliders.push(data);
   }
   parseHashedScolCollider(r) {
-    let ptr = r.read(mm.u64);
+    let ptr = r.read(ty.u64);
     let data = this.scolColliderMap.get(ptr);
     if (data !== undefined) {
       this.curFrame.scolColliders.push(data);
+      // return the message that needs to be saved if we save to file
+      return data.originalMessage;
     } else {
       // this could happen right when connecting
       console.log(`!! missing scol for ${ptr}`);
+      return null;
     }
   }
   parseBGCollisionTwoPoint(r) {
     let data = {
-      worldID: r.read(mm.u8),
+      worldID: r.read(ty.u8),
       xy1: r.read(mm.Point2D),
       xy2: r.read(mm.Point2D),
-      shapemask: r.read(mm.u32),
-      enable1: r.read(mm.u8),
-      enable2: r.read(mm.u8),
-      ret: r.read(mm.u8),
+      shapemask: r.read(ty.u32),
+      enable1: r.read(ty.u8),
+      enable2: r.read(ty.u8),
+      ret: r.read(ty.u8),
       cp: r.read(mm.CollisionPoint),
     };
     data.bic = data.cp.bic;
@@ -1320,11 +1371,11 @@ class HoseConn {
   }
   parseBGCollisionPoint(r) {
     let data = {
-      worldID: r.read(mm.u8),
+      worldID: r.read(ty.u8),
       xy: r.read(mm.Point2D),
-      enable1: r.read(mm.u8),
-      enable2: r.read(mm.u8),
-      ret: r.read(mm.u8),
+      enable1: r.read(ty.u8),
+      enable2: r.read(ty.u8),
+      ret: r.read(ty.u8),
       bic: r.read(mm.CollisionBIC),
     };
     this.curFrame.bgCollisionPointEvents.push(data);
@@ -1334,61 +1385,45 @@ class HoseConn {
   }
 }
 
-async function updateFlags() {
-  let flags = [
-    ['controls-backpressure', 1n],
-    ['controls-bg-events', 4n],
-  ];
-  let allFlagVals = 0n;
-  let setFlagVals = 0n;
-  for (let [flagName, flagVal] of flags) {
-    allFlagVals |= flagVal;
-    if (document.getElementById(flagName).checked) {
-      setFlagVals |= flagVal;
-    }
+class HoseConn {
+  constructor(baseURL) {
+    this.wsw = new WSWrapper(`${baseURL}/ws/hose`, this);
+    this.wsw.setWantOpen(true);
   }
-  await g_rpcConn.reqSetFlags(allFlagVals & ~setFlagVals, setFlagVals);
-}
-
-async function handleCheckboxes() {
-  let checkedCond = new Cond;
-  for (let input of document.querySelectorAll('#controls input[type=checkbox]')) {
-    input.checked = localStorage[input.id] === '1';
-    input.onchange = (e) => {
-      localStorage[input.id] = input.checked ? '1' : '0';
-      checkedCond.broadcast();
-    }
+  onOpen(e) {
   }
-  while (1) {
-    await Cond.waitMulti(checkedCond, g_rpcConn.openedCond);
-    await updateFlags();
+  onMessage(e, wsw) {
+    this.parser.parse(e.data);
+  }
+  onClose(e) {
+  }
+  kill() {
+    this.wsw.kill();
   }
 }
 
-let theBaseURL = 'ws://neb-solidus:8000';
+g_exportJsonPromise = (async () => {
+  return await (await fetch('../exlaunch/build/export.json')).json();
+})();
 
-async function go() {
-  g_rpcConn = new RPCConn(theBaseURL);
-  g_hoseConn = new HoseConn(theBaseURL);
-  handleCheckboxes();
-  await Promise.all([
-    (async () => {
-      g_exportJson = await (await fetch('../exlaunch/build/export.json')).json();
-    })(),
-    (async () => {
-      while (g_rpcConn.helloInfo === null) {
-        await g_rpcConn.updateCond;
-      }
-    })(),
-  ]);
-  mm.loadTypes(g_rpcConn.helloInfo, g_exportJson);
-  g_hoseConn.setWantOpen(true);
-  (async () => {
+class Conns {
+  constructor(baseURL) {
+    this.baseURL = baseURL;
+    this.rpc = new RPCConn(baseURL);
+    this.hose = new HoseConn(baseURL);
+    this.dead = false;
+
+    this.stillAlivePR = Promise.withResolvers();
+    this.mmTypesPromise = this.doMMTypes();
+    this.doStats();
+    this.doCheckboxes();
+  }
+  async doStats() {
     let lastFrameNum = 0;
-    while (1) {
-      if (g_rpcConn.isOpen) {
-        let stats = await g_rpcConn.reqGetStats();
-        let frame = g_hoseConn.curFrame;
+    while (!this.dead) {
+      if (this.rpc.isOpen) {
+        let stats = await this.rpc.reqGetStats();
+        let frame = this.hose.curFrame;
         let frames = frame.number - lastFrameNum;
         lastFrameNum = frame.number;
         let text = `stats: overrunBytes=${stats.overrunBytes} sentBytes=${stats.sentBytes} bp=${stats.backpressuredNsec} frames=${frames} tagStats=${JSON.stringify(g_hoseConn.tagStats)}\n`
@@ -1399,14 +1434,63 @@ async function go() {
         while (parent.childElementCount > 10) {
           parent.removeChild(parent.lastChild);
         }
-        g_hoseConn.tagStats = {};
+        this.hose.tagStats = {};
       }
       await sleep(1000);
     }
-  })();
+  }
+  async doMMTypes() {
+    let [helloInfo, exportJson] = await Promise.any([
+      Promise.all([this.rpc.helloInfoPR.promise, g_exportJsonPromise]),
+      this.stillAlivePR.promise,
+    ]);
+    return new MMTypes(helloInfo, exportJson);
+  }
+  async function updateFlags() {
+    let flags = [
+      ['controls-backpressure', 1n],
+      ['controls-bg-events', 4n],
+    ];
+    let allFlagVals = 0n;
+    let setFlagVals = 0n;
+    for (let [flagName, flagVal] of flags) {
+      allFlagVals |= flagVal;
+      if (document.getElementById(flagName).checked) {
+        setFlagVals |= flagVal;
+      }
+    }
+    await g_rpcConn.reqSetFlags(allFlagVals & ~setFlagVals, setFlagVals);
+  }
 
-
+  async function doCheckboxes() {
+    let checkedPR = Promise.withResolvers();
+    for (let input of document.querySelectorAll('#controls input[type=checkbox]')) {
+      input.checked = localStorage[input.id] === '1';
+      input.onchange = (e) => {
+        localStorage[input.id] = input.checked ? '1' : '0';
+        checkedPR.resolve();
+      }
+    }
+    while (1) {
+      await Promise.any([
+        Promise.all([
+          checkedPR,
+          this.rpc.openedCond,
+        ]),
+        this.stillAlivePR.promise,
+      ]);
+      await this.updateFlags();
+    }
+  }
+  kill() {
+    this.dead = true;
+    this.rpc.kill();
+    this.hose.kill();
+    this.stillAlivePR.reject('Conns killed');
+  }
 }
-go();
+
+
+g_conns = new Conns('ws://neb-solidus:8000');
 
 </script>

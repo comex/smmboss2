@@ -2,11 +2,56 @@
 #diagram {
   border: 1px solid grey;
 }
+#columns {
+  display: grid;
+  gap: 10px;
+
+  grid-template-columns: max-content 1fr;
+}
+
+#col2 {
+  display: flex;
+  flex-direction: column;
+}
+#controls {
+  border: 1px solid grey;
+
+  align-content: end;
+  margin-top: auto;
+}
+#controls > label {
+  display: block;
+  transition: background-color 0.5s ease-out;
+  background-color: #fff;
+}
+#controls > label:hover {
+  transition: background-color 0.0s linear;
+  background-color: #f3f3f3;
+
+}
+#stats {
+  border: 1px solid grey;
+  font-family: monospace;
+  height: 300px;
+  overflow: scroll;
+}
+#stats > div {
+  margin: 10px 0;
+}
 </style>
 
 <div id="overrun"></div>
-<svg width="500" height="500" id="diagram">
-</svg>
+<div id="columns">
+<svg width="500" height="500" id="diagram"></svg>
+<div id="col2">
+<div id="stats">
+</div>
+<div id="controls">
+<label for="controls-backpressure"><input type="checkbox" id="controls-backpressure">Backpressure</label>
+<label for="controls-bg-events"><input type="checkbox" id="controls-bg-events">Background Collision Events</label>
+</div>
+</div>
+</div>
 
 <script>
 function hex(n) {
@@ -389,7 +434,7 @@ class Reader {
   readOff(size) {
     let off = this.off;
     if (size > this.size - off) {
-      throw new Error(`Reader overread`);
+      throw new Error(`Reader overread - wanted ${size} only had ${this.size - off}/${this.size}`);
     }
     this.off = off + size;
     return off;
@@ -453,20 +498,30 @@ function toHex(array) {
 
 class Cond {
   constructor() {
-    this.waiters = [];
+    this.waiters = new Set;
   }
   broadcast() {
     for (let waiter of this.waiters) {
+      this.waiters.delete(waiter);
       waiter();
     }
-  }
-  wait() {
-    let { promise, resolve, reject } = Promise.withResolvers();
-    this.waiters.push(resolve);
-    return promise;
+    assert(this.waiters.size === 0); // is this safe?
   }
   then(f, r) {
-    return this.wait().then(f, r);
+    let { promise, resolve, reject } = Promise.withResolvers();
+    this.waiters.add(resolve);
+    return promise.then(f, r);
+  }
+  static waitMulti(...conds) {
+    let { promise, resolve, reject } = Promise.withResolvers();
+    for (let cond of conds) {
+      cond.waiters.add(resolve);
+    }
+    return promise.then(() => {
+      for (let cond of conds) {
+        cond.waiters.delete(resolve);
+      }
+    });
   }
 }
 
@@ -599,6 +654,7 @@ class RPCConn {
     this.wsw.setWantOpen(true);
     this.responseHandler = null;
     this.updateCond = new Cond;
+    this.openedCond = new Cond;
     this.pendingResponses = [];
     this.pendingResponseCond = new Cond;
     this.rpcThrottle = new Throttle('rpc');
@@ -607,6 +663,7 @@ class RPCConn {
   onOpen(e) {
     this.isOpen = true;
     this.updateCond.broadcast();
+    this.openedCond.broadcast();
     this.pendingResponseCallbacks = [(data) => {
       if (typeof data == 'string') {
         console.log(`early error! ${data}`);
@@ -701,7 +758,7 @@ class RPCConn {
 
   }
   async reqSetFlags(clear, set) {
-    let dv = new DataView(new ArrayBuffer(9));
+    let dv = new DataView(new ArrayBuffer(17));
     dv.setInt8(0, 4); // RPC_REQ_SET_FLAGS
     dv.setBigUint64(1, clear, true);
     dv.setBigUint64(9, set, true);
@@ -889,7 +946,7 @@ class HoseFrame {
     this.hitboxes = new Map();
     this.normalColliders = [];
     this.scolColliders = [];
-    this.collisions = [];
+    this.collisionEvents = [];
   }
 };
 
@@ -982,15 +1039,19 @@ class HoseConn {
     this.curFrame = new HoseFrame(number, worldID);
   }
   parseCollision(r) {
-    let info = {
-      hb1: r.read(mm.u64),
-      hb2: r.read(mm.u64),
-      ret: r.read(mm.u64),
-    };
+    let hb1 = r.read(mm.u64);
+    let hb2 = r.read(mm.u64);
+    let ret = r.read(mm.u64);
     if (!this.curFrame) {
       return;
     }
-    this.curFrame.collisions.push(info);
+    let info = {
+      kind: 'collisi',
+      hb1: this.curFrame.hitboxes.get(hb1),
+      hb2: this.curFrame.hitboxes.get(hb2),
+      ret: ret,
+    }
+    this.curFrame.collisionEvents.push(info);
   }
   parseHitbox(r) {
     let ptr = r.read(mm.u64);
@@ -1053,7 +1114,7 @@ class HoseConn {
   parseBGCollisionTwoPoint(r) {
     let data = {
       kind: 'bgcol2p',
-      worldID: r.read(mm.u64),
+      worldID: r.read(mm.u8),
       xy1: r.read(mm.Point2D),
       xy2: r.read(mm.Point2D),
       shapemask: r.read(mm.u32),
@@ -1064,13 +1125,13 @@ class HoseConn {
     };
     data.bic = data.cp.bic;
     if (this.curFrame) {
-      this.curFrame.events.push(data);
+      this.curFrame.collisionEvents.push(data);
     }
   }
   parseBGCollisionPoint(r) {
     let data = {
       kind: 'bgcol1p',
-      worldID: r.read(mm.u64),
+      worldID: r.read(mm.u8),
       xy: r.read(mm.Point2D),
       enable1: r.read(mm.u8),
       enable2: r.read(mm.u8),
@@ -1078,7 +1139,7 @@ class HoseConn {
       bic: r.read(mm.CollisionBIC),
     };
     if (this.curFrame) {
-      this.curFrame.events.push(data);
+      this.curFrame.collisionEvents.push(data);
     }
   }
   parseOverrun(r) {
@@ -1086,12 +1147,43 @@ class HoseConn {
   }
 }
 
+async function updateFlags() {
+  let flags = [
+    ['controls-backpressure', 1n],
+    ['controls-bg-events', 4n],
+  ];
+  let allFlagVals = 0n;
+  let setFlagVals = 0n;
+  for (let [flagName, flagVal] of flags) {
+    allFlagVals |= flagVal;
+    if (document.getElementById(flagName).checked) {
+      setFlagVals |= flagVal;
+    }
+  }
+  await g_rpcConn.reqSetFlags(allFlagVals & ~setFlagVals, setFlagVals);
+}
+
+async function handleCheckboxes() {
+  let checkedCond = new Cond;
+  for (let input of document.querySelectorAll('#controls input[type=checkbox]')) {
+    input.checked = localStorage[input.id] === '1';
+    input.onchange = (e) => {
+      localStorage[input.id] = input.checked ? '1' : '0';
+      checkedCond.broadcast();
+    }
+  }
+  while (1) {
+    await Cond.waitMulti(checkedCond, g_rpcConn.openedCond);
+    await updateFlags();
+  }
+}
+
 let theBaseURL = 'ws://neb-solidus:8000';
-g_statsOn = true;
 
 async function go() {
   g_rpcConn = new RPCConn(theBaseURL);
   g_hoseConn = new HoseConn(theBaseURL);
+  handleCheckboxes();
   await Promise.all([
     (async () => {
       g_exportJson = await (await fetch('../exlaunch/build/export.json')).json();
@@ -1115,8 +1207,13 @@ async function go() {
           frames = frame.number - lastFrameNum;
           lastFrameNum = frame.number;
         }
-        if (g_statsOn) {
-          console.log(`stats: overrunBytes=${stats.overrunBytes} sentBytes=${stats.sentBytes} bp=${stats.backpressuredNsec} frames=${frames} tagStats=${JSON.stringify(g_hoseConn.tagStats)}`);
+        let text = `stats: overrunBytes=${stats.overrunBytes} sentBytes=${stats.sentBytes} bp=${stats.backpressuredNsec} frames=${frames} tagStats=${JSON.stringify(g_hoseConn.tagStats)}\n`
+        let div = document.createElement('div');
+        div.textContent = text;
+        let parent = document.getElementById('stats');
+        parent.insertBefore(div, parent.firstChild);
+        while (parent.childElementCount > 10) {
+          parent.removeChild(parent.lastChild);
         }
         g_hoseConn.tagStats = {};
       }

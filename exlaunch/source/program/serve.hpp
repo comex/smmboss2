@@ -97,6 +97,7 @@ struct hose {
 
     // callable from any thread
     void set_enable_backpressure(bool enable);
+    void assert_on_write_thread();
 
     // any thread, used for stats:
     std::atomic<uint64_t> total_overrun_bytes_{0};
@@ -137,9 +138,6 @@ private:
     bool backpressure();
 
     void write_overrun();
-
-
-    void assert_on_write_thread();
 };
 
 extern hose s_hose;

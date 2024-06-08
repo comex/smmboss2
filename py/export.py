@@ -104,6 +104,7 @@ ROOT_CLASSES = [
     'Hitbox',
     'ColliderSegment',
     'Scol',
+    'CollisionPoint',
 ]
 
 def json_info():

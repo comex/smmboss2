@@ -527,7 +527,6 @@ static void frame_start_actions() {
             auto nc = (mm_normal_collider *)entry.key;
             write_normal_collider(nc, {"normco*"});
         }
-
     }
 }
 
@@ -665,7 +664,8 @@ extern "C" void exl_main(void* x0, void* x1) {
     exl::patch::CodePatcher(0x012dc9e8).Write<uint32_t>(0xf9005a7f); // cFall
 
 
-    // TODO: make these dynamic hooks
+    // TODO: make these dynamic hooks (and for the ones that can't be, make
+    // sending conditional at least)
     install<Stub_hitbox_collide>();
     install<Stub_AreaSystem_do_many_collisions>();
     install<Stub_Collider_add_to_collision_grid>();

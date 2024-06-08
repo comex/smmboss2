@@ -239,13 +239,14 @@ class StructLocal extends CompoundTypeLocal {
 }
 
 class Struct extends CompoundType {
-  constructor(name, info, extraLocalMethods) {
+  constructor(name, info, extraLocalMethods, mmTypes) {
     super();
     this.name = name;
     this.sizeof = info.sizeof ?? null;
     this.info = info;
     this.extraLocalMethods = extraLocalMethods;
     this.saneName = this.name.replaceAll(/[\(\),]/g, '_');
+    this.mmTypes = mmTypes;
   }
 
   // lazy to avoid issues with recursion
@@ -255,7 +256,7 @@ class Struct extends CompoundType {
     }
     this._fields = [];
     for (let [fieldName, {offset, ptr_cls}] of Object.entries(this.info.props)) {
-      this._fields.push({fieldName, off: offset, ty: mm.loadType(ptr_cls)});
+      this._fields.push({fieldName, off: offset, ty: this.mmTypes.loadType(ptr_cls)});
     }
     return this._fields;
   }
@@ -264,7 +265,7 @@ class Struct extends CompoundType {
     if (this._Local !== undefined) {
       return this._Local;
     }
-    let superclass = this.info.base ? mm.loadType(this.info.base).Local : StructLocal;
+    let superclass = this.info.base ? this.mmTypes.loadType(this.info.base).Local : StructLocal;
     let argNames = ['superclass'];
     let argVals = [superclass];
     let code = `
@@ -376,9 +377,9 @@ let ty = {
   f64: new IntType('f64', 8, 'Float64'),
   tag8: new Tag8Type,
   CString: new CStringType,
-  GuestCString: CString,
-  GuestPtr: u64,
 };
+ty.GuestCString = ty.CString;
+ty.GuestPtr = ty.u64;
 
 class MMTypes {
   static extraLocalMethodsFor = {};
@@ -412,7 +413,7 @@ class MMTypes {
       ty = new FixedArray(this.loadType(info.val_ptr_cls), info.count);
       break;
     case 'struct':
-      ty = new Struct(name, info, this.extraLocalMethodsFor[name]);
+      ty = new Struct(name, info, this.constructor.extraLocalMethodsFor[name], this);
       break;
     case 'ptr':
       ty = this.GuestPtr; // todo: typing
@@ -509,29 +510,42 @@ function toHex(array) {
 class Cond {
   constructor() {
     this.waiters = new Set;
+    this.rejectReason = undefined;
   }
   broadcast() {
     for (let waiter of this.waiters) {
       this.waiters.delete(waiter);
-      waiter();
+      waiter.resolve();
     }
     assert(this.waiters.size === 0); // is this safe?
   }
   then(f, r) {
-    let { promise, resolve, reject } = Promise.withResolvers();
-    this.waiters.add(resolve);
-    return promise.then(f, r);
+    let pr = Promise.withResolvers();
+    this.waiters.add(pr);
+    let ret = pr.promise.then(f, r);
+    if (this.rejectReason !== undefined) {
+      this.reject(this.rejectReason);
+    }
+    return ret;
   }
   static waitMulti(...conds) {
-    let { promise, resolve, reject } = Promise.withResolvers();
+    let pr = Promise.withResolvers();
     for (let cond of conds) {
-      cond.waiters.add(resolve);
+      cond.waiters.add(pr);
     }
-    return promise.then(() => {
+    return pr.promise.then(() => {
       for (let cond of conds) {
-        cond.waiters.delete(resolve);
+        cond.waiters.delete(pr);
       }
     });
+  }
+  reject(reason) {
+    assert(reason !== undefined);
+    this.rejectReason = reason;
+    for (let waiter of this.waiters) {
+      this.waiters.delete(waiter);
+      waiter.reject(reason);
+    }
   }
 }
 
@@ -665,6 +679,8 @@ class WSWrapper {
   }
 }
 
+let rpcConnClosedMessage = 'RPCConn closed';
+
 class RPCConn {
   constructor(baseURL) {
     this.wsw = new WSWrapper(`${baseURL}/ws/rpc`, this);
@@ -676,6 +692,7 @@ class RPCConn {
   kill() {
     this.wsw.kill();
     this.helloInfoPR.reject('RPCConn killed');
+    this.openedCond.reject('RPCConn killed');
   }
   onOpen(e) {
     this.isOpen = true;
@@ -684,7 +701,7 @@ class RPCConn {
   }
   helloPendingResponsePR() {
     let pr = Promise.withResolvers();
-    pr.then((data) => {
+    pr.promise.then((data) => {
       if (typeof data == 'string') {
         this.helloInfoPR.reject(`early error! ${data}`);
         return;
@@ -692,9 +709,11 @@ class RPCConn {
       assert(data instanceof ArrayBuffer);
       this.helloInfoPR.resolve(readHelloModInfo(new Reader(new DataView(data))));
     }, (reason) => {
-      // TODO: check for closed
-      this.helloInfoPR.reject(reason);
+      if (reason !== rpcConnClosedMessage) {
+        this.helloInfoPR.reject(reason);
+      }
     });
+    return pr;
   }
   onMessage(e) {
     let pr = this.pendingResponsePRs.shift();
@@ -707,32 +726,29 @@ class RPCConn {
     this.isOpen = false;
     while (this.pendingResponsePRs.length) {
       let pr = this.pendingResponsePRs.shift();
-      pr.reject('closed');
+      pr.reject(rpcConnClosedMessage);
     }
   }
   async rawRequest(req) {
     outerLoop: while (1) {
-      if (!this.isOpen) {
+      while (!this.isOpen) {
         console.log('RPC waiting for open');
-        while (!this.isOpen) {
-          await this.updateCond;
-        }
+        await this.openedCond;
       }
 
       //console.log(`sending ${req.byteLength} ${req}`);
       this.wsw.ws.send(req);
-      let haveResponse = false;
-      let response = null;
       let pr = Promise.withResolvers();
       this.pendingResponsePRs.push(pr);
       let response;
       try {
         response = await pr.promise;
       } catch (e) {
-        console.log(`well it didn't happen because: ${e}`);
-        // TODO: 
-        //console.log('RPC waiting for re-open');
-        //continue outerLoop;
+        if (e !== rpcConnClosedMessage) {
+          throw e;
+        }
+        console.log('RPC waiting for re-open');
+        continue outerLoop;
       }
 
       if (typeof response == 'string') {
@@ -801,6 +817,7 @@ let svgNS = 'http://www.w3.org/2000/svg';
 class DiagramThingKind {
   constructor(diagram) {
     this.diagram = diagram;
+    this.mmTypes = diagram.mmTypes;
     this.group = document.createElementNS(svgNS, 'g');
     this.group.setAttribute('kind', this.constructor.name);
     diagram.svg.appendChild(this.group);
@@ -1046,10 +1063,10 @@ class DiagramScolColliders extends DiagramThingKind {
   renderThing(data) {
     let dia = this.diagram;
     let scol = data.scol;
-    if (0) {
+    if (1) {
       for (let i = 0; i < 4; i++) {
         let fakePtr = data.ptr + BigInt(i);
-        let xxy = scol.readPtrFromWithin(scol.xxy_ptrs_cur.get(i), mm.XXY);
+        let xxy = scol.readPtrFromWithin(scol.xxy_ptrs_cur.get(i), this.mmTypes.XXY);
 
         this.line(
           fakePtr,
@@ -1071,7 +1088,7 @@ class DiagramScolColliders extends DiagramThingKind {
       let resultList = scol.result_lists_cur.get(i);
       let result = resultList.get(resultListIdx);
       if (result.valid) {
-        console.log(result.angle);
+        //console.log(result.angle);
 
       }
 
@@ -1122,8 +1139,9 @@ class DiagramBGCollisionTwoPoints extends DiagramThingKind {
   }
 }
 class Diagram {
-  constructor(svg) {
+  constructor(svg, mmTypes) {
     this.svg = svg;
+    this.mmTypes = mmTypes;
     this.kinds = [
       this.hitboxes = new DiagramHitboxes(this),
       this.normalColliders = new DiagramNormalColliders(this),
@@ -1150,7 +1168,6 @@ class Diagram {
     return size; // todo: match camera
   }
 };
-let g_diagram = new Diagram(document.getElementById('diagram'));
 
 class NormalCollider {
 }
@@ -1194,7 +1211,10 @@ class HoseFrame {
 };
 
 class HoseParser {
-  constructor() {
+  constructor(mmTypes, diagram) {
+    this.mmTypes = mmTypes;
+    this.diagram = diagram;
+
     this.prevFrame = null;
     this.curFrame = new HoseFrame(0);
 
@@ -1206,7 +1226,7 @@ class HoseParser {
   parse(buffer) {
     assert(buffer instanceof ArrayBuffer);
     let r = new Reader(new DataView(buffer), 0);
-    let tag = r.read(mm.tag8);
+    let tag = r.read(ty.tag8);
 
     this.tagStats[tag] ??= [0, 0];
     this.tagStats[tag][0] += r.size; // total length
@@ -1275,7 +1295,7 @@ class HoseParser {
     if (worldID == 0) {
       this.finalizeFrame();
       let oldFrame = this.curFrame;
-      g_diagram.renderFrame(oldFrame);
+      this.diagram.renderFrame(oldFrame);
       this.curFrame = new HoseFrame(oldFrame.number + 1);
       this.prevFrame = oldFrame;
     };
@@ -1300,7 +1320,7 @@ class HoseParser {
   }
   parseHitbox(r) {
     let ptr = r.read(ty.u64);
-    let hb = r.read(mm.Hitbox, r.remaining() - 1);
+    let hb = r.read(this.mmTypes.Hitbox, r.remaining() - 1);
     hb.worldID = r.read(ty.s8);
     this.curFrame.hitboxes.set(ptr, hb);
   }
@@ -1308,18 +1328,18 @@ class HoseParser {
     let data = new NormalCollider;
     Object.assign(data, {
       ptr: r.read(ty.u64),
-      col: r.read(mm.Collider, 0x3e0),
-      extPosCur: r.read(mm.Point2D),
-      extPosOld: r.read(mm.Point2D),
+      col: r.read(this.mmTypes.Collider, 0x3e0),
+      extPosCur: r.read(this.mmTypes.Point2D),
+      extPosOld: r.read(this.mmTypes.Point2D),
       firstSeenFrameNumber: this.curFrame.number,
       segmentsCur: [],
       segmentsOld: [],
     });
     for (let i = 0, count = data.col.segments_cur.count; i < count; i++) {
-      data.segmentsCur.push(r.read(mm.ColliderSegment));
+      data.segmentsCur.push(r.read(this.mmTypes.ColliderSegment));
     }
     for (let i = 0, count = data.col.segments_old.count; i < count; i++) {
-      data.segmentsOld.push(r.read(mm.ColliderSegment));
+      data.segmentsOld.push(r.read(this.mmTypes.ColliderSegment));
     }
     data.worldID = r.read(ty.s8);
     this.normalColliderMap.set(data.ptr, data);
@@ -1332,9 +1352,9 @@ class HoseParser {
   parseScolCollider(r) {
     let data = {
       ptr: r.read(ty.u64),
-      scol: r.read(mm.Scol, 0x103c),
-      extPosCur: r.read(mm.Point2D),
-      extPosOld: r.read(mm.Point2D),
+      scol: r.read(this.mmTypes.Scol, 0x103c),
+      extPosCur: r.read(this.mmTypes.Point2D),
+      extPosOld: r.read(this.mmTypes.Point2D),
       worldID: r.read(ty.s8),
       originalMessage: r.dv.buffer,
     };
@@ -1358,13 +1378,13 @@ class HoseParser {
   parseBGCollisionTwoPoint(r) {
     let data = {
       worldID: r.read(ty.u8),
-      xy1: r.read(mm.Point2D),
-      xy2: r.read(mm.Point2D),
+      xy1: r.read(this.mmTypes.Point2D),
+      xy2: r.read(this.mmTypes.Point2D),
       shapemask: r.read(ty.u32),
       enable1: r.read(ty.u8),
       enable2: r.read(ty.u8),
       ret: r.read(ty.u8),
-      cp: r.read(mm.CollisionPoint),
+      cp: r.read(this.mmTypes.CollisionPoint),
     };
     data.bic = data.cp.bic;
     this.curFrame.bgCollisionTwoPointEvents.push(data);
@@ -1372,11 +1392,11 @@ class HoseParser {
   parseBGCollisionPoint(r) {
     let data = {
       worldID: r.read(ty.u8),
-      xy: r.read(mm.Point2D),
+      xy: r.read(this.mmTypes.Point2D),
       enable1: r.read(ty.u8),
       enable2: r.read(ty.u8),
       ret: r.read(ty.u8),
-      bic: r.read(mm.CollisionBIC),
+      bic: r.read(this.mmTypes.CollisionBIC),
     };
     this.curFrame.bgCollisionPointEvents.push(data);
   }
@@ -1386,14 +1406,15 @@ class HoseParser {
 }
 
 class HoseConn {
-  constructor(baseURL) {
+  constructor(baseURL, hoseParserPromise) {
     this.wsw = new WSWrapper(`${baseURL}/ws/hose`, this);
     this.wsw.setWantOpen(true);
+    this.hoseParserPromise = hoseParserPromise;
   }
   onOpen(e) {
   }
-  onMessage(e, wsw) {
-    this.parser.parse(e.data);
+  async onMessage(e, wsw) {
+    (await this.hoseParserPromise).parse(e.data);
   }
   onClose(e) {
   }
@@ -1409,24 +1430,33 @@ g_exportJsonPromise = (async () => {
 class Conns {
   constructor(baseURL) {
     this.baseURL = baseURL;
-    this.rpc = new RPCConn(baseURL);
-    this.hose = new HoseConn(baseURL);
-    this.dead = false;
 
     this.stillAlivePR = Promise.withResolvers();
+    this.constructorDonePR = Promise.withResolvers();
+
     this.mmTypesPromise = this.doMMTypes();
+    this.hoseParserPromise = this.doHoseParser();
+
+    this.rpc = new RPCConn(baseURL);
+    this.hose = new HoseConn(baseURL, this.hoseParserPromise);
+    this.dead = false;
+
     this.doStats();
     this.doCheckboxes();
+
+    this.constructorDonePR.resolve();
+    
   }
   async doStats() {
     let lastFrameNum = 0;
     while (!this.dead) {
       if (this.rpc.isOpen) {
         let stats = await this.rpc.reqGetStats();
-        let frame = this.hose.curFrame;
+        let hoseParser = await this.hoseParserPromise;
+        let frame = hoseParser.curFrame;
         let frames = frame.number - lastFrameNum;
         lastFrameNum = frame.number;
-        let text = `stats: overrunBytes=${stats.overrunBytes} sentBytes=${stats.sentBytes} bp=${stats.backpressuredNsec} frames=${frames} tagStats=${JSON.stringify(g_hoseConn.tagStats)}\n`
+        let text = `stats: overrunBytes=${stats.overrunBytes} sentBytes=${stats.sentBytes} bp=${stats.backpressuredNsec} frames=${frames} tagStats=${JSON.stringify(hoseParser.tagStats)}\n`
         let div = document.createElement('div');
         div.textContent = text;
         let parent = document.getElementById('stats');
@@ -1434,19 +1464,29 @@ class Conns {
         while (parent.childElementCount > 10) {
           parent.removeChild(parent.lastChild);
         }
-        this.hose.tagStats = {};
+        hoseParser.tagStats = {};
       }
       await sleep(1000);
     }
   }
+
   async doMMTypes() {
+    await this.constructorDonePR.promise;
     let [helloInfo, exportJson] = await Promise.any([
       Promise.all([this.rpc.helloInfoPR.promise, g_exportJsonPromise]),
       this.stillAlivePR.promise,
     ]);
     return new MMTypes(helloInfo, exportJson);
   }
-  async function updateFlags() {
+
+  async doHoseParser() {
+    let mmTypes = await this.mmTypesPromise;
+    let diagram = new Diagram(document.getElementById('diagram'), mmTypes);
+    this._diagram = diagram; // for debugging
+    return new HoseParser(mmTypes, diagram);
+  }
+
+  async updateFlags() {
     let flags = [
       ['controls-backpressure', 1n],
       ['controls-bg-events', 4n],
@@ -1459,10 +1499,10 @@ class Conns {
         setFlagVals |= flagVal;
       }
     }
-    await g_rpcConn.reqSetFlags(allFlagVals & ~setFlagVals, setFlagVals);
+    await this.rpc.reqSetFlags(allFlagVals & ~setFlagVals, setFlagVals);
   }
 
-  async function doCheckboxes() {
+  async doCheckboxes() {
     let checkedPR = Promise.withResolvers();
     for (let input of document.querySelectorAll('#controls input[type=checkbox]')) {
       input.checked = localStorage[input.id] === '1';

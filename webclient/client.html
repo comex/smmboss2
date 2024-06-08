@@ -779,10 +779,12 @@ class DiagramThingKind {
   constructor(diagram) {
     this.diagram = diagram;
     this.group = document.createElementNS(svgNS, 'g');
+    this.group.setAttribute('kind', this.constructor.name);
     diagram.svg.appendChild(this.group);
     this.elmsByPtr = new Map();
   }
   renderThings() {
+    this.genericElmsCount = 0;
     let seen = new Set();
     this.seen = seen;
     for (let thing of this.getThingsFromFrame()) {
@@ -913,18 +915,53 @@ class DiagramScolColliders extends DiagramThingKind {
   }
 }
 
+class DiagramBGCollisionPoints extends DiagramThingKind {
+  getThingsFromFrame() {
+    // TODO: improve this
+    console.log(this.diagram.curFrame.toString(), this.diagram.curFrame.collisionEvents.filter(a => a.kind == 'bgcol1p'));
+    return this.diagram.curFrame.collisionEvents;
+  }
+  renderThing(data) {
+    if (!data.ret) {
+      //return;
+    }
+    let intersectionX, intersectionY;
+    switch (data.kind) {
+    case 'bgcol1p':
+      assert(data.worldID == this.diagram.curFrame.worldID);
+      intersectionX = data.xy.x;
+      intersectionY = data.xy.y;
+      break;
+    case 'bgcol2p':
+      assert(data.worldID == this.diagram.curFrame.worldID);
+      return;
+    case 'collisi':
+      return;
+    default:
+      assert(false);
+    }
+    let circle = this.getOrCreateElm(this.genericElmsCount++, 'circle');
+    circle.setAttribute('cx', dia.transformX(intersectionX));
+    circle.setAttribute('cy', dia.transformY(intersectionY));
+    circle.setAttribute('r', 3);
+  }
+}
+
 class Diagram {
   constructor(svg) {
     this.svg = svg;
-    this.hitboxes = new DiagramHitboxes(this);
-    this.normalColliders = new DiagramNormalColliders(this);
-    this.scolColliders = new DiagramScolColliders(this);
+    this.kinds = [
+      this.hitboxes = new DiagramHitboxes(this),
+      this.normalColliders = new DiagramNormalColliders(this),
+      this.scolColliders = new DiagramScolColliders(this),
+      this.bgCollisionPoints = new DiagramBGCollisionPoints(this),
+    ];
   }
   renderFrame(frame) {
     this.curFrame = frame;
-    this.hitboxes.renderThings();
-    this.normalColliders.renderThings();
-    this.scolColliders.renderThings();
+    for (let kind of this.kinds) {
+      kind.renderThings();
+    }
     this.curFrame = null;
   }
   transformX(x) {
@@ -947,6 +984,9 @@ class HoseFrame {
     this.normalColliders = [];
     this.scolColliders = [];
     this.collisionEvents = [];
+  }
+  toString() {
+    return `frame[${this.worldID}, ${this.number}]`;
   }
 };
 
@@ -1045,13 +1085,13 @@ class HoseConn {
     if (!this.curFrame) {
       return;
     }
-    let info = {
+    let data = {
       kind: 'collisi',
       hb1: this.curFrame.hitboxes.get(hb1),
       hb2: this.curFrame.hitboxes.get(hb2),
       ret: ret,
     }
-    this.curFrame.collisionEvents.push(info);
+    this.curFrame.collisionEvents.push(data);
   }
   parseHitbox(r) {
     let ptr = r.read(mm.u64);
@@ -1140,6 +1180,7 @@ class HoseConn {
     };
     if (this.curFrame) {
       this.curFrame.collisionEvents.push(data);
+      console.log(`I added to ${this.curFrame.toString()}!`);
     }
   }
   parseOverrun(r) {

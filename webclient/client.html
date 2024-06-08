@@ -788,6 +788,11 @@ class DiagramThingKind {
     let seen = new Set();
     this.seen = seen;
     for (let thing of this.getThingsFromFrame()) {
+      let worldID = this.getWorldID(thing);
+      assert(typeof worldID == 'number');
+      if (worldID !== this.diagram.worldID) {
+        continue;
+      }
       this.renderThing(thing);
     }
     for (let elm of Array.from(this.group.children)) {
@@ -823,11 +828,73 @@ class DiagramThingKind {
     this.seen.add(elm);
     return elm;
   }
+  line(key, x1, y1, x2, y2, {stroke, strokeWidth}) {
+    let dia = this.diagram;
+    let line = this.getOrCreateElmFor(key, 'line');
+    let tx1 = dia.transformX(x1);
+    let tx2 = dia.transformX(x2);
+    let ty1 = dia.transformY(y1);
+    let ty2 = dia.transformY(y2);
+    if (line.tx1 === tx1 &&
+        line.tx2 === tx2 &&
+        line.ty1 === ty1 &&
+        line.ty2 === ty2 &&
+        line.stroke === stroke &&
+        line.strokeWidth === strokeWidth) {
+      return;
+    }
+    line.setAttribute('x1', tx1);
+    line.setAttribute('y1', ty1);
+    line.setAttribute('x2', tx2);
+    line.setAttribute('y2', ty2);
+    line.setAttribute('stroke', stroke);
+    line.setAttribute('stroke-width', strokeWidth);
+
+    line.tx1 = tx1;
+    line.tx2 = tx2;
+    line.ty1 = ty1;
+    line.ty2 = ty2;
+    line.stroke = stroke;
+    line.strokeWidth = strokeWidth;
+  }
+  circle(key, cx, cy, r, {fill, stroke, strokeWidth}) {
+    let dia = this.diagram;
+    let circle = this.getOrCreateElmFor(key, 'circle');
+    circle.setAttribute('cx', dia.transformX(cx));
+    circle.setAttribute('cy', dia.transformY(cy));
+    circle.setAttribute('r', dia.transformSize(r));
+    if (fill !== undefined) {
+      circle.setAttribute('fill', fill);
+    }
+    if (stroke !== undefined) {
+      circle.setAttribute('stroke', stroke);
+      circle.setAttribute('stroke-width', strokeWidth ?? 1);
+    }
+
+  }
+  rect(key, x, y, width, height, {fill, stroke, strokeWidth}) {
+    let dia = this.diagram;
+    let rect = this.getOrCreateElmFor(key, 'rect');
+    rect.setAttribute('x', dia.transformX(x));
+    rect.setAttribute('y', dia.transformY(y));
+    rect.setAttribute('width', dia.transformSize(width));
+    rect.setAttribute('height', dia.transformSize(height));
+    if (fill !== undefined) {
+      rect.setAttribute('fill', fill);
+    }
+    if (stroke !== undefined) {
+      rect.setAttribute('stroke', stroke);
+      rect.setAttribute('stroke-width', strokeWidth ?? 1);
+    }
+  }
 }
 
 class DiagramHitboxes extends DiagramThingKind {
   getThingsFromFrame() {
     return this.diagram.curFrame.hitboxes.entries();
+  }
+  getWorldID([ptr, hitbox]) {
+    return hitbox.worldID;
   }
   renderThing([ptr, hitbox]) {
     let params = hitbox.params;
@@ -838,33 +905,33 @@ class DiagramHitboxes extends DiagramThingKind {
     let h = hitbox.rect.height();
 
     let dia = this.diagram;
-    let wantedTag = isCircle ? 'circle' : 'rect';
-    let elm = this.getOrCreateElmFor(ptr, wantedTag);
     if (w < 0) {
       // todo: DRY
-      elm.deleteMe();
       return;
     }
     if (isCircle) {
       assert(w == h);
-      elm.setAttribute('cx', dia.transformX(x + w/2));
-      elm.setAttribute('cy', dia.transformY(y + h/2));
-      elm.setAttribute('r', dia.transformSize(w/2));
+      this.circle(ptr, x + w/2, y + h/2, w/2, {
+        stroke: 'green',
+        strokeWidth: 4,
+        fill: 'yellow',
+      });
     } else {
-      elm.setAttribute('x', dia.transformX(x));
-      elm.setAttribute('y', dia.transformY(y + h));
-      elm.setAttribute('width', dia.transformSize(w));
-      elm.setAttribute('height', dia.transformSize(h));
+      this.rect(ptr, x, y + h, w, h, {
+        stroke: 'green',
+        strokeWidth: 4,
+        fill: 'yellow',
+      });
     }
-    elm.setAttribute('stroke', 'green');
-    elm.setAttribute('stroke-width', 4);
-    elm.setAttribute('fill', 'yellow');
   }
 }
 
 class DiagramNormalColliders extends DiagramThingKind {
   getThingsFromFrame() {
     return this.diagram.curFrame.normalColliders;
+  }
+  getWorldID(col) {
+    return col.worldID;
   }
   renderThing(col) {
     let extX = col.extPosCur.x;
@@ -873,21 +940,17 @@ class DiagramNormalColliders extends DiagramThingKind {
     for (let i = 0; i < col.segmentsCur.length; i++) {
       let seg = col.segmentsCur[i];
       let fakePtr = col.ptr + BigInt(i);
-      let line = this.getOrCreateElmFor(fakePtr, 'line');
-      if (line.drawnExtX === extX &&
-          line.drawnExtY === extY &&
-          line.drawnUniqueDumpId === col.uniqueDumpId) {
-        continue;
-      }
-      line.drawnExtX = extX;
-      line.drawnExtY = extY;
-      line.drawnUniqueDumpId = col.uniqueDumpId;
-      line.setAttribute('x1', dia.transformX(seg.rel_pos_1.x + extX));
-      line.setAttribute('y1', dia.transformY(seg.rel_pos_1.y + extY));
-      line.setAttribute('x2', dia.transformX(seg.rel_pos_2.x + extX));
-      line.setAttribute('y2', dia.transformY(seg.rel_pos_2.y + extY));
-      line.setAttribute('stroke', 'red');
-      line.setAttribute('stroke-width', 4);
+      this.line(
+        col.ptr + BigInt(i),
+        seg.rel_pos_1.x + extX,
+        seg.rel_pos_1.y + extY,
+        seg.rel_pos_2.x + extX,
+        seg.rel_pos_2.y + extY,
+        {
+          stroke: 'red',
+          strokeWidth: 4,
+        }
+      );
     }
   }
 }
@@ -896,6 +959,9 @@ class DiagramScolColliders extends DiagramThingKind {
   getThingsFromFrame() {
     return this.diagram.curFrame.scolColliders;
   }
+  getWorldID(data) {
+    return data.worldID;
+  }
   renderThing(data) {
     let dia = this.diagram;
     let scol = data.scol;
@@ -903,50 +969,64 @@ class DiagramScolColliders extends DiagramThingKind {
       let fakePtr = data.ptr + BigInt(i);
       let xxy = scol.readPtrFromWithin(scol.xxy_ptrs_cur.get(i), mm.XXY);
 
-      let line = this.getOrCreateElmFor(fakePtr, 'line');
-      let y = dia.transformY(xxy.y + data.extPosCur.y);
-      line.setAttribute('x1', dia.transformX(xxy.x_left + data.extPosCur.x));
-      line.setAttribute('y1', y);
-      line.setAttribute('x2', dia.transformX(xxy.x_right + data.extPosCur.x));
-      line.setAttribute('y2', y);
-      line.setAttribute('stroke', ['pink', 'green', 'blue', 'orange'][i]);
-      line.setAttribute('stroke-width', 4);
+      this.line(
+        fakePtr,
+
+        xxy.x_left + data.extPosCur.x,
+        xxy.y + data.extPosCur.y,
+        xxy.x_right + data.extPosCur.x,
+        xxy.y + data.extPosCur.y,
+
+        {
+          stroke: ['pink', 'green', 'blue', 'orange'][i],
+          strokeWidth: 4,
+        }
+      );
     }
   }
 }
 
 class DiagramBGCollisionPoints extends DiagramThingKind {
   getThingsFromFrame() {
-    // TODO: improve this
-    console.log(this.diagram.curFrame.toString(), this.diagram.curFrame.collisionEvents.filter(a => a.kind == 'bgcol1p'));
-    return this.diagram.curFrame.collisionEvents;
+    return this.diagram.curFrame.bgCollisionPointEvents;
+  }
+  getWorldID(data) {
+    return data.worldID;
   }
   renderThing(data) {
-    if (!data.ret) {
-      //return;
-    }
-    let intersectionX, intersectionY;
-    switch (data.kind) {
-    case 'bgcol1p':
-      assert(data.worldID == this.diagram.curFrame.worldID);
-      intersectionX = data.xy.x;
-      intersectionY = data.xy.y;
-      break;
-    case 'bgcol2p':
-      assert(data.worldID == this.diagram.curFrame.worldID);
-      return;
-    case 'collisi':
-      return;
-    default:
-      assert(false);
-    }
-    let circle = this.getOrCreateElm(this.genericElmsCount++, 'circle');
-    circle.setAttribute('cx', dia.transformX(intersectionX));
-    circle.setAttribute('cy', dia.transformY(intersectionY));
-    circle.setAttribute('r', 3);
+    this.circle(
+      this.genericElmsCount++,
+      data.xy.x,
+      data.xy.y,
+      3,
+      {
+        fill: data.ret ? 'red' : 'rgba(0, 0, 0, 0.25)',
+      }
+    );
   }
 }
 
+class DiagramBGCollisionTwoPoints extends DiagramThingKind {
+  getThingsFromFrame() {
+    return this.diagram.curFrame.bgCollisionTwoPointEvents;
+  }
+  getWorldID(data) {
+    return data.worldID;
+  }
+  renderThing(data) {
+      this.line(
+        fakePtr,
+
+        xxy.x_left + data.extPosCur.x,
+        xxy.y + data.extPosCur.y,
+        xxy.x_right + data.extPosCur.x,
+        xxy.y + data.extPosCur.y,
+
+        ['pink', 'green', 'blue', 'orange'][i],
+        4
+      );
+  }
+}
 class Diagram {
   constructor(svg) {
     this.svg = svg;
@@ -956,6 +1036,7 @@ class Diagram {
       this.scolColliders = new DiagramScolColliders(this),
       this.bgCollisionPoints = new DiagramBGCollisionPoints(this),
     ];
+    this.worldID = 0;
   }
   renderFrame(frame) {
     this.curFrame = frame;
@@ -977,23 +1058,25 @@ class Diagram {
 let diagram = new Diagram(document.getElementById('diagram'));
 
 class HoseFrame {
-  constructor(number, worldID) {
+  constructor(number) {
     this.number = number;
-    this.worldID = worldID;
     this.hitboxes = new Map();
     this.normalColliders = [];
     this.scolColliders = [];
-    this.collisionEvents = [];
+    this.bgCollisionPointEvents = [];
+    this.bgCollisionTwoPointEvents = [];
+    this.hitboxCollisionEvents = [];
   }
   toString() {
-    return `frame[${this.worldID}, ${this.number}]`;
+    return `frame[${this.number}]`;
   }
 };
 
 class HoseConn {
   constructor(baseURL) {
     this.wsw = new WSWrapper(`${baseURL}/ws/hose`, this);
-    this.prevFrameByWorldID = new Map();
+    this.prevFrame = null;
+    this.curFrame = new HoseFrame(0);
 
     this.normalColliderMap = new Map();
     this.scolColliderMap = new Map();
@@ -1067,38 +1150,36 @@ class HoseConn {
   parseDoMany(r) {
     let areaSys = r.read(mm.u64);
     let worldID = r.read(mm.u64);
-    if (this.curFrame) {
+    if (worldID == 0) {
       this.finalizeFrame();
-      this.prevFrameByWorldID.set(this.curFrame.worldID, this.curFrame);
-      if (this.curFrame.worldID == 0) {
-        diagram.renderFrame(this.curFrame);
-      }
-    }
-    let prev = this.prevFrameByWorldID.get(worldID);
-    let number = prev ? prev.number + 1 : 0; // TODO: replace
-    this.curFrame = new HoseFrame(number, worldID);
+      let oldFrame = this.curFrame;
+      diagram.renderFrame(oldFrame);
+      this.curFrame = new HoseFrame(oldFrame.number + 1);
+      this.prevFrame = oldFrame;
+    };
   }
   parseCollision(r) {
     let hb1 = r.read(mm.u64);
     let hb2 = r.read(mm.u64);
     let ret = r.read(mm.u64);
-    if (!this.curFrame) {
-      return;
-    }
     let data = {
-      kind: 'collisi',
       hb1: this.curFrame.hitboxes.get(hb1),
       hb2: this.curFrame.hitboxes.get(hb2),
       ret: ret,
     }
-    this.curFrame.collisionEvents.push(data);
+    if (hb1) {
+      data.worldID = data.hb1.worldID;
+    } else if (hb2) {
+      data.worldID = data.hb2.worldID;
+    } else {
+      data.worldID = -1;
+    }
+    this.curFrame.hitboxCollisionEvents.push(data);
   }
   parseHitbox(r) {
     let ptr = r.read(mm.u64);
-    let hb = r.read(mm.Hitbox, r.remaining());
-    if (!this.curFrame) {
-      return;
-    }
+    let hb = r.read(mm.Hitbox, r.remaining() - 1);
+    hb.worldID = r.read(mm.s8);
     this.curFrame.hitboxes.set(ptr, hb);
   }
   parseNormalCollider(r) {
@@ -1107,7 +1188,7 @@ class HoseConn {
       col: r.read(mm.Collider, 0x3e0),
       extPosCur: r.read(mm.Point2D),
       extPosOld: r.read(mm.Point2D),
-      firstSeenFrameNumber: this.curFrame ? this.curFrame.number : null,
+      firstSeenFrameNumber: this.curFrame.number,
       segmentsCur: [],
       segmentsOld: [],
     };
@@ -1117,10 +1198,9 @@ class HoseConn {
     for (let i = 0, count = data.col.segments_old.count; i < count; i++) {
       data.segmentsOld.push(r.read(mm.ColliderSegment));
     }
+    data.worldID = r.read(mm.s8);
     this.normalColliderMap.set(data.ptr, data);
-    if (this.curFrame) {
-      this.curFrame.normalColliders.push(data);
-    }
+    this.curFrame.normalColliders.push(data);
   }
   parseNormalColliderGone(r) {
     let ptr = r.read(mm.u64);
@@ -1132,20 +1212,17 @@ class HoseConn {
       scol: r.read(mm.Scol, 0x103c),
       extPosCur: r.read(mm.Point2D),
       extPosOld: r.read(mm.Point2D),
+      worldID: r.read(mm.s8),
     };
     data.scol._ptr = data.ptr;
     this.scolColliderMap.set(data.ptr, data);
-    if (this.curFrame) {
-      this.curFrame.scolColliders.push(data);
-    }
+    this.curFrame.scolColliders.push(data);
   }
   parseHashedScolCollider(r) {
     let ptr = r.read(mm.u64);
     let data = this.scolColliderMap.get(ptr);
     if (data !== undefined) {
-      if (this.curFrame) {
-        this.curFrame.scolColliders.push(data);
-      }
+      this.curFrame.scolColliders.push(data);
     } else {
       // this could happen right when connecting
       console.log(`!! missing scol for ${ptr}`);
@@ -1153,7 +1230,6 @@ class HoseConn {
   }
   parseBGCollisionTwoPoint(r) {
     let data = {
-      kind: 'bgcol2p',
       worldID: r.read(mm.u8),
       xy1: r.read(mm.Point2D),
       xy2: r.read(mm.Point2D),
@@ -1164,13 +1240,10 @@ class HoseConn {
       cp: r.read(mm.CollisionPoint),
     };
     data.bic = data.cp.bic;
-    if (this.curFrame) {
-      this.curFrame.collisionEvents.push(data);
-    }
+    this.curFrame.bgCollisionTwoPointEvents.push(data);
   }
   parseBGCollisionPoint(r) {
     let data = {
-      kind: 'bgcol1p',
       worldID: r.read(mm.u8),
       xy: r.read(mm.Point2D),
       enable1: r.read(mm.u8),
@@ -1178,10 +1251,7 @@ class HoseConn {
       ret: r.read(mm.u8),
       bic: r.read(mm.CollisionBIC),
     };
-    if (this.curFrame) {
-      this.curFrame.collisionEvents.push(data);
-      console.log(`I added to ${this.curFrame.toString()}!`);
-    }
+    this.curFrame.bgCollisionPointEvents.push(data);
   }
   parseOverrun(r) {
     document.getElementById('overrun').innerHTML = 'got overrun!';
@@ -1242,12 +1312,9 @@ async function go() {
     while (1) {
       if (g_rpcConn.isOpen) {
         let stats = await g_rpcConn.reqGetStats();
-        let frames = '?';
-        let frame;
-        if (frame = g_hoseConn.prevFrameByWorldID.get(0n)) {
-          frames = frame.number - lastFrameNum;
-          lastFrameNum = frame.number;
-        }
+        let frame = g_hoseConn.curFrame;
+        let frames = frame.number - lastFrameNum;
+        lastFrameNum = frame.number;
         let text = `stats: overrunBytes=${stats.overrunBytes} sentBytes=${stats.sentBytes} bp=${stats.backpressuredNsec} frames=${frames} tagStats=${JSON.stringify(g_hoseConn.tagStats)}\n`
         let div = document.createElement('div');
         div.textContent = text;

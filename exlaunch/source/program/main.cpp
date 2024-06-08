@@ -191,8 +191,19 @@ struct mm_StateMachine {
     PSEUDO_TYPE_SIZE(0x48);
 };
 
+struct mm_world {
+    PROP(id, 0x20, int);
+    PSEUDO_TYPE_UNSIZED;
+};
+
+struct mm_actor {
+    PROP(world, 0x48, mm_world *);
+    PSEUDO_TYPE_UNSIZED;
+};
+
 struct mm_hitbox {
     PROP(vtable, 0x0, uintptr_t);
+    PROP(owner, 0xa8, mm_actor *);
     PSEUDO_TYPE_SIZE(0x1c8);
 
     void verify() {
@@ -216,24 +227,13 @@ struct mm_hitbox_manager {
     PSEUDO_TYPE_UNSIZED;
 };
 
-struct mm_normal_collider;
-struct mm_scol_collider;
+struct mm_AreaSystem;
 
-struct mm_block_collider_owner {
-    PROP(collider, 0x38, mm_normal_collider);
-    PSEUDO_TYPE_UNSIZED;
-};
-
-struct mm_terrain_manager {
-    PROP(block_collider_owners, 0x18, mm_count_ptr<mm_block_collider_owner *>);
-    PSEUDO_TYPE_UNSIZED;
-};
+struct mm_terrain_manager;
 
 struct mm_collider_segment {
     PSEUDO_TYPE_SIZE(0x18);
 };
-
-struct mm_AreaSystem;
 
 struct mm_collision_ctx {
     PROP(area_system, 0x90, mm_AreaSystem *);
@@ -252,6 +252,8 @@ struct mm_point2d {
     float x, y;
 };
 
+struct mm_normal_collider;
+struct mm_scol_collider;
 
 // This is really one of two unrelated structs, and the real way to distinguish
 // them is via the vtable on the node, but distinguishing them by their own
@@ -271,6 +273,8 @@ struct mm_normal_collider : public mm_some_collider {
     PROP(ext_pos_cur, 0x290, float *);
     PROP(ext_pos_old, 0x298, float *);
 
+    PROP(area_system, 0x2a8, mm_AreaSystem *);
+
     PROP(segments_cur, 0x3c0, mm_count_ptr<mm_collider_segment>);
     PROP(segments_old, 0x3d0, mm_count_ptr<mm_collider_segment>);
 
@@ -278,10 +282,11 @@ struct mm_normal_collider : public mm_some_collider {
 };
 
 struct mm_scol_collider : public mm_some_collider {
-    static constexpr size_t initial_dump_size = 0x103c;
-
+    PROP(owner, 0x188, mm_actor *);
     PROP(ext_pos_cur, 0x2a0, float *);
     PROP(ext_pos_old, 0x2a8, float *);
+
+    static constexpr size_t initial_dump_size = 0x103c;
 };
 
 // Figure out what type of object this is.
@@ -453,6 +458,14 @@ static void report_hitbox(mm_hitbox *hb, bool surprise) {
         w.write_tag({"hitbox"});
         w.write_prim(hb);
         w.write_prim(*hb);
+
+        int8_t world_id = -1;
+        if (mm_actor *actor = hb->owner()) {
+            if (mm_world *world = actor->world()) {
+                world_id = (int8_t)world->id();
+            }
+        }
+        w.write_prim(world_id);
     });
 }
 
@@ -507,7 +520,7 @@ static bool write_cached_dump(auto *entry, bool found, auto &&write_callback) {
 
 static const float s_dummy_pos[2]{};
 
-static void write_normal_collider(mm_normal_collider *nc, tag8 tag) {
+static void report_normal_collider(mm_normal_collider *nc, tag8 tag) {
     s_hose.write_packet([&](auto &w) {
         w.write_tag(tag);
         w.write_prim(nc);
@@ -516,6 +529,7 @@ static void write_normal_collider(mm_normal_collider *nc, tag8 tag) {
         w.write_n(nc->ext_pos_old() ?: s_dummy_pos, 2);
         w.write_n(nc->segments_cur().ptr, nc->segments_cur().count);
         w.write_n(nc->segments_old().ptr, nc->segments_old().count);
+        w.write_prim((uint8_t)nc->area_system()->world_id());
     });
 }
 
@@ -525,7 +539,7 @@ static void frame_start_actions() {
         s_hashed_scols.clear();
         for (auto &entry : s_colliders) {
             auto nc = (mm_normal_collider *)entry.key;
-            write_normal_collider(nc, {"normco*"});
+            report_normal_collider(nc, {"normco*"});
         }
     }
 }
@@ -536,7 +550,7 @@ HOOK_DEFINE_TRAMPOLINE(Stub_Collider_add_to_collision_grid) {
         if (s_colliders.lookup(UInt48(self), /*insert*/ true).second) {
             xprintf("%p added but already in s_colliders", self);
         }
-        write_normal_collider(self, {"normco+"});
+        report_normal_collider(self, {"normco+"});
     }
     static constexpr auto GetAddr = &mm_addrs::Collider_add_to_collision_grid;
 };
@@ -569,6 +583,14 @@ HOOK_DEFINE_TRAMPOLINE(Stub_scol_true_outmost) {
             w.write_raw(self, mm_scol_collider::initial_dump_size);
             w.write_n(self->ext_pos_cur() ?: s_dummy_pos, 2);
             w.write_n(self->ext_pos_old() ?: s_dummy_pos, 2);
+
+            int8_t world_id = -1;
+            if (mm_actor *actor = self->owner()) {
+                if (mm_world *world = actor->world()) {
+                    world_id = (int8_t)world->id();
+                }
+            }
+            w.write_prim(world_id);
         });
         if (!sent) {
             s_hose.write_packet([&](auto &w) {

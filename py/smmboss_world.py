@@ -369,6 +369,7 @@ class Collider(GuestStruct):
     ext_pos_cur = prop(0x290, ptr_to(Point2D))
     ext_pos_old = prop(0x298, ptr_to(Point2D))
     ext_unk = prop(0x2a0, ptr_to(u32), dump_deep=True)
+    area_system = prop(0x2a8, lambda: ptr_to(AreaSystem))
     int_off_cur = prop(0x2b0, Point2D)
     int_off_old = prop(0x2b8, Point2D)
     int_aoff_cur = prop(0x2c0, Point2D)

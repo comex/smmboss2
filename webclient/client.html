@@ -1,7 +1,4 @@
 <style>
-#diagram {
-  border: 1px solid grey;
-}
 #columns {
   display: grid;
   gap: 10px;
@@ -9,25 +6,50 @@
   grid-template-columns: max-content 1fr;
 }
 
+#col1 {
+  display: flex;
+  flex-direction: column;
+}
+
+#diagram {
+  border: 1px solid grey;
+}
+
+#spacer {
+  margin-top: auto;
+}
+
 #col2 {
   display: flex;
   flex-direction: column;
+}
+#tape {
+  border: 1px solid grey;
+
+  align-content: end;
+  margin-bottom: 10px;
+  padding: 3px;
 }
 #controls {
   border: 1px solid grey;
 
   align-content: end;
-  margin-top: auto;
+  display: flex;
+  flex-direction: row;
+  align-content: stretch;
 }
-#controls > label {
+#controls-left > label {
   display: block;
   transition: background-color 0.5s ease-out;
   background-color: #fff;
 }
-#controls > label:hover {
+#controls-left > label:hover {
   transition: background-color 0.0s linear;
   background-color: #f3f3f3;
-
+}
+#controls-right {
+  margin-left: auto;
+  padding: 5px;
 }
 #stats {
   border: 1px solid grey;
@@ -42,14 +64,31 @@
 
 <div id="overrun"></div>
 <div id="columns">
+<div id="col1">
 <svg width="500" height="500" id="diagram"></svg>
+<input type="range" id="scrubber" min="0" max="1" value="1" step="1" disabled>
+</div>
 <div id="col2">
 <div id="stats">
 </div>
+
+<div id="spacer">
+</div>
+
+<div id="tape">
+<button id="save-button">Save</button>
+</div>
+
 <div id="controls">
+<div id="controls-left">
 <label for="controls-backpressure"><input type="checkbox" id="controls-backpressure">Backpressure</label>
 <label for="controls-bg-events"><input type="checkbox" id="controls-bg-events">Background Collision Events</label>
 </div>
+<div id="controls-right">
+JS Mem: <span id="js-mem">?</span> MB
+</div>
+</div>
+
 </div>
 </div>
 
@@ -61,6 +100,11 @@ function assert(x) {
   if (!(x)) {
     throw new Error('assertion failed');
   }
+}
+function yieldMe() {
+  let { promise, resolve, reject } = Promise.withResolvers();
+  queueMicrotask(resolve);
+  return promise;
 }
 function sleep(n) {
   let { promise, resolve, reject } = Promise.withResolvers();
@@ -437,6 +481,9 @@ MMTypes.extraLocalMethodsFor.Rect = (base) => class extends base {
 
 class Reader {
   constructor(dv, off = 0) {
+    if (dv instanceof ArrayBuffer) {
+      dv = new DataView(dv);
+    }
     assert(dv instanceof DataView);
     this.dv = dv;
     this.off = off;
@@ -493,13 +540,15 @@ function readExlUtilRange(r) {
   return {start: r.read(ty.u64), size: r.read(ty.u64)}
 }
 function readHelloModInfo(r) {
-  return r.readArrayUnbounded(() => ({
+  let ret = r.readArrayUnbounded(() => ({
     total: readExlUtilRange(r),
     text: readExlUtilRange(r),
     rodata: readExlUtilRange(r),
     data: readExlUtilRange(r),
     buildId: r.readArray(16, () => r.read(ty.u8)),
   }));
+  ret.rawData = r.buffer;
+  return ret;
 }
 
 function toHex(array) {
@@ -626,6 +675,7 @@ class WSWrapper {
       this.ws.close();
     }
     this.state = 'dead';
+    this.wantOpen = false;
     this.ws = null;
   }
   openCloseWSAsNeeded() {
@@ -661,7 +711,7 @@ class WSWrapper {
       this.delegate.onMessage(e);
     };
     ws.onclose = (e) => {
-      assert(this.ws === ws);
+      assert(this.ws === ws || this.state === 'dead');
       console.log(`closed connection to ${this.wsURL}`);
       this.ws = null;
       if (this.wantOpen) {
@@ -707,7 +757,7 @@ class RPCConn {
         return;
       }
       assert(data instanceof ArrayBuffer);
-      this.helloInfoPR.resolve(readHelloModInfo(new Reader(new DataView(data))));
+      this.helloInfoPR.resolve(readHelloModInfo(new Reader(data)));
     }, (reason) => {
       if (reason !== rpcConnClosedMessage) {
         this.helloInfoPR.reject(reason);
@@ -1169,6 +1219,55 @@ class Diagram {
   }
 };
 
+class Scrubbable {
+  constructor(diagram, scrubber) {
+    this.diagram = diagram;
+    this.scrubber = scrubber;
+    this.frames = [];
+    this.atLast = true;
+    this.scrubber.min = -1;
+    this.scrubber.max = 0;
+    this.scrubber.value = 0;
+    this.scrubber.disabled = true;
+    this.onChangeOrInput = () => {
+      assert(this.scrubber.value < this.frames.length);
+      this.diagram.renderFrame(this.frames[this.scrubber.value]);
+
+    };
+    this.scrubber.addEventListener('change', this.onChangeOrInput);
+    this.scrubber.addEventListener('input', this.onChangeOrInput);
+  }
+  kill() {
+    this.scrubber.removeEventListener('change', this.onChangeOrInput);
+    this.scrubber.removeEventListener('input', this.onChangeOrInput);
+  }
+  updateFrames(frames) {
+    if (frames.length < 2) {
+      return;
+    }
+    this.frames = frames;
+    let wasAtLast = this.scrubber.value == this.scrubber.max;
+    this.scrubber.min = 0;
+    this.scrubber.max = frames.length - 1;
+    this.scrubber.disabled = false;
+    if (wasAtLast && frames.length) {
+      this.scrubber.value = frames.length - 1;
+      this.diagram.renderFrame(frames[this.scrubber.value]);
+    }
+  }
+}
+
+function encodeISO_8859_1(buffer) {
+  return String.fromCharCode(...new Uint8Array(buffer)));
+}
+function decodeISO_8859_1(buffer) {
+  let ret = new Uint8Array(buffer.length);
+  for (let i = 0, len = buffer.length; i < len; i++) {
+    ret[i] = buffer.charCodeat(i);
+  }
+  return ret;
+}
+
 class NormalCollider {
 }
 
@@ -1197,7 +1296,7 @@ class HoseFrame {
         let bufferId = bufferToId.get(buffer);
         if (bufferId === undefined) {
           bufferId = idToContentString.length;
-          idToContentString.push(String.fromCharCode(...new Uint8Array(buffer)));
+          idToContentString.push(encodeISO_8859_1(buffer));
         }
       }
       let frameInfo = {number: frame.number, bufferIds: frameBufferIds};
@@ -1208,14 +1307,30 @@ class HoseFrame {
       idToContentString,
     };
   }
+
+  static loadFramesInto({frameInfos, idToContentString}, hoseParser) {
+    let idToData = idToContentString.map(decodeISO_8859_1);
+    hoseParser.curFrame.number = frameInfos[0].number - 1;
+    for (let frameInfo of frameInfos) {
+      let i = 0;
+      for (let bufferId of frameInfo.bufferIds) {
+        let tag = hoseParser.parse(idToData[bufferId]);
+        if (i == 0) {
+          assert(tag == 'do_many');
+        }
+        i++;
+      }
+    }
+    hoseParser.finalizeFrame();
+  }
 };
 
 class HoseParser {
-  constructor(mmTypes, diagram) {
+  constructor(mmTypes, scrubbable) {
     this.mmTypes = mmTypes;
-    this.diagram = diagram;
+    this.scrubbable = scrubbable;
 
-    this.prevFrame = null;
+    this.savedFrames = [];
     this.curFrame = new HoseFrame(0);
 
     this.normalColliderMap = new Map();
@@ -1225,7 +1340,7 @@ class HoseParser {
   }
   parse(buffer) {
     assert(buffer instanceof ArrayBuffer);
-    let r = new Reader(new DataView(buffer), 0);
+    let r = new Reader(buffer);
     let tag = r.read(ty.tag8);
 
     this.tagStats[tag] ??= [0, 0];
@@ -1279,6 +1394,7 @@ class HoseParser {
     this.curFrame.relevantHoseMessages.push(bufferToSave);
 
     //console.log(`hose message ${new BigUint64Array(e.data)}`);
+    return tag;
   }
 
   finalizeFrame() {
@@ -1287,6 +1403,11 @@ class HoseParser {
         this.curFrame.normalColliders.push(data);
       }
     }
+
+    let oldFrame = this.curFrame;
+    this.savedFrames.push(oldFrame);
+    this.scrubbable.updateFrames(this.savedFrames);
+    this.curFrame = new HoseFrame(oldFrame.number + 1);
   }
 
   parseDoMany(r) {
@@ -1294,10 +1415,6 @@ class HoseParser {
     let worldID = r.read(ty.u64);
     if (worldID == 0) {
       this.finalizeFrame();
-      let oldFrame = this.curFrame;
-      this.diagram.renderFrame(oldFrame);
-      this.curFrame = new HoseFrame(oldFrame.number + 1);
-      this.prevFrame = oldFrame;
     };
   }
   parseCollision(r) {
@@ -1427,25 +1544,61 @@ g_exportJsonPromise = (async () => {
   return await (await fetch('../exlaunch/build/export.json')).json();
 })();
 
-class Conns {
+class BaseConns {
+  constructor() {
+    this.dead = false;
+    this.hoseParserPromise = this.doHoseParser();
+    this.stillAlivePR = Promise.withResolvers();
+  }
+
+  async doHoseParser() {
+    await yieldMe();
+    let mmTypes = await this.mmTypesPromise;
+    let diagram = new Diagram(document.getElementById('diagram'), mmTypes);
+    this._diagram = diagram; // for debugging
+    let scrubbable = new Scrubbable(diagram, document.getElementById('scrubber')); 
+    this.scrubbable = scrubbable; // not just debugging
+    let parser = new HoseParser(mmTypes, scrubbable);
+    this._hoseParser = parser; // ditto
+    return parser;
+  }
+
+  async saveRaw() {
+    return {
+      frames: HoseFrame.saveFramesJSON((await this.hoseParserPromise).savedFrames),
+      helloInfo: encodeISO_8859_1(helloInfo.rawData),
+    }
+  }
+  async save() {
+    return JSON.stringify(await this.saveRaw());
+  }
+
+  kill() {
+    this.dead = true;
+    this.stillAlivePR.reject('Conns killed');
+    if (this.scrubbable !== undefined) {
+      this.scrubbable.kill();
+    }
+
+  }
+
+}
+
+class LiveConns extends BaseConns {
   constructor(baseURL) {
+    super();
     this.baseURL = baseURL;
 
-    this.stillAlivePR = Promise.withResolvers();
-    this.constructorDonePR = Promise.withResolvers();
-
     this.mmTypesPromise = this.doMMTypes();
-    this.hoseParserPromise = this.doHoseParser();
 
     this.rpc = new RPCConn(baseURL);
     this.hose = new HoseConn(baseURL, this.hoseParserPromise);
-    this.dead = false;
+
+    this.helloInfoPromise = this.rpc.helloInfoPR.promise;
 
     this.doStats();
     this.doCheckboxes();
 
-    this.constructorDonePR.resolve();
-    
   }
   async doStats() {
     let lastFrameNum = 0;
@@ -1471,19 +1624,12 @@ class Conns {
   }
 
   async doMMTypes() {
-    await this.constructorDonePR.promise;
+    await yieldMe();
     let [helloInfo, exportJson] = await Promise.any([
       Promise.all([this.rpc.helloInfoPR.promise, g_exportJsonPromise]),
       this.stillAlivePR.promise,
     ]);
     return new MMTypes(helloInfo, exportJson);
-  }
-
-  async doHoseParser() {
-    let mmTypes = await this.mmTypesPromise;
-    let diagram = new Diagram(document.getElementById('diagram'), mmTypes);
-    this._diagram = diagram; // for debugging
-    return new HoseParser(mmTypes, diagram);
   }
 
   async updateFlags() {
@@ -1522,15 +1668,28 @@ class Conns {
       await this.updateFlags();
     }
   }
+
   kill() {
-    this.dead = true;
+    super.kill();
     this.rpc.kill();
     this.hose.kill();
-    this.stillAlivePR.reject('Conns killed');
   }
 }
 
+class LoadedConns extends BaseConns {
+  constructor(savedData) {
+    super();
+    
 
-g_conns = new Conns('ws://neb-solidus:8000');
+  }
+
+}
+
+setInterval(() => {
+  let mem = performance.memory.usedJSHeapSize / 1048576;
+  document.getElementById('js-mem').textContent = Math.floor(mem);
+}, 2000);
+
+g_conns = new LiveConns('ws://neb-solidus:8000');
 
 </script>

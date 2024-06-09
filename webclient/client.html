@@ -622,9 +622,7 @@ class Lock {
     }
   }
   async with(cb) {
-    console.log('with entry');
     await this.lock();
-    console.log('with got lock');
     let isUnlocked = false;
     let unlock = () => {
       if (!isUnlocked) {
@@ -1258,7 +1256,7 @@ class Scrubbable {
 }
 
 function encodeISO_8859_1(buffer) {
-  return String.fromCharCode(...new Uint8Array(buffer)));
+  return String.fromCharCode(...new Uint8Array(buffer));
 }
 function decodeISO_8859_1(buffer) {
   let ret = new Uint8Array(buffer.length);
@@ -1563,14 +1561,16 @@ class BaseConns {
     return parser;
   }
 
-  async saveRaw() {
+  async saveRaw(nframes) {
+    let savedFrames = (await this.hoseParserPromise).savedFrames;
+    savedFrames = savedFrames.slice(-nframes);
     return {
-      frames: HoseFrame.saveFramesJSON((await this.hoseParserPromise).savedFrames),
-      helloInfo: encodeISO_8859_1(helloInfo.rawData),
+      frames: HoseFrame.saveFrames(savedFrames),
+      helloInfo: encodeISO_8859_1((await this.helloInfoPromise).rawData),
     }
   }
-  async save() {
-    return JSON.stringify(await this.saveRaw());
+  async save(nframes) {
+    return JSON.stringify(await this.saveRaw(nframes));
   }
 
   kill() {

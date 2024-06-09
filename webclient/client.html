@@ -673,6 +673,7 @@ class WSWrapper {
   }
   kill() {
     if (this.state == 'open') {
+      console.log(`closing ${this.wsURL} due to kill`);
       this.ws.close();
     }
     this.state = 'dead';
@@ -1250,7 +1251,7 @@ class Scrubbable {
       return;
     }
     this.frames = frames;
-    let wasAtLast = this.scrubber.value == this.scrubber.max;
+    let wasAtLast = this.scrubber.value >= this.scrubber.max;
     this.scrubber.min = 0;
     this.scrubber.max = frames.length - 1;
     this.scrubber.disabled = false;
@@ -1261,24 +1262,92 @@ class Scrubbable {
   }
 }
 
-
-// based on MDN example
-// ...this is probably actually slower than doing it manually
-let base64DataUrlPrefix = 'data:application/octet-stream;base64,';
-async function bytesToBase64(bytes) {
-  assert(bytes instanceof ArrayBuffer);
+async function compressBufs(bufs) {
+  let compression = new CompressionStream('gzip');
+  let compressedBufs = (async () => {
+    return await Array.fromAsync(compression.readable);
+  })();
+  let writer = compression.writable.getWriter();
+  for (let buf of bufs) {
+    await writer.write(buf);
+  }
+  await writer.close();
+  let cb = await compressedBufs;
+  let file = new Blob(cb);
   let url = await new Promise((resolve, reject) => {
     const reader = Object.assign(new FileReader(), {
       onload: () => resolve(reader.result),
       onerror: () => reject(reader.error),
     });
-    reader.readAsDataURL(new File([bytes], "", {type: 'application/octet-stream'}));
+    reader.readAsDataURL(file);
   });
-  return url.substr(base64DataUrlPrefix.length);
+  return url;
 }
-async function base64ToBytes(base64) {
-  const res = await fetch(base64DataUrlPrefix + base64);
-  return new Uint8Array(await res.arrayBuffer());
+
+async function decompressBuf(url) {
+  let buf = await (await fetch(url)).arrayBuffer();
+  let decompression = new DecompressionStream('gzip');
+  let decompressedBufs = (async () => {
+    return await Array.fromAsync(decompression.readable);
+  })();
+  let writer = decompression.writable.getWriter();
+  await writer.write(buf);
+  await writer.close();
+  let db = await decompressedBufs;
+  let length = 0;
+  for (let dbuf of db) {
+    length += dbuf.byteLength;
+  }
+  let total = new ArrayBuffer(length);
+  let offset = 0;
+  for (let dbuf of db) {
+    let u8 = new Uint8Array(total, offset, dbuf.byteLength);
+    u8.set(new Uint8Array(dbuf));
+    offset += dbuf.byteLength;
+  }
+  return total;
+}
+
+async function stringifyWithArrayBuffers(data) {
+  let curOffset = 0;
+  let bufs = [];
+  let bufToStr = new Map;
+  let json = JSON.stringify(data, (key, obj) => {
+    if (obj instanceof ArrayBuffer) {
+      let str = bufToStr.get(obj);
+      if (str === undefined) {
+        bufs.push(obj);
+        str = `\x01${curOffset},${obj.byteLength}`;
+        curOffset += obj.byteLength;
+        bufToStr.set(obj, str);
+      }
+      return str;
+    }
+    return obj;
+  });
+  return json + '\n' + await compressBufs(bufs);
+}
+
+async function parseWithArrayBuffers(jsonPlus) {
+  let [json, url] = jsonPlus.split('\n');
+  let raw = await decompressBuf(url);
+  let strToBuf = new Map;
+  return JSON.parse(json, (key, obj) => {
+    // silly in-band signaling
+    if (typeof obj == 'string' && obj[0] === '\x01') {
+      let ab = strToBuf.get(obj);
+      if (ab === undefined) {
+        let [offset, length] = obj.substr(1).split(',');
+        offset |= 0;
+        length |= 0;
+        ab = new ArrayBuffer(length);
+        new Uint8Array(ab).set(new Uint8Array(raw, offset, length));
+        strToBuf.set(obj, ab);
+      }
+      return ab;
+    }
+    return obj;
+  });
 }
 
 
@@ -1300,48 +1369,32 @@ class HoseFrame {
     return `frame[${this.number}]`;
   }
 
-  static async saveFrames(frames) {
-    let bufferToId = new Map;
-    let idToContentString = [];
-    let frameInfos = [];
-    for (let frame of frames) {
-      let frameBufferIds = [];
-      for (let buffer of frame.relevantHoseMessages) {
-        let bufferId = bufferToId.get(buffer);
-        if (bufferId === undefined) {
-          bufferId = idToContentString.length;
-          bufferToId.set(buffer, bufferId);
-          idToContentString.push(await bytesToBase64(buffer));
-        }
-        frameBufferIds.push(bufferId);
-      }
-      let frameInfo = {number: frame.number, bufferIds: frameBufferIds};
-      frameInfos.push(frameInfo);
-    }
+  save() {
     return {
-      frameInfos,
-      idToContentString,
-    };
+      number: this.number,
+      relevantHoseMessages: this.relevantHoseMessages,
+    }
   }
 
-  static async loadFramesInto({frameInfos, idToContentString}, hoseParser) {
-    let idToData = [];
-    for (let cs of idToContentString) {
-      idToData.push(await base64ToBytes(cs));
-    }
-    hoseParser.curFrame.number = frameInfos[0].number - 1;
-    for (let frameInfo of frameInfos) {
-      let i = 0;
-      for (let bufferId of frameInfo.bufferIds) {
-        let tag = hoseParser.parse(idToData[bufferId].buffer);
-        if (i == 0) {
-          assert(tag == 'do_many');
-        }
-        i++;
+  static loadInto(frameInfo, hoseParser) {
+    let i = 0;
+    for (let buffer of frameInfo.relevantHoseMessages) {
+      let tag = hoseParser.parse(buffer);
+      if (i == 0) {
+        assert(tag == 'do_many');
+        hoseParser.curFrame.number = frameInfo.number;
       }
+      i++;
+    }
+  }
+
+  static loadFramesInto(frames, hoseParser) {
+    for (let frame of frames) {
+      HoseFrame.loadInto(frame, hoseParser);
     }
     hoseParser.finalizeFrame();
   }
+
 };
 
 class HoseParser {
@@ -1597,13 +1650,16 @@ class BaseConns {
   async saveRaw(nframes) {
     let savedFrames = (await this.hoseParserPromise).savedFrames;
     savedFrames = savedFrames.slice(-nframes);
+    if (savedFrames.length && savedFrames[0].number == 0) {
+      savedFrames.shift();
+    }
     return {
-      frames: await HoseFrame.saveFrames(savedFrames),
-      helloInfo: await bytesToBase64((await this.helloInfoPromise).rawData),
+      frames: savedFrames.map(f => f.save()),
+      helloInfo: (await this.helloInfoPromise).rawData,
     }
   }
   async save(nframes) {
-    return JSON.stringify(await this.saveRaw(nframes));
+    return await stringifyWithArrayBuffers(await this.saveRaw(nframes));
   }
 
   kill() {
@@ -1707,10 +1763,14 @@ class LoadedConns extends BaseConns {
     this.helloInfoPR = Promise.withResolvers();
     this.helloInfoPromise = this.helloInfoPR.promise;
 
-    this.loadRaw(JSON.parse(savedText));
+    this.load(savedText);
+  }
+  async load(savedText) {
+    let stuff = await parseWithArrayBuffers(savedText);
+    return await this.loadRaw(stuff);
   }
   async loadRaw({frames, helloInfo}) {
-    this.helloInfoPR.resolve(readHelloModInfo(new Reader(await base64ToBytes(helloInfo))));
+    this.helloInfoPR.resolve(readHelloModInfo(new Reader(helloInfo)));
     let hoseParser = await this.hoseParserPromise;
     await HoseFrame.loadFramesInto(frames, hoseParser);
   }
@@ -1723,6 +1783,13 @@ setInterval(() => {
 }, 2000);
 
 g_conns = new LiveConns('ws://neb-solidus:8000');
-//new LoadedConns(localStorage.zw);
+
+async function whoops() {
+  let zw = await g_conns.save();
+  g_conns.kill();
+  new LoadedConns(zw);
+  window.zw = zw;
+
+}
 
 </script>

@@ -47,6 +47,9 @@
   transition: background-color 0.0s linear;
   background-color: #f3f3f3;
 }
+#controls-left[inert] {
+  opacity: 0.25;
+}
 #controls-right {
   margin-left: auto;
   padding: 5px;
@@ -76,7 +79,9 @@
 </div>
 
 <div id="tape">
-<button id="save-button">Save</button>
+<button id="save-button" onclick="saveButtonClicked()">Save</button>
+<button id="load-button" onclick="loadButtonClicked()">Load</button>
+<button id="live-button" onclick="liveButtonClicked()">Live</button>
 </div>
 
 <div id="controls">
@@ -653,7 +658,7 @@ class Throttle {
   then(f, r) {
     let delay = this.delay;
     this.delay *= 2;
-    console.log(`Throttle "${this.name}" waiting for ${delay} ms`);
+    addStatsLine(`Throttle "${this.name}" waiting for ${delay} ms`);
     return sleep(delay).then(f, r);
   }
 }
@@ -673,7 +678,7 @@ class WSWrapper {
   }
   kill() {
     if (this.state == 'open') {
-      console.log(`closing ${this.wsURL} due to kill`);
+      addStatsLine(`closing ${this.wsURL} due to kill`);
       this.ws.close();
     }
     this.state = 'dead';
@@ -684,14 +689,14 @@ class WSWrapper {
     if (this.state == 'idle' && this.wantOpen) {
       this.openWS();
     } else if (this.state == 'open' && !this.wantOpen) {
-      console.log(`closing ${this.wsURL}`);
+      addStatsLine(`closing ${this.wsURL}`);
       this.ws.close();
     }
   }
   openWS() {
     assert(this.ws === null);
     assert(this.state == 'idle');
-    console.log(`connecting to ${this.wsURL}`);
+    addStatsLine(`connecting to ${this.wsURL}`);
     let ws = new WebSocket(this.wsURL);
     this.ws = ws;
     this.state = 'connecting';
@@ -699,7 +704,7 @@ class WSWrapper {
     ws.onopen = (e) => {
       assert(this.ws === ws);
       this.state = 'open';
-      console.log(`opened connection to ${this.wsURL}`);
+      addStatsLine(`opened connection to ${this.wsURL}`);
       this.delegate.onOpen(e);
       // if it doesn't close quickly, then reset throttle
       setTimeout(() => {
@@ -714,7 +719,7 @@ class WSWrapper {
     };
     ws.onclose = (e) => {
       assert(this.ws === ws || this.state === 'dead');
-      console.log(`closed connection to ${this.wsURL}`);
+      addStatsLine(`closed connection to ${this.wsURL}`);
       this.ws = null;
       if (this.wantOpen) {
         this.state = 'openThrottle';
@@ -784,7 +789,7 @@ class RPCConn {
   async rawRequest(req) {
     outerLoop: while (1) {
       while (!this.isOpen) {
-        console.log('RPC waiting for open');
+        addStatsLine('RPC waiting for open');
         await this.openedCond;
       }
 
@@ -799,12 +804,12 @@ class RPCConn {
         if (e !== rpcConnClosedMessage) {
           throw e;
         }
-        console.log('RPC waiting for re-open');
+        addStatsLine('RPC waiting for re-open');
         continue outerLoop;
       }
 
       if (typeof response == 'string') {
-        console.log(`RPC got error: '${resp}'`);
+        addStatsLine(`RPC got error: '${resp}'`);
         await this.rpcThrottle;
         continue outerLoop;
       }
@@ -1065,16 +1070,15 @@ class DiagramNormalColliders extends DiagramThingKind {
     let prevSeg = col.segmentsCur[col.segmentsCur.length - 1], seg;
     for (let i = 0, len = col.segmentsCur.length; i < len; i++, prevSeg = seg) {
       seg = col.segmentsCur[i];
-      if (seg.rel_pos_1.x != prevSeg.rel_pos_2.x ||
-          seg.rel_pos_1.y != prevSeg.rel_pos_2.y) {
+      let x1 = seg.rel_pos_1.x;
+      let y1 = seg.rel_pos_1.y;
+      let x2 = seg.rel_pos_2.x;
+      let y2 = seg.rel_pos_2.y;
+      if (x1 != prevSeg.rel_pos_2.x ||
+          y1 != prevSeg.rel_pos_2.y) {
         return this.renderAsLines(col);
       }
-      points.push(
-        seg.rel_pos_1.x + extX,
-        seg.rel_pos_1.y + extY,
-        seg.rel_pos_2.x + extX,
-        seg.rel_pos_2.y + extY,
-      );
+      points.push(x1 + extX, y1 + extY, x2 + extX, y2 + extY);
     }
     this.poly(
       col.ptr,
@@ -1369,27 +1373,36 @@ class HoseFrame {
     return `frame[${this.number}]`;
   }
 
-  save() {
+  save(isFirst) {
+    let relevantHoseMessages = this.relevantHoseMessages;
+    if (isFirst) {
+      relevantHoseMessages = [this.relevantHoseMessages[0]];
+      for (let data of this.normalColliders) {
+        if (data.firstSeenFrameNumber !== this.number) {
+          relevantHoseMessages.push(data.rawData);
+        }
+      }
+      relevantHoseMessages.push(...this.relevantHoseMessages.slice(1));
+    }
     return {
       number: this.number,
-      relevantHoseMessages: this.relevantHoseMessages,
+      relevantHoseMessages,
     }
   }
 
   static loadInto(frameInfo, hoseParser) {
-    let i = 0;
-    for (let buffer of frameInfo.relevantHoseMessages) {
+    for (let [i, buffer] of frameInfo.relevantHoseMessages.entries()) {
       let tag = hoseParser.parse(buffer);
       if (i == 0) {
         assert(tag == 'do_many');
         hoseParser.curFrame.number = frameInfo.number;
       }
-      i++;
     }
   }
 
   static loadFramesInto(frames, hoseParser) {
-    for (let frame of frames) {
+    for (let [i, frame] of frames.entries()) {
+      hoseParser.dontUpdateDiagram = i != frames.length - 1;
       HoseFrame.loadInto(frame, hoseParser);
     }
     hoseParser.finalizeFrame();
@@ -1409,6 +1422,8 @@ class HoseParser {
     this.scolColliderMap = new Map();
 
     this.tagStats = {};
+
+    this.dontUpdateDiagram = false;
   }
   parse(buffer) {
     assert(buffer instanceof ArrayBuffer);
@@ -1454,7 +1469,7 @@ class HoseParser {
       this.parseOverrun(r);
       break;
     default:
-      console.log(`hose message with unknown tag ${JSON.stringify(tag)}`);
+      addStatsLine(`hose message with unknown tag ${JSON.stringify(tag)}`);
     }
     r.expectEnd();
 
@@ -1473,13 +1488,14 @@ class HoseParser {
     for (let data of this.normalColliderMap.values()) {
       if (data.firstSeenFrameNumber !== this.curFrame.number) {
         this.curFrame.normalColliders.push(data);
-        this.curFrame.relevantHoseMessages.push(data.rawData);
       }
     }
 
     let oldFrame = this.curFrame;
     this.savedFrames.push(oldFrame);
-    this.scrubbable.updateFrames(this.savedFrames);
+    if (!this.dontUpdateDiagram) {
+      this.scrubbable.updateFrames(this.savedFrames);
+    }
     this.curFrame = new HoseFrame(oldFrame.number + 1);
   }
 
@@ -1562,7 +1578,7 @@ class HoseParser {
       return data.originalMessage;
     } else {
       // this could happen right when connecting
-      console.log(`!! missing scol for ${ptr}`);
+      addStatsLine(`!! missing scol for ${ptr}`);
       return null;
     }
   }
@@ -1618,8 +1634,22 @@ g_exportJsonPromise = (async () => {
   return await (await fetch('../exlaunch/build/export.json')).json();
 })();
 
+/*
+class ButtonWrapper
+  constructor(button, onClick) {
+    this.onClick = onClick;
+    this.button = button;
+    button.addEventListener('click', onClick);
+  }
+  kill() {
+    this.button.removeEventListener('click', this.onClick);
+  }
+}
+*/
+
 class BaseConns {
-  constructor() {
+  constructor(hash) {
+    location.hash = hash;
     this.dead = false;
     this.hoseParserPromise = this.doHoseParser();
     this.mmTypesPromise = this.doMMTypes();
@@ -1631,7 +1661,7 @@ class BaseConns {
     let mmTypes = await this.mmTypesPromise;
     let diagram = new Diagram(document.getElementById('diagram'), mmTypes);
     this.diagram = diagram; // mostly for debugging
-    let scrubbable = new Scrubbable(diagram, document.getElementById('scrubber')); 
+    let scrubbable = new Scrubbable(diagram, document.getElementById('scrubber'));
     this.scrubbable = scrubbable; // ditto
     let parser = new HoseParser(mmTypes, scrubbable);
     this._hoseParser = parser; // ditto
@@ -1654,7 +1684,7 @@ class BaseConns {
       savedFrames.shift();
     }
     return {
-      frames: savedFrames.map(f => f.save()),
+      frames: savedFrames.map((f, i) => f.save(i == 0)),
       helloInfo: (await this.helloInfoPromise).rawData,
     }
   }
@@ -1671,20 +1701,31 @@ class BaseConns {
     if (this.diagram !== undefined) {
       this.diagram.kill();
     }
-
   }
 
 }
 
+function addStatsLine(text) {
+  let div = document.createElement('div');
+  div.textContent = text;
+  let parent = document.getElementById('stats');
+  parent.insertBefore(div, parent.firstChild);
+  while (parent.childElementCount > 10) {
+    parent.removeChild(parent.lastChild);
+  }
+}
+
 class LiveConns extends BaseConns {
   constructor(baseURL) {
-    super();
+    super('live');
     this.baseURL = baseURL;
 
     this.rpc = new RPCConn(baseURL);
     this.helloInfoPromise = this.rpc.helloInfoPR.promise;
 
     this.hose = new HoseConn(baseURL, this.hoseParserPromise);
+
+    document.getElementById('controls-left').removeAttribute('inert');
 
     this.doStats();
     this.doCheckboxes();
@@ -1700,13 +1741,7 @@ class LiveConns extends BaseConns {
         let frames = frame.number - lastFrameNum;
         lastFrameNum = frame.number;
         let text = `stats: overrunBytes=${stats.overrunBytes} sentBytes=${stats.sentBytes} bp=${stats.backpressuredNsec} frames=${frames} tagStats=${JSON.stringify(hoseParser.tagStats)}\n`
-        let div = document.createElement('div');
-        div.textContent = text;
-        let parent = document.getElementById('stats');
-        parent.insertBefore(div, parent.firstChild);
-        while (parent.childElementCount > 10) {
-          parent.removeChild(parent.lastChild);
-        }
+        addStatsLine(text);
         hoseParser.tagStats = {};
       }
       await sleep(1000);
@@ -1759,15 +1794,21 @@ class LiveConns extends BaseConns {
 
 class LoadedConns extends BaseConns {
   constructor(savedText) {
-    super();
+    super('loaded');
     this.helloInfoPR = Promise.withResolvers();
     this.helloInfoPromise = this.helloInfoPR.promise;
+
+    document.getElementById('controls-left').setAttribute('inert', '');
+    addStatsLine('loading...');
+    this.loadStartTime = new Date().getTime();
 
     this.load(savedText);
   }
   async load(savedText) {
     let stuff = await parseWithArrayBuffers(savedText);
-    return await this.loadRaw(stuff);
+    await this.loadRaw(stuff);
+    let loadTime = new Date().getTime() - this.loadStartTime;
+    addStatsLine(`loaded in ${loadTime}ms.`);
   }
   async loadRaw({frames, helloInfo}) {
     this.helloInfoPR.resolve(readHelloModInfo(new Reader(helloInfo)));
@@ -1782,14 +1823,34 @@ setInterval(() => {
   document.getElementById('js-mem').textContent = Math.floor(mem);
 }, 2000);
 
-g_conns = new LiveConns('ws://neb-solidus:8000');
-
-async function whoops() {
-  let zw = await g_conns.save();
-  g_conns.kill();
-  new LoadedConns(zw);
-  window.zw = zw;
-
+async function saveButtonClicked() {
+  addStatsLine('saving...');
+  localStorage.zw = await g_conns.save();
+  addStatsLine('saved.');
 }
+async function loadButtonClicked() {
+  g_conns.kill();
+  g_conns = new LoadedConns(localStorage.zw);
+}
+async function liveButtonClicked() {
+  g_conns.kill();
+  g_conns = new LiveConns('ws://neb-solidus:8000');
+}
+
+g_conns = {kill: () => {}};
+
+function loadByHash() {
+  if (location.hash.length < 2) {
+    return;
+  }
+  let hash = location.hash.substr(1);
+  if (hash == 'live') {
+    liveButtonClicked();
+  } else if (hash == 'loaded') {
+    // todo: more than one save
+    loadButtonClicked();
+  }
+}
+loadByHash();
 
 </script>

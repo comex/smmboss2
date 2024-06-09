@@ -484,6 +484,9 @@ class Reader {
     if (dv instanceof ArrayBuffer) {
       dv = new DataView(dv);
     }
+    if (dv instanceof Uint8Array) {
+      dv = new DataView(dv.buffer, dv.byteOffset, dv.byteLength);
+    }
     assert(dv instanceof DataView);
     this.dv = dv;
     this.off = off;
@@ -547,7 +550,7 @@ function readHelloModInfo(r) {
     data: readExlUtilRange(r),
     buildId: r.readArray(16, () => r.read(ty.u8)),
   }));
-  ret.rawData = r.buffer;
+  ret.rawData = r.dv.buffer;
   return ret;
 }
 
@@ -1215,6 +1218,9 @@ class Diagram {
   transformSize(size) {
     return size; // todo: match camera
   }
+  kill() {
+    this.svg.innerHTML = '';
+  }
 };
 
 class Scrubbable {
@@ -1255,16 +1261,26 @@ class Scrubbable {
   }
 }
 
-function encodeISO_8859_1(buffer) {
-  return String.fromCharCode(...new Uint8Array(buffer));
+
+// based on MDN example
+// ...this is probably actually slower than doing it manually
+let base64DataUrlPrefix = 'data:application/octet-stream;base64,';
+async function bytesToBase64(bytes) {
+  assert(bytes instanceof ArrayBuffer);
+  let url = await new Promise((resolve, reject) => {
+    const reader = Object.assign(new FileReader(), {
+      onload: () => resolve(reader.result),
+      onerror: () => reject(reader.error),
+    });
+    reader.readAsDataURL(new File([bytes], "", {type: 'application/octet-stream'}));
+  });
+  return url.substr(base64DataUrlPrefix.length);
 }
-function decodeISO_8859_1(buffer) {
-  let ret = new Uint8Array(buffer.length);
-  for (let i = 0, len = buffer.length; i < len; i++) {
-    ret[i] = buffer.charCodeat(i);
-  }
-  return ret;
+async function base64ToBytes(base64) {
+  const res = await fetch(base64DataUrlPrefix + base64);
+  return new Uint8Array(await res.arrayBuffer());
 }
+
 
 class NormalCollider {
 }
@@ -1284,7 +1300,7 @@ class HoseFrame {
     return `frame[${this.number}]`;
   }
 
-  static saveFrames(frames) {
+  static async saveFrames(frames) {
     let bufferToId = new Map;
     let idToContentString = [];
     let frameInfos = [];
@@ -1294,8 +1310,10 @@ class HoseFrame {
         let bufferId = bufferToId.get(buffer);
         if (bufferId === undefined) {
           bufferId = idToContentString.length;
-          idToContentString.push(encodeISO_8859_1(buffer));
+          bufferToId.set(buffer, bufferId);
+          idToContentString.push(await bytesToBase64(buffer));
         }
+        frameBufferIds.push(bufferId);
       }
       let frameInfo = {number: frame.number, bufferIds: frameBufferIds};
       frameInfos.push(frameInfo);
@@ -1306,13 +1324,16 @@ class HoseFrame {
     };
   }
 
-  static loadFramesInto({frameInfos, idToContentString}, hoseParser) {
-    let idToData = idToContentString.map(decodeISO_8859_1);
+  static async loadFramesInto({frameInfos, idToContentString}, hoseParser) {
+    let idToData = [];
+    for (let cs of idToContentString) {
+      idToData.push(await base64ToBytes(cs));
+    }
     hoseParser.curFrame.number = frameInfos[0].number - 1;
     for (let frameInfo of frameInfos) {
       let i = 0;
       for (let bufferId of frameInfo.bufferIds) {
-        let tag = hoseParser.parse(idToData[bufferId]);
+        let tag = hoseParser.parse(idToData[bufferId].buffer);
         if (i == 0) {
           assert(tag == 'do_many');
         }
@@ -1399,6 +1420,7 @@ class HoseParser {
     for (let data of this.normalColliderMap.values()) {
       if (data.firstSeenFrameNumber !== this.curFrame.number) {
         this.curFrame.normalColliders.push(data);
+        this.curFrame.relevantHoseMessages.push(data.rawData);
       }
     }
 
@@ -1449,6 +1471,7 @@ class HoseParser {
       firstSeenFrameNumber: this.curFrame.number,
       segmentsCur: [],
       segmentsOld: [],
+      rawData: r.dv.buffer,
     });
     for (let i = 0, count = data.col.segments_cur.count; i < count; i++) {
       data.segmentsCur.push(r.read(this.mmTypes.ColliderSegment));
@@ -1546,6 +1569,7 @@ class BaseConns {
   constructor() {
     this.dead = false;
     this.hoseParserPromise = this.doHoseParser();
+    this.mmTypesPromise = this.doMMTypes();
     this.stillAlivePR = Promise.withResolvers();
   }
 
@@ -1553,20 +1577,29 @@ class BaseConns {
     await yieldMe();
     let mmTypes = await this.mmTypesPromise;
     let diagram = new Diagram(document.getElementById('diagram'), mmTypes);
-    this._diagram = diagram; // for debugging
+    this.diagram = diagram; // mostly for debugging
     let scrubbable = new Scrubbable(diagram, document.getElementById('scrubber')); 
-    this.scrubbable = scrubbable; // not just debugging
+    this.scrubbable = scrubbable; // ditto
     let parser = new HoseParser(mmTypes, scrubbable);
     this._hoseParser = parser; // ditto
     return parser;
+  }
+
+  async doMMTypes() {
+    await yieldMe();
+    let [helloInfo, exportJson] = await Promise.any([
+      Promise.all([this.helloInfoPromise, g_exportJsonPromise]),
+      this.stillAlivePR.promise,
+    ]);
+    return new MMTypes(helloInfo, exportJson);
   }
 
   async saveRaw(nframes) {
     let savedFrames = (await this.hoseParserPromise).savedFrames;
     savedFrames = savedFrames.slice(-nframes);
     return {
-      frames: HoseFrame.saveFrames(savedFrames),
-      helloInfo: encodeISO_8859_1((await this.helloInfoPromise).rawData),
+      frames: await HoseFrame.saveFrames(savedFrames),
+      helloInfo: await bytesToBase64((await this.helloInfoPromise).rawData),
     }
   }
   async save(nframes) {
@@ -1579,6 +1612,9 @@ class BaseConns {
     if (this.scrubbable !== undefined) {
       this.scrubbable.kill();
     }
+    if (this.diagram !== undefined) {
+      this.diagram.kill();
+    }
 
   }
 
@@ -1589,12 +1625,10 @@ class LiveConns extends BaseConns {
     super();
     this.baseURL = baseURL;
 
-    this.mmTypesPromise = this.doMMTypes();
-
     this.rpc = new RPCConn(baseURL);
-    this.hose = new HoseConn(baseURL, this.hoseParserPromise);
-
     this.helloInfoPromise = this.rpc.helloInfoPR.promise;
+
+    this.hose = new HoseConn(baseURL, this.hoseParserPromise);
 
     this.doStats();
     this.doCheckboxes();
@@ -1621,15 +1655,6 @@ class LiveConns extends BaseConns {
       }
       await sleep(1000);
     }
-  }
-
-  async doMMTypes() {
-    await yieldMe();
-    let [helloInfo, exportJson] = await Promise.any([
-      Promise.all([this.rpc.helloInfoPR.promise, g_exportJsonPromise]),
-      this.stillAlivePR.promise,
-    ]);
-    return new MMTypes(helloInfo, exportJson);
   }
 
   async updateFlags() {
@@ -1677,10 +1702,17 @@ class LiveConns extends BaseConns {
 }
 
 class LoadedConns extends BaseConns {
-  constructor(savedData) {
+  constructor(savedText) {
     super();
-    
+    this.helloInfoPR = Promise.withResolvers();
+    this.helloInfoPromise = this.helloInfoPR.promise;
 
+    this.loadRaw(JSON.parse(savedText));
+  }
+  async loadRaw({frames, helloInfo}) {
+    this.helloInfoPR.resolve(readHelloModInfo(new Reader(await base64ToBytes(helloInfo))));
+    let hoseParser = await this.hoseParserPromise;
+    await HoseFrame.loadFramesInto(frames, hoseParser);
   }
 
 }
@@ -1691,5 +1723,6 @@ setInterval(() => {
 }, 2000);
 
 g_conns = new LiveConns('ws://neb-solidus:8000');
+//new LoadedConns(localStorage.zw);
 
 </script>

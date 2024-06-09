@@ -1,3 +1,4 @@
+<meta charset="UTF-8">
 <style>
 #controls-left > label {
   display: block;
@@ -523,88 +524,129 @@ function toHex(array) {
   return array.map(num => num.toString(16).padStart(2, '0')).join('');
 }
 
-
-class Cond {
-  constructor() {
-    this.waiters = new Set;
-    this.rejectReason = undefined;
+class SignalWatcher {
+  constructor(signal) {
+    this.watchedSignal = signal;
+    this.rawCallback = () => {
+      this.callback();
+    };
+    this.watcherIdx = signal.addCallback(this.rawCallback);
   }
-  broadcast() {
-    for (let waiter of this.waiters) {
-      this.waiters.delete(waiter);
-      waiter.resolve();
-    }
-    assert(this.waiters.size === 0); // is this safe?
-  }
-  then(f, r) {
-    let pr = Promise.withResolvers();
-    this.waiters.add(pr);
-    let ret = pr.promise.then(f, r);
-    if (this.rejectReason !== undefined) {
-      this.reject(this.rejectReason);
-    }
-    return ret;
-  }
-  static waitMulti(...conds) {
-    let pr = Promise.withResolvers();
-    for (let cond of conds) {
-      cond.waiters.add(pr);
-    }
-    return pr.promise.then(() => {
-      for (let cond of conds) {
-        cond.waiters.delete(pr);
-      }
-    });
-  }
-  reject(reason) {
-    assert(reason !== undefined);
-    this.rejectReason = reason;
-    for (let waiter of this.waiters) {
-      this.waiters.delete(waiter);
-      waiter.reject(reason);
+  kill() {
+    if (this.watcherIdx !== -1) {
+      this.watchedSignal.removeWatcher(this.watcherIdx, this.rawCallback);
+      this.watcherIdx = -1;
     }
   }
 }
 
-class Lock {
+class Signal {
   constructor() {
-    this.locked = false;
-    this.waiters = [];
-  };
-  lock() {
-    if (!this.locked) {
-      this.locked = true;
-      return Promise.resolve(undefined);
+    this.callbacks = [];
+    this.hasValue = false;
+    this.hasException = false;
+    this.valueOrException = undefined;
+  }
+  bump() {
+    let cbs = this.callbacks;
+    for (let i = 0; i < cbs.length;) {
+      let callback = cbs[i];
+      callback();
+      if (cbs[i] === callback) {
+        i++;
+      }
+    }
+  }
+  get curValue() {
+    if (this.hasException) {
+      throw this.valueOrException;
     } else {
-      let { promise, resolve, reject } = Promise.withResolvers();
-      this.waiters.push(resolve);
-      return promise;
+      return this.valueOrException;
     }
   }
-  unlock() {
-    assert(this.locked);
-    this.locked = false;
-    let resolve = this.waiters.shift();
-    if (resolve !== undefined) {
-      resolve();
+  set(value) {
+    if (this.hasException) {
+      return;
     }
+    this.valueOrException = value;
+    this.hasValue = true;
+    this.bump();
   }
-  async with(cb) {
-    await this.lock();
-    let isUnlocked = false;
-    let unlock = () => {
-      if (!isUnlocked) {
-        isUnlocked = true;
-        this.unlock();
+  reject(exception) {
+    if (this.hasException) {
+      return;
+    }
+    this.valueOrException = exception;
+    this.hasException = true;
+    this.hasValue = false;
+    this.bump();
+    this.callbacks = [];
+  }
+
+  then(f, r) {
+    let { promise, resolve, reject } = Promise.withResolvers();
+    let callbackIdx;
+    let callback = () => {
+      if (this.hasException) {
+        reject(this.valueOrException);
+      } else if (this.hasValue) {
+        resolve(this.valueOrException);
+      }
+      this.removeCallback(callbackIdx, callback);
+    };
+    callbackIdx = this.addCallback(callback);
+    return promise.then(f, r);
+  }
+
+  map(f) {
+    let mappedSignal = new Signal;
+    let callbackIdx;
+    let callback = () => {
+      if (this.hasException) {
+        mappedSignal.reject(this.valueOrException);
+        this.removeCallback(callbackIdx, callback);
+      } else if (this.hasValue) {
+        mappedSignal.set(f(this.valueOrException));
       }
     };
-    try {
-      return await cb(unlock);
-    } finally {
-      unlock();
+    callbackIdx = this.addCallback(callback);
+    callback();
+    return mappedSignal;
+  }
+
+  static of(value) {
+    let ret = new Signal;
+    ret.set(value);
+    return ret;
+  }
+
+  addCallback(callback) {
+    if (this.hasException) {
+      return 0;
+    }
+    let idx = this.callbacks.length;
+    this.callbacks.push(callback);
+    console.log(this.callbacks.length);
+    return idx;
+  }
+
+  removeCallback(idx, callback) {
+    if (this.hasException) {
+      return;
+    }
+    let cbs = this.callbacks;
+    assert(cbs[idx] === callback);
+    delete cbs[idx];
+    while (cbs.length > 0 && cbs[cbs.length - 1] === undefined) {
+      cbs.pop();
     }
   }
+
+  kill() {
+    this.reject('killed');
+  }
 }
+
 
 class Throttle {
   constructor(name, defaultDelay = 100) {
@@ -1795,6 +1837,7 @@ setInterval(() => {
   document.getElementById('js-mem').textContent = Math.floor(mem);
 }, 2000);
 
+if (0) {
 new ButtonWrapper('save-button', async () => {
   addStatsLine('saving...');
   localStorage.zw = await g_conns.save();
@@ -1808,6 +1851,7 @@ new ButtonWrapper('live-button', async () => {
   g_conns.kill();
   g_conns = new LiveConns('ws://neb-solidus:8000');
 });
+}
 
 g_conns = {kill: () => {}};
 
@@ -1823,6 +1867,7 @@ function loadByHash() {
     loadButtonClicked();
   }
 }
-loadByHash();
+//loadByHash();
+)();
 
 </script>

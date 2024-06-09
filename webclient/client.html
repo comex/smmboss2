@@ -24,30 +24,35 @@
 </style>
 
 <div id="overrun"></div>
-<div id="columns" style="display: grid; gap: 10px; grid-template-columns: max-content 1fr">
+<div id="columns" style="display: flex; flex-direction: row; gap: 10px ">
   <div id="col1" style="display: flex; flex-direction: column">
     <svg width="500" height="500" id="diagram" class="box"></svg>
-    <div id="scrubparent">
-    <input type="range" id="scrubber" min="0" max="1" value="1" step="1" disabled>
+    <div class="box" style="align-content: end; padding: 3px">
+      <div id="scrubber-row" style="display: flex; flex-direction: row; align-content: stretch">
+        <input type="range" id="scrubber" min="0" max="1" value="1" step="1" disabled style="flex: 1">
+        <div id="scrubber-display">0/0</div>
+      </div>
+      <div>
+        <button id="start-button">⏵</button>
+        <button id="play-button">⏵</button>
+        <button id="save-button">Save</button>
+        <button id="load-button">Load</button>
+        <button id="live-button">Live</button>
+      </div>
     </div>
   </div>
-  <div id="col2" style="display: flex; flex-direction: column">
+  <div id="col2" style="display: flex; flex-direction: column; flex: 1">
     <div id="stats" style="border: 1px solid grey; font-family: monospace; height: 300px; overflow: scroll;"></div>
     <div id="spacer" style="margin-top: auto"></div>
-  </div>
-  <div id="tape" class="box" style="align-content: end; margin-bottom: 10px; padding: 3px">
-    <button id="save-button" onclick="saveButtonClicked()">Save</button>
-    <button id="load-button" onclick="loadButtonClicked()">Load</button>
-    <button id="live-button" onclick="liveButtonClicked()">Live</button>
-  </div>
 
-  <div id="controls" style="border: 1px solid grey; align-content: stretch; display: flex; flex-direction: row">
-    <div id="controls-left">
-      <label for="controls-backpressure"><input type="checkbox" id="controls-backpressure">Backpressure</label>
-      <label for="controls-bg-events"><input type="checkbox" id="controls-bg-events">Background Collision Events</label>
-    </div>
-    <div id="controls-right">
-      JS Mem: <span id="js-mem">?</span> MB
+    <div id="controls" style="border: 1px solid grey; align-content: stretch; display: flex; flex-direction: row">
+      <div id="controls-left">
+        <label for="controls-backpressure"><input type="checkbox" id="controls-backpressure">Backpressure</label>
+        <label for="controls-bg-events"><input type="checkbox" id="controls-bg-events">Background Collision Events</label>
+      </div>
+      <div id="controls-right">
+        JS Mem: <span id="js-mem">?</span> MB
+      </div>
     </div>
   </div>
 </div>
@@ -1184,40 +1189,52 @@ class Diagram {
 };
 
 class Scrubbable {
-  constructor(diagram, scrubber) {
+  constructor(diagram, scrubberRow) {
     this.diagram = diagram;
-    this.scrubber = scrubber;
-    this.frames = [];
-    this.atLast = true;
-    this.scrubber.min = -1;
+    this.scrubber = scrubberRow.querySelector('#scrubber');
     this.scrubber.max = 0;
-    this.scrubber.value = 0;
-    this.scrubber.disabled = true;
-    this.onChangeOrInput = () => {
-      assert(this.scrubber.value < this.frames.length);
-      this.diagram.renderFrame(this.frames[this.scrubber.value]);
 
-    };
+    this.scrubberDisplay = scrubberRow.querySelector('#scrubber-display');
+
+    this.onChangeOrInput = this.onChangeOrInput.bind(this);
     this.scrubber.addEventListener('change', this.onChangeOrInput);
     this.scrubber.addEventListener('input', this.onChangeOrInput);
+    this.updateFrames([]);
   }
   kill() {
     this.scrubber.removeEventListener('change', this.onChangeOrInput);
     this.scrubber.removeEventListener('input', this.onChangeOrInput);
   }
+  onChangeOrInput() {
+    this.updateRender();
+  }
+  updateRender() {
+    let text;
+    if (this.frames.length == 0) {
+      text = '0/0';
+    } else {
+      let oldFrameIdx = this.frameIdx;
+      this.frameIdx = this.frames.length - 1 + parseInt(this.scrubber.value);
+      assert(this.frameIdx >= 0 && this.frameIdx < this.frames.length);
+      if (this.frameIdx !== oldFrameIdx) {
+        this.diagram.renderFrame(this.frames[this.frameIdx]);
+      }
+      text = `${this.frameIdx + 1}/${this.frames.length}`;
+    }
+    this.scrubberDisplay.textContent = text;
+  }
   updateFrames(frames) {
-    if (frames.length < 2) {
-      return;
-    }
     this.frames = frames;
-    let wasAtLast = this.scrubber.value >= this.scrubber.max;
-    this.scrubber.min = 0;
-    this.scrubber.max = frames.length - 1;
-    this.scrubber.disabled = false;
-    if (wasAtLast && frames.length) {
-      this.scrubber.value = frames.length - 1;
-      this.diagram.renderFrame(frames[this.scrubber.value]);
+    if (frames.length <= 1) {
+      // since min=max=value doesn't show as filled, fake it
+      this.scrubber.min = -1;
+      this.scrubber.value = 0;
+      this.scrubber.disabled = true;
+    } else {
+      this.scrubber.min = -(frames.length - 1);
+      this.scrubber.disabled = false;
     }
+    this.updateRender();
   }
 }
 
@@ -1616,7 +1633,7 @@ class BaseConns {
     let mmTypes = await this.mmTypesPromise;
     let diagram = new Diagram(document.getElementById('diagram'), mmTypes);
     this.diagram = diagram; // mostly for debugging
-    let scrubbable = new Scrubbable(diagram, document.getElementById('scrubber'));
+    let scrubbable = new Scrubbable(diagram, document.getElementById('scrubber-row'));
     this.scrubbable = scrubbable; // ditto
     let parser = new HoseParser(mmTypes, scrubbable);
     this._hoseParser = parser; // ditto
@@ -1778,19 +1795,19 @@ setInterval(() => {
   document.getElementById('js-mem').textContent = Math.floor(mem);
 }, 2000);
 
-async function saveButtonClicked() {
+new ButtonWrapper('save-button', async () => {
   addStatsLine('saving...');
   localStorage.zw = await g_conns.save();
   addStatsLine('saved.');
-}
-async function loadButtonClicked() {
+});
+new ButtonWrapper('load-button', async () => {
   g_conns.kill();
   g_conns = new LoadedConns(localStorage.zw);
-}
-async function liveButtonClicked() {
+});
+new ButtonWrapper('live-button', async () => {
   g_conns.kill();
   g_conns = new LiveConns('ws://neb-solidus:8000');
-}
+});
 
 g_conns = {kill: () => {}};
 

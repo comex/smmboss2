@@ -1,43 +1,4 @@
 <style>
-#columns {
-  display: grid;
-  gap: 10px;
-
-  grid-template-columns: max-content 1fr;
-}
-
-#col1 {
-  display: flex;
-  flex-direction: column;
-}
-
-#diagram {
-  border: 1px solid grey;
-}
-
-#spacer {
-  margin-top: auto;
-}
-
-#col2 {
-  display: flex;
-  flex-direction: column;
-}
-#tape {
-  border: 1px solid grey;
-
-  align-content: end;
-  margin-bottom: 10px;
-  padding: 3px;
-}
-#controls {
-  border: 1px solid grey;
-
-  align-content: end;
-  display: flex;
-  flex-direction: row;
-  align-content: stretch;
-}
 #controls-left > label {
   display: block;
   transition: background-color 0.5s ease-out;
@@ -54,47 +15,41 @@
   margin-left: auto;
   padding: 5px;
 }
-#stats {
-  border: 1px solid grey;
-  font-family: monospace;
-  height: 300px;
-  overflow: scroll;
-}
 #stats > div {
   margin: 10px 0;
+}
+.box {
+  border: 1px solid grey;
 }
 </style>
 
 <div id="overrun"></div>
-<div id="columns">
-<div id="col1">
-<svg width="500" height="500" id="diagram"></svg>
-<input type="range" id="scrubber" min="0" max="1" value="1" step="1" disabled>
-</div>
-<div id="col2">
-<div id="stats">
-</div>
+<div id="columns" style="display: grid; gap: 10px; grid-template-columns: max-content 1fr">
+  <div id="col1" style="display: flex; flex-direction: column">
+    <svg width="500" height="500" id="diagram" class="box"></svg>
+    <div id="scrubparent">
+    <input type="range" id="scrubber" min="0" max="1" value="1" step="1" disabled>
+    </div>
+  </div>
+  <div id="col2" style="display: flex; flex-direction: column">
+    <div id="stats" style="border: 1px solid grey; font-family: monospace; height: 300px; overflow: scroll;"></div>
+    <div id="spacer" style="margin-top: auto"></div>
+  </div>
+  <div id="tape" class="box" style="align-content: end; margin-bottom: 10px; padding: 3px">
+    <button id="save-button" onclick="saveButtonClicked()">Save</button>
+    <button id="load-button" onclick="loadButtonClicked()">Load</button>
+    <button id="live-button" onclick="liveButtonClicked()">Live</button>
+  </div>
 
-<div id="spacer">
-</div>
-
-<div id="tape">
-<button id="save-button" onclick="saveButtonClicked()">Save</button>
-<button id="load-button" onclick="loadButtonClicked()">Load</button>
-<button id="live-button" onclick="liveButtonClicked()">Live</button>
-</div>
-
-<div id="controls">
-<div id="controls-left">
-<label for="controls-backpressure"><input type="checkbox" id="controls-backpressure">Backpressure</label>
-<label for="controls-bg-events"><input type="checkbox" id="controls-bg-events">Background Collision Events</label>
-</div>
-<div id="controls-right">
-JS Mem: <span id="js-mem">?</span> MB
-</div>
-</div>
-
-</div>
+  <div id="controls" style="border: 1px solid grey; align-content: stretch; display: flex; flex-direction: row">
+    <div id="controls-left">
+      <label for="controls-backpressure"><input type="checkbox" id="controls-backpressure">Backpressure</label>
+      <label for="controls-bg-events"><input type="checkbox" id="controls-bg-events">Background Collision Events</label>
+    </div>
+    <div id="controls-right">
+      JS Mem: <span id="js-mem">?</span> MB
+    </div>
+  </div>
 </div>
 
 <script>

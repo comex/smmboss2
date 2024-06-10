@@ -557,7 +557,7 @@ class Signal {
       }
     }
   }
-  get curValue() {
+  get cur() {
     if (this.hasException) {
       throw this.valueOrException;
     } else {
@@ -580,7 +580,7 @@ class Signal {
     this.hasException = true;
     this.hasValue = false;
     this.bump();
-    this.callbacks = [];
+    this.callbacks = new Set;
   }
 
   then(f, r) {
@@ -614,6 +614,39 @@ class Signal {
     return mappedSignal;
   }
 
+  bind(f) {
+    let boundSignal = new Signal;
+    let myCallbackIdx;
+    let forwarderSignal = null;
+    let forwarderCallbackIdx = -1;
+    let forwarderCallback = null;
+    let callback = () => {
+      if (forwarderSignal !== null) {
+        forwarderSignal.removeCallback(forwarderCallbackIdx, forwarderCallback);
+        forwarderSignal = null;
+      }
+      if (this.hasException) {
+        boundSignal.reject(this.valueOrException);
+        this.removeCallback(myCallbackIdx, callback);
+      } else if (this.hasValue) {
+        forwarderSignal = this.valueOrException;
+        assert(forwarderSignal instanceof Signal);
+        [forwarderCallbackIdx, forwarderCallback] = forwarderSignal.addForward(this);
+      }
+    };
+    callbackIdx = this.addCallback(callback);
+    callback();
+    return mappedSignal;
+  }
+
+  hasValueSig() {
+    let ret = this.map((_) => true);
+    if (!this.hasValue && !this.hasException) {
+      ret.set(false);
+    }
+    return ret;
+  }
+
   static of(value) {
     let ret = new Signal;
     ret.set(value);
@@ -622,8 +655,11 @@ class Signal {
 
   addCallback(callback) {
     if (this.hasException) {
-      return 0;
+      return false;
     }
+    assert(!this.callbacks.has(callback));
+    this.callbacks.add(callback);
+    return true;
     let idx = this.callbacks.length;
     this.callbacks.push(callback);
     console.log(this.callbacks.length);
@@ -640,6 +676,16 @@ class Signal {
     while (cbs.length > 0 && cbs[cbs.length - 1] === undefined) {
       cbs.pop();
     }
+  }
+
+  addForward(targetSignal) {
+    let callback = () => {
+      if (this.hasException) {
+        targetSignal.reject(
+
+    };
+    let idx = this.add
+
   }
 
   kill() {
@@ -1809,6 +1855,7 @@ class LiveConns extends BaseConns {
 class LoadedConns extends BaseConns {
   constructor(savedText) {
     super('loaded');
+    this.ready = new Signal(false);
     this.helloInfoPR = Promise.withResolvers();
     this.helloInfoPromise = this.helloInfoPR.promise;
 
@@ -1823,6 +1870,7 @@ class LoadedConns extends BaseConns {
     await this.loadRaw(stuff);
     let loadTime = new Date().getTime() - this.loadStartTime;
     addStatsLine(`loaded in ${loadTime}ms.`);
+    this.ready.set(true);
   }
   async loadRaw({frames, helloInfo}) {
     this.helloInfoPR.resolve(readHelloModInfo(new Reader(helloInfo)));
@@ -1838,22 +1886,28 @@ setInterval(() => {
 }, 2000);
 
 if (0) {
-new ButtonWrapper('save-button', async () => {
-  addStatsLine('saving...');
-  localStorage.zw = await g_conns.save();
-  addStatsLine('saved.');
+new ButtonWrapper('save-button', {
+  onClick: async () => {
+    addStatsLine('saving...');
+    localStorage.zw = await g_conns.save();
+    addStatsLine('saved.');
+  }
+);
+new ButtonWrapper('load-button', {
+  enabled: g_conns
+  onClick: async () => {
+    g_conns_sig.cur.kill();
+    g_conns = new LoadedConns(localStorage.zw);
+  }
 });
-new ButtonWrapper('load-button', async () => {
-  g_conns.kill();
-  g_conns = new LoadedConns(localStorage.zw);
-});
-new ButtonWrapper('live-button', async () => {
-  g_conns.kill();
-  g_conns = new LiveConns('ws://neb-solidus:8000');
-});
+new ButtonWrapper('live-button', {
+  onClick: async () => {
+    g_conns_sig.cur.kill();
+    g_conns_sig.set(new LiveConns('ws://neb-solidus:8000'));
+  }
 }
 
-g_conns = {kill: () => {}};
+g_conns_sig = new Signal({kill: () => {}});
 
 function loadByHash() {
   if (location.hash.length < 2) {

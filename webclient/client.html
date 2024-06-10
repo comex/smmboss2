@@ -33,7 +33,7 @@
         <input type="range" id="scrubber" min="0" max="1" value="1" step="1" disabled style="flex: 1">
         <div id="scrubber-display">0/0</div>
       </div>
-      <div>
+      <div id="scrubber-buttons" style="display: flex; flex-direction: row; gap: 4px; justify-content: end">
         <button id="start-button">⏵</button>
         <button id="play-button">⏵</button>
         <button id="save-button">Save</button>
@@ -555,12 +555,22 @@ class SignalLink {
 }
 
 class Signal {
-  constructor() {
+  constructor(initialValue = undefined, hasInitialValue = true) {
     this.linksIn = new Set;
     this.linksOut = new Set;
-    this.hasValue = false;
+    this.hasValue = hasInitialValue;
     this.hasException = false;
-    this.valueOrException = undefined;
+    this.valueOrException = initialValue;
+  }
+  static of(valueOrSig) {
+    if (valueOrSig instanceof Signal) {
+      return valueOrSig;
+    } else {
+      return new Signal(valueOrSig);
+    }
+  }
+  static withoutInitialValue() {
+    return new Signal(undefined, false);
   }
   bump() {
     assert(this.hasValue || this.hasException);
@@ -571,12 +581,24 @@ class Signal {
   get cur() {
     if (this.hasException) {
       throw this.valueOrException;
+    } else if (this.hasValue) {
+      return this.valueOrException;
+    } else {
+      throw new Error('no cur');
+    }
+  }
+  get maybeCur() {
+    if (this.hasException) {
+      throw this.valueOrException;
     } else {
       return this.valueOrException;
     }
   }
   set(value) {
     if (this.hasException) {
+      return;
+    }
+    if (this.hasValue && this.valueOrException === value) {
       return;
     }
     this.valueOrException = value;
@@ -603,6 +625,23 @@ class Signal {
     return new SignalAsyncIterator(this);
   }
 
+  then(t, e) {
+    let pr = Promise.withResolvers();
+    let stillCreating = true;
+    let link = SignalLink.create(this, null, (hasException, valueOrException) => {
+      if (stillCreating) {
+        return;
+      }
+      if (hasException) {
+        pr.reject(valueOrException);
+      } else {
+        pr.resolve(valueOrException);
+      }
+    });
+    stillCreating = false;
+    return pr.promise.then(t, e);
+  }
+
   map(f) {
     let mappedSignal = new Signal;
     let link = SignalLink.create(this, mappedSignal, (hasException, valueOrException) => {
@@ -625,8 +664,7 @@ class Signal {
       if (hasException) {
         boundSignal.reject(valueOrException);
       } else {
-        let forwarderSignal = f(valueOrException);
-        assert(forwarderSignal instanceof Signal);
+        let forwarderSignal = Signal.of(f(valueOrException));
         forwardingLink = SignalLink.create(forwarderSignal, boundSignal, (hasException, valueOrException) => {
           if (hasException) {
             boundSignal.reject(valueOrException);
@@ -647,12 +685,6 @@ class Signal {
     return ret;
   }
 
-  static of(value) {
-    let ret = new Signal;
-    ret.set(value);
-    return ret;
-  }
-
   kill() {
     this.reject('killed');
   }
@@ -663,7 +695,7 @@ class SignalAsyncIterator {
     this.state = 1;
     this.signal = signal;
     this.curPR = null;
-    this.link = SignalLink.create(signal, null, (hasException, valueOrException, link) => {
+    this.link = SignalLink.create(signal, null, (hasException, valueOrException) => {
       if (this.state == -1) {
         this.state = 0;
         let curPR = this.curPR;
@@ -800,21 +832,16 @@ let rpcConnClosedMessage = 'RPCConn closed';
 
 class RPCConn {
   constructor(baseURL) {
-    this.wsw = new WSWrapper(`${baseURL}/ws/rpc`, this);
+    mixinKillBox(this);
+    this.wsw = this.pushKill(new WSWrapper(`${baseURL}/ws/rpc`, this));
     this.wsw.setWantOpen(true);
     this.rpcThrottle = new Throttle('rpc');
-    this.helloInfoPR = Promise.withResolvers();
-    this.openedCond = new Cond;
-  }
-  kill() {
-    this.wsw.kill();
-    this.helloInfoPR.reject('RPCConn killed');
-    this.openedCond.reject('RPCConn killed');
+    this.helloInfoPR = this.pushKill(Promise.withResolvers());
+    this.isOpenSig = this.pushKill(new Signal(false));
   }
   onOpen(e) {
-    this.isOpen = true;
     this.pendingResponsePRs = [this.helloPendingResponsePR()];
-    this.openedCond.broadcast();
+    this.isOpenSig.set(true);
   }
   helloPendingResponsePR() {
     let pr = Promise.withResolvers();
@@ -840,7 +867,7 @@ class RPCConn {
     pr.resolve(e.data);
   }
   onClose(e) {
-    this.isOpen = false;
+    this.isOpenSig.set(false);
     while (this.pendingResponsePRs.length) {
       let pr = this.pendingResponsePRs.shift();
       pr.reject(rpcConnClosedMessage);
@@ -848,9 +875,9 @@ class RPCConn {
   }
   async rawRequest(req) {
     outerLoop: while (1) {
-      while (!this.isOpen) {
+      while (!this.isOpenSig.cur) {
         addStatsLine('RPC waiting for open');
-        await this.openedCond;
+        await this.isOpenSig;
       }
 
       //console.log(`sending ${req.byteLength} ${req}`);
@@ -1290,6 +1317,7 @@ class Diagram {
 
 class Scrubbable {
   constructor(diagram, scrubberRow) {
+    mixinKillBox(this);
     this.diagram = diagram;
     this.scrubber = scrubberRow.querySelector('#scrubber');
     this.scrubber.max = 0;
@@ -1297,13 +1325,9 @@ class Scrubbable {
     this.scrubberDisplay = scrubberRow.querySelector('#scrubber-display');
 
     this.onChangeOrInput = this.onChangeOrInput.bind(this);
-    this.scrubber.addEventListener('change', this.onChangeOrInput);
-    this.scrubber.addEventListener('input', this.onChangeOrInput);
+    this.pushKillEventListener(this.scrubber, 'change', this.onChangeOrInput.bind(this));
+    this.pushKillEventListener(this.scrubber, 'input', this.onChangeOrInput.bind(this));
     this.updateFrames([]);
-  }
-  kill() {
-    this.scrubber.removeEventListener('change', this.onChangeOrInput);
-    this.scrubber.removeEventListener('input', this.onChangeOrInput);
   }
   onChangeOrInput() {
     this.updateRender();
@@ -1324,6 +1348,9 @@ class Scrubbable {
     this.scrubberDisplay.textContent = text;
   }
   updateFrames(frames) {
+    if (this.dead) {
+      return;
+    }
     this.frames = frames;
     if (frames.length <= 1) {
       // since min=max=value doesn't show as filled, fake it
@@ -1472,14 +1499,14 @@ class HoseFrame {
     }
   }
 
-  static loadFramesInto(frames, hoseParser) {
+  static async loadFramesInto(frames, hoseParser) {
     for (let [i, frame] of frames.entries()) {
       hoseParser.dontUpdateDiagram = i != frames.length - 1;
       HoseFrame.loadInto(frame, hoseParser);
+      await yieldMe();
     }
     hoseParser.finalizeFrame();
   }
-
 };
 
 class HoseParser {
@@ -1721,19 +1748,20 @@ class ButtonWrapper
 
 class BaseConns {
   constructor(hash) {
+    mixinKillBox(this);
     location.hash = hash;
-    this.dead = false;
     this.hoseParserPromise = this.doHoseParser();
     this.mmTypesPromise = this.doMMTypes();
-    this.stillAlivePR = Promise.withResolvers();
+    this.stillAlivePR = this.pushKill(Promise.withResolvers());
+    this.loadingSig = this.pushKill(new Signal(true));
   }
 
   async doHoseParser() {
     await yieldMe();
     let mmTypes = await this.mmTypesPromise;
-    let diagram = new Diagram(document.getElementById('diagram'), mmTypes);
+    let diagram = this.pushKill(new Diagram(document.getElementById('diagram'), mmTypes));
     this.diagram = diagram; // mostly for debugging
-    let scrubbable = new Scrubbable(diagram, document.getElementById('scrubber-row'));
+    let scrubbable = this.pushKill(new Scrubbable(diagram, document.getElementById('scrubber-row')));
     this.scrubbable = scrubbable; // ditto
     let parser = new HoseParser(mmTypes, scrubbable);
     this._hoseParser = parser; // ditto
@@ -1763,18 +1791,6 @@ class BaseConns {
   async save(nframes) {
     return await stringifyWithArrayBuffers(await this.saveRaw(nframes));
   }
-
-  kill() {
-    this.dead = true;
-    this.stillAlivePR.reject('Conns killed');
-    if (this.scrubbable !== undefined) {
-      this.scrubbable.kill();
-    }
-    if (this.diagram !== undefined) {
-      this.diagram.kill();
-    }
-  }
-
 }
 
 function addStatsLine(text) {
@@ -1790,18 +1806,20 @@ function addStatsLine(text) {
 class LiveConns extends BaseConns {
   constructor(baseURL) {
     super('live');
+    mixinKillBox(this);
     this.baseURL = baseURL;
 
-    this.rpc = new RPCConn(baseURL);
+    this.rpc = this.pushKill(new RPCConn(baseURL));
     this.helloInfoPromise = this.rpc.helloInfoPR.promise;
 
-    this.hose = new HoseConn(baseURL, this.hoseParserPromise);
+    this.hose = this.pushKill(new HoseConn(baseURL, this.hoseParserPromise));
 
     document.getElementById('controls-left').removeAttribute('inert');
 
-    this.doStats();
-    this.doCheckboxes();
+    this.pushCatchKill(this.doStats());
+    this.pushCatchKill(this.doCheckboxes());
 
+    this.loadingSig.set(false);
   }
   async doStats() {
     let lastFrameNum = 0;
@@ -1856,18 +1874,11 @@ class LiveConns extends BaseConns {
       await this.updateFlags();
     }
   }
-
-  kill() {
-    super.kill();
-    this.rpc.kill();
-    this.hose.kill();
-  }
 }
 
 class LoadedConns extends BaseConns {
   constructor(savedText) {
     super('loaded');
-    this.ready = new Signal(false);
     this.helloInfoPR = Promise.withResolvers();
     this.helloInfoPromise = this.helloInfoPR.promise;
 
@@ -1882,7 +1893,7 @@ class LoadedConns extends BaseConns {
     await this.loadRaw(stuff);
     let loadTime = new Date().getTime() - this.loadStartTime;
     addStatsLine(`loaded in ${loadTime}ms.`);
-    this.ready.set(true);
+    this.loadingSig.set(false);
   }
   async loadRaw({frames, helloInfo}) {
     this.helloInfoPR.resolve(readHelloModInfo(new Reader(helloInfo)));
@@ -1915,31 +1926,113 @@ function testSignals() {
   console.log('*', sig3.cur);
 }
 
+function mixinKillBox(obj) {
+  obj._killCallbacks = [];
+  obj.dead = false;
+  let superKill = obj.kill;
+  obj.pushKill = function(objToKill) {
+    if (objToKill.kill !== undefined) {
+      this._killCallbacks.push(objToKill.kill.bind(objToKill));
+    } else if (objToKill.reject !== undefined) {
+      this._killCallbacks.push(() => {
+        objToKill.reject(`rejected by KillBox of ${this.constructor.name}`);
+      });
+    } else {
+      throw new Error('not sure how to clean this up');
+    }
+    return objToKill;
+  };
+  obj.pushCatchKill = function(promise) {
+    promise.then(null, (exception) => {
+      if (this.dead && exception == 'killed') {
+        // ignore
+        console.log('caught killed exception'); 
+        return;
+      }
+      throw exception; // devtools will catch if open
+    });
+  };
+  obj.pushKillEventListener = function(target, event, callback) {
+    target.addEventListener(event, callback);
+    this._killCallbacks.push(() => {
+      target.removeEventListener(event, callback);
+    });
+  };
+  obj.kill = function() {
+    if (this.dead) {
+      return;
+    }
+    this.dead = true;
+    if (superKill !== undefined) {
+      superKill.call(this);
+    }
+    for (let cb of this._killCallbacks) {
+      cb();
+    }
+    this._killCallbacks = null;
+  };
+}
+class ButtonWrapper {
+  constructor(id, {enabled}) {
+    mixinKillBox(this);
+    this.elm = document.getElementById(id);
+    assert(this.elm && this.elm.tagName == 'BUTTON');
+    this.clicks = this.pushKill(Signal.withoutInitialValue());
+    this.pushKillEventListener(this.elm, 'click', this.onClick.bind(this));
+    this.pushKill(Signal.of(enabled).map(e => {
+      this.elm.disabled = !e;
+    }));
+  }
+  onClick() {
+    this.clicks.set((this.clicks.maybeCur ?? 0) + 1);
+  }
+}
+
+class UI {
+  constructor(connsSig) {
+    mixinKillBox(this);
+    this.notLoadingSig = connsSig.bind(conns =>
+      !conns ? true : conns.loadingSig.map(loading => !loading));
+
+    this.pushKill(this.pushKill(new ButtonWrapper('load-button', {
+      enabled: new Signal(true),//this.notLoadingSig,
+    })).clicks.map(() => {
+      connsSig.maybeCur?.kill();
+      connsSig.set(new LoadedConns(localStorage.zw));
+    }));
+
+    this.pushKill(this.pushKill(new ButtonWrapper('live-button', {
+      enabled: true,
+    })).clicks.map(async () => {
+      g_connsSig.maybeCur?.kill();
+      g_connsSig.set(new LiveConns('ws://neb-solidus:8000'));
+    }));
+
+    this.pushKill(this.pushKill(new ButtonWrapper('save-button', {
+      enabled: this.notLoadingSig,
+    })).clicks.map(async () => {
+      addStatsLine('saving...');
+      localStorage.zw = await connsSig.cur.save();
+      addStatsLine('saved.');
+    }));
+  }
+}
+
+g_connsSig = new Signal(null);
+g_ui = new UI(g_connsSig);
+
 /*
 if (0) {
 new ButtonWrapper('save-button', {
   onClick: async () => {
-    addStatsLine('saving...');
-    localStorage.zw = await g_conns.save();
-    addStatsLine('saved.');
   }
 );
-new ButtonWrapper('load-button', {
-  enabled: g_conns
-  onClick: async () => {
-    g_conns_sig.cur.kill();
-    g_conns = new LoadedConns(localStorage.zw);
-  }
-});
 new ButtonWrapper('live-button', {
   onClick: async () => {
-    g_conns_sig.cur.kill();
-    g_conns_sig.set(new LiveConns('ws://neb-solidus:8000'));
   }
 }
 */
 
-g_conns_sig = new Signal({kill: () => {}});
 
 function loadByHash() {
   if (location.hash.length < 2) {

@@ -28,9 +28,9 @@
 <div id="columns" style="display: flex; flex-direction: row; gap: 10px ">
   <div id="col1" style="display: flex; flex-direction: column">
     <svg width="500" height="500" id="diagram" class="box"></svg>
-    <div class="box" style="align-content: end; padding: 3px">
+    <div class="box" style="align-content: end; padding: 3px; border-top: none">
       <div id="scrubber-row" style="display: flex; flex-direction: row; align-content: stretch">
-        <input type="range" id="scrubber" min="0" max="1" value="1" step="1" disabled style="flex: 1">
+        <input type="range" id="scrubber" min="-1" max="0" value="1" step="1" disabled style="flex: 1">
         <div id="scrubber-display">0/0</div>
       </div>
       <div id="scrubber-buttons" style="display: flex; flex-direction: row; gap: 4px; justify-content: end">
@@ -1320,30 +1320,32 @@ class Scrubbable {
     mixinKillBox(this);
     this.diagram = diagram;
     this.scrubber = scrubberRow.querySelector('#scrubber');
-    this.scrubber.max = 0;
 
     this.scrubberDisplay = scrubberRow.querySelector('#scrubber-display');
 
     this.onChangeOrInput = this.onChangeOrInput.bind(this);
     this.pushKillEventListener(this.scrubber, 'change', this.onChangeOrInput.bind(this));
     this.pushKillEventListener(this.scrubber, 'input', this.onChangeOrInput.bind(this));
+
+    this.frameIdx = 0;
+    this.framesLength = 0;
     this.updateFrames([]);
   }
   onChangeOrInput() {
+    let oldFrameIdx = this.frameIdx;
+    this.frameIdx = this.frames.length <= 1 ? 0 : parseInt(this.scrubber.value);
+    this.framesLength = this.frames.length;
     this.updateRender();
   }
-  updateRender() {
+  updateRender(oldFrameIdx) {
     let text;
-    if (this.frames.length == 0) {
+    if (this.framesLength == 0) {
       text = '0/0';
     } else {
-      let oldFrameIdx = this.frameIdx;
-      this.frameIdx = this.frames.length - 1 + parseInt(this.scrubber.value);
-      assert(this.frameIdx >= 0 && this.frameIdx < this.frames.length);
       if (this.frameIdx !== oldFrameIdx) {
         this.diagram.renderFrame(this.frames[this.frameIdx]);
       }
-      text = `${this.frameIdx + 1}/${this.frames.length}`;
+      text = `${this.frameIdx + 1}/${this.framesLength}`;
     }
     this.scrubberDisplay.textContent = text;
   }
@@ -1351,17 +1353,25 @@ class Scrubbable {
     if (this.dead) {
       return;
     }
+    let oldFrameIdx = this.frameIdx;
+    if (this.frameIdx >= this.framesLength - 1) {
+      this.frameIdx = frames.length - 1;
+    }
     this.frames = frames;
+    this.framesLength = frames.length;
     if (frames.length <= 1) {
       // since min=max=value doesn't show as filled, fake it
       this.scrubber.min = -1;
+      this.scrubber.max = 0;
       this.scrubber.value = 0;
       this.scrubber.disabled = true;
     } else {
-      this.scrubber.min = -(frames.length - 1);
+      this.scrubber.min = 0;
+      this.scrubber.max = frames.length - 1;
+      this.scrubber.value = this.frameIdx;
       this.scrubber.disabled = false;
     }
-    this.updateRender();
+    this.updateRender(oldFrameIdx);
   }
 }
 
@@ -2040,12 +2050,12 @@ function loadByHash() {
   }
   let hash = location.hash.substr(1);
   if (hash == 'live') {
-    liveButtonClicked();
+    document.getElementById('live-button').click();
   } else if (hash == 'loaded') {
     // todo: more than one save
-    loadButtonClicked();
+    document.getElementById('load-button').click();
   }
 }
-//loadByHash();
+loadByHash();
 
 </script>

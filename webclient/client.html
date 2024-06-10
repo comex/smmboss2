@@ -1,5 +1,9 @@
 <meta charset="UTF-8">
 <style>
+@font-face {
+  font-family: 'fa-solid-900';
+  src: url('fa-solid-900.woff2') format('woff2');
+}
 #controls-left > label {
   display: block;
   transition: background-color 0.5s ease-out;
@@ -22,6 +26,9 @@
 .box {
   border: 1px solid grey;
 }
+.icon-button {
+  font-family: fa-solid-900;
+}
 </style>
 
 <div id="overrun"></div>
@@ -34,8 +41,8 @@
         <div id="scrubber-display">0/0</div>
       </div>
       <div id="scrubber-buttons" style="display: flex; flex-direction: row; gap: 4px; justify-content: end">
-        <button id="start-button">⏵</button>
-        <button id="play-button">⏵</button>
+        <button class="icon-button" id="start-button">⏵</button>
+        <button class="icon-button" id="play-button">⏵</button>
         <button id="save-button">Save</button>
         <button id="load-button">Load</button>
         <button id="live-button">Live</button>

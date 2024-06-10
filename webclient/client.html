@@ -1283,8 +1283,16 @@ class DiagramBGCollisionTwoPoints extends DiagramThingKind {
 }
 class Diagram {
   constructor(svg, mmTypes) {
+    mixinKillBox(this);
     this.svg = svg;
     this.mmTypes = mmTypes;
+
+    this.lastRenderedFrame = null;
+
+    this.zoomLevel = 1;
+    this.panX = 0;
+    this.panY = 400;
+
     this.kinds = [
       this.hitboxes = new DiagramHitboxes(this),
       this.normalColliders = new DiagramNormalColliders(this),
@@ -1293,25 +1301,91 @@ class Diagram {
       this.bgCollisionTwoPoints = new DiagramBGCollisionTwoPoints(this),
     ];
     this.worldID = 0;
+
+    this.pushKillEventListener(this.svg, 'wheel', this.onWheel.bind(this),
+                               {passive: false});
+    this.pushKillEventListener(this.svg, 'mousedown', this.onMouseDown.bind(this));
+    this.onMouseMoveBound = this.onMouseMove.bind(this);
+    this.onMouseUpBound = this.onMouseUp.bind(this);
   }
   renderFrame(frame) {
     this.curFrame = frame;
     for (let kind of this.kinds) {
       kind.renderThings();
     }
+    this.lastRenderedFrame = frame;
     this.curFrame = null;
   }
   transformX(x) {
-    return this.transformSize(x);
+    return this.panX + this.transformSize(x);
   }
   transformY(y) {
-    return 400 - this.transformSize(y);
+    return this.panY - this.transformSize(y);
   }
   transformSize(size) {
-    return size; // todo: match camera
+    return size * this.zoomLevel; // todo: match camera
+  }
+  untransformX(x) {
+    return this.untransformSize(x - this.panX);
+  }
+  untransformY(y) {
+    return this.untransformSize(this.panY - y);
+  }
+  untransformSize(size) {
+    return size / this.zoomLevel;
   }
   kill() {
     this.svg.innerHTML = '';
+    this.lastRenderedFrame = null;
+  }
+  onWheel(e) {
+    if (this.lastRenderedFrame === null) {
+      return;
+    }
+    e.preventDefault();
+    let cursorRealX = e.offsetX, cursorRealY = e.offsetY;
+    let cursorVirtualX = this.untransformX(cursorRealX), cursorVirtualY = this.untransformY(cursorRealY);
+    this.zoomLevel *= 1 + e.deltaY * 0.002;
+
+    // stay centered on the cursor
+    this.panX += cursorRealX - this.transformX(cursorVirtualX);
+    this.panY += cursorRealY - this.transformY(cursorVirtualY);
+
+    this.renderFrame(this.lastRenderedFrame);
+  }
+  onMouseDown(e) {
+    if (this.lastRenderedFrame === null) {
+      return;
+    }
+    this.mouseDownClientX = e.clientX;
+    this.mouseDownClientY = e.clientY;
+    window.addEventListener('mousemove', this.onMouseMoveBound);
+    window.addEventListener('mouseup', this.onMouseUpBound);
+    e.preventDefault();
+  }
+  onMouseUp(e) {
+    this.onMouseMove(e);
+    this.removeMouseMoveUp();
+  }
+  onMouseMove(e) {
+    e.preventDefault();
+    if (this.lastRenderedFrame === null) {
+      return;
+    }
+    this.panX += e.clientX - this.mouseDownClientX;
+    this.panY += e.clientY - this.mouseDownClientY;
+
+    this.mouseDownClientX = e.clientX;
+    this.mouseDownClientY = e.clientY;
+
+    this.renderFrame(this.lastRenderedFrame);
+  }
+  kill() {
+    this.removeMouseMoveUp();
+  }
+  removeMouseMoveUp() {
+    window.removeEventListener('mousemove', this.onMouseMoveBound);
+    window.removeEventListener('mouseup', this.onMouseUpBound);
   }
 };
 
@@ -1962,10 +2036,10 @@ function mixinKillBox(obj) {
       throw exception; // devtools will catch if open
     });
   };
-  obj.pushKillEventListener = function(target, event, callback) {
-    target.addEventListener(event, callback);
+  obj.pushKillEventListener = function(target, event, callback, options) {
+    target.addEventListener(event, callback, options);
     this._killCallbacks.push(() => {
-      target.removeEventListener(event, callback);
+      target.removeEventListener(event, callback, options);
     });
   };
   obj.kill = function() {

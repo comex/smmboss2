@@ -524,37 +524,49 @@ function toHex(array) {
   return array.map(num => num.toString(16).padStart(2, '0')).join('');
 }
 
-class SignalWatcher {
-  constructor(signal) {
-    this.watchedSignal = signal;
-    this.rawCallback = () => {
-      this.callback();
-    };
-    this.watcherIdx = signal.addCallback(this.rawCallback);
+class SignalLink {
+  static create(source, target, update) {
+    if (target !== null && target.hasException) {
+      return null;
+    }
+    if (source.hasException) {
+      update(true, source.valueOrException, null);
+      return null;
+    }
+    let link = new SignalLink;
+    link.source = source;
+    link.target = target;
+    link.update = update;
+    if (target !== null) {
+      target.linksIn.add(link);
+    }
+    source.linksOut.add(link);
+    if (source.hasValue) {
+      update(false, source.valueOrException, link);
+    }
+    return link;
   }
   kill() {
-    if (this.watcherIdx !== -1) {
-      this.watchedSignal.removeWatcher(this.watcherIdx, this.rawCallback);
-      this.watcherIdx = -1;
+    this.source.linksOut.delete(this);
+    if (this.target !== null) {
+      this.target.linksIn.delete(this);
     }
   }
 }
 
 class Signal {
   constructor() {
-    this.callbacks = [];
+    this.linksIn = new Set;
+    this.linksOut = new Set;
     this.hasValue = false;
     this.hasException = false;
     this.valueOrException = undefined;
   }
   bump() {
-    let cbs = this.callbacks;
-    for (let i = 0; i < cbs.length;) {
-      let callback = cbs[i];
-      callback();
-      if (cbs[i] === callback) {
-        i++;
-      }
+    assert(this.hasValue || this.hasException);
+    console.log('bumping with', this.valueOrException, this.linksOut);
+    for (let link of this.linksOut) {
+      link.update(this.hasException, this.valueOrException, link);
     }
   }
   get cur() {
@@ -580,63 +592,52 @@ class Signal {
     this.hasException = true;
     this.hasValue = false;
     this.bump();
-    this.callbacks = new Set;
+    for (let link of this.linksIn) {
+      link.kill();
+    }
+    for (let link of this.linksOut) {
+      link.kill();
+    }
   }
 
-  then(f, r) {
-    let { promise, resolve, reject } = Promise.withResolvers();
-    let callbackIdx;
-    let callback = () => {
-      if (this.hasException) {
-        reject(this.valueOrException);
-      } else if (this.hasValue) {
-        resolve(this.valueOrException);
-      }
-      this.removeCallback(callbackIdx, callback);
-    };
-    callbackIdx = this.addCallback(callback);
-    return promise.then(f, r);
+  [Symbol.asyncIterator] = () => {
+    return new SignalAsyncIterator(this);
   }
 
   map(f) {
     let mappedSignal = new Signal;
-    let callbackIdx;
-    let callback = () => {
-      if (this.hasException) {
-        mappedSignal.reject(this.valueOrException);
-        this.removeCallback(callbackIdx, callback);
-      } else if (this.hasValue) {
-        mappedSignal.set(f(this.valueOrException));
+    let link = SignalLink.create(this, mappedSignal, (hasException, valueOrException) => {
+      if (hasException) {
+        mappedSignal.reject(valueOrException);
+      } else {
+        mappedSignal.set(f(valueOrException));
       }
-    };
-    callbackIdx = this.addCallback(callback);
-    callback();
+    });
     return mappedSignal;
   }
 
   bind(f) {
     let boundSignal = new Signal;
-    let myCallbackIdx;
-    let forwarderSignal = null;
-    let forwarderCallbackIdx = -1;
-    let forwarderCallback = null;
-    let callback = () => {
-      if (forwarderSignal !== null) {
-        forwarderSignal.removeCallback(forwarderCallbackIdx, forwarderCallback);
-        forwarderSignal = null;
+    let forwardingLink = null;
+    SignalLink.create(this, boundSignal, (hasException, valueOrException) => {
+      if (forwardingLink !== null) {
+        forwardingLink.kill();
       }
-      if (this.hasException) {
-        boundSignal.reject(this.valueOrException);
-        this.removeCallback(myCallbackIdx, callback);
-      } else if (this.hasValue) {
-        forwarderSignal = this.valueOrException;
+      if (hasException) {
+        boundSignal.reject(valueOrException);
+      } else {
+        let forwarderSignal = f(valueOrException);
         assert(forwarderSignal instanceof Signal);
-        [forwarderCallbackIdx, forwarderCallback] = forwarderSignal.addForward(this);
+        forwardingLink = SignalLink.create(forwarderSignal, boundSignal, (hasException, valueOrException) => {
+          if (hasException) {
+            boundSignal.reject(valueOrException);
+          } else {
+            boundSignal.set(valueOrException);
+          }
+        });
       }
-    };
-    callbackIdx = this.addCallback(callback);
-    callback();
-    return mappedSignal;
+    });
+    return boundSignal;
   }
 
   hasValueSig() {
@@ -653,43 +654,40 @@ class Signal {
     return ret;
   }
 
-  addCallback(callback) {
-    if (this.hasException) {
-      return false;
-    }
-    assert(!this.callbacks.has(callback));
-    this.callbacks.add(callback);
-    return true;
-    let idx = this.callbacks.length;
-    this.callbacks.push(callback);
-    console.log(this.callbacks.length);
-    return idx;
-  }
-
-  removeCallback(idx, callback) {
-    if (this.hasException) {
-      return;
-    }
-    let cbs = this.callbacks;
-    assert(cbs[idx] === callback);
-    delete cbs[idx];
-    while (cbs.length > 0 && cbs[cbs.length - 1] === undefined) {
-      cbs.pop();
-    }
-  }
-
-  addForward(targetSignal) {
-    let callback = () => {
-      if (this.hasException) {
-        targetSignal.reject(
-
-    };
-    let idx = this.add
-
-  }
-
   kill() {
     this.reject('killed');
+  }
+}
+
+class SignalAsyncIterator {
+  constructor(signal) {
+    this.curPR = Promise.withResolvers();
+    this.link = SignalLink.create(signal, null, (hasException, valueOrException, link) => {
+      console.log('&&', valueOrException);
+      let curPR = this.curPR;
+      this.curPR = Promise.withResolvers();
+      if (hasException) {
+        if (link !== null) {
+          link.kill();
+        }
+        curPR.reject(valueOrException);
+      } else {
+        curPR.resolve({done: false, value: valueOrException});
+      }
+    });
+  }
+  [Symbol.asyncIterator] = () => { return this; }
+  next() {
+    console.log('called next');
+    return this.curPR.promise;
+  }
+  return(value) {
+    this.link.kill();
+    return Promise.resolve({value, done: true});
+  }
+  throw(e) {
+    this.link.kill();
+    return Promise.resolve({undefined, done: true});
   }
 }
 
@@ -1885,6 +1883,26 @@ setInterval(() => {
   document.getElementById('js-mem').textContent = Math.floor(mem);
 }, 2000);
 
+function test() {
+  let sig = new Signal;
+  let moresigs = [new Signal, new Signal];
+  let sig3 = sig.bind(i => moresigs[i]).map(x => x * 2);
+  (async () => {
+    for await (let val of sig3) {
+      console.log(val);
+    }
+  })();
+  sig.set(0);
+  moresigs[0].set(42);
+  moresigs[0].set(43);
+  sig.set(1);
+  moresigs[0].set('ignore me');
+  moresigs[1].set(44);
+  console.log('*', sig3.cur);
+}
+test();
+
+/*
 if (0) {
 new ButtonWrapper('save-button', {
   onClick: async () => {
@@ -1906,6 +1924,7 @@ new ButtonWrapper('live-button', {
     g_conns_sig.set(new LiveConns('ws://neb-solidus:8000'));
   }
 }
+*/
 
 g_conns_sig = new Signal({kill: () => {}});
 
@@ -1922,6 +1941,5 @@ function loadByHash() {
   }
 }
 //loadByHash();
-)();
 
 </script>

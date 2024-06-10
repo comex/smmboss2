@@ -1348,6 +1348,14 @@ class Diagram {
     // hack...
     return e.deltaMode == 0;
   }
+  zoomByAmountKeepingPointConstant(zoomAmount, cursorRealX, cursorRealY) {
+    let cursorVirtualX = this.untransformX(cursorRealX), cursorVirtualY = this.untransformY(cursorRealY);
+    this.zoomLevel *= zoomAmount;
+
+    // stay centered on the cursor
+    this.panX += cursorRealX - this.transformX(cursorVirtualX);
+    this.panY += cursorRealY - this.transformY(cursorVirtualY);
+  }
   onWheel(e) {
     if (this.lastRenderedFrame === null) {
       return;
@@ -1358,15 +1366,8 @@ class Diagram {
     let shouldZoom = !trackpad || e.ctrlKey;
     if (shouldZoom) {
       
-      // zoom
-      let cursorRealX = e.offsetX, cursorRealY = e.offsetY;
-      let cursorVirtualX = this.untransformX(cursorRealX), cursorVirtualY = this.untransformY(cursorRealY);
       let zoomAmount = 1 - e.deltaY * (trackpad ? 0.009 : 0.002);
-      this.zoomLevel *= zoomAmount;
-
-      // stay centered on the cursor
-      this.panX += cursorRealX - this.transformX(cursorVirtualX);
-      this.panY += cursorRealY - this.transformY(cursorVirtualY);
+      this.zoomByAmountKeepingPointConstant(zoomAmount, e.offsetX, e.offsetY);
 
       // momentum
       let dt = e.timeStamp - this.lastWheelTimeStamp;
@@ -1374,17 +1375,17 @@ class Diagram {
       if (dt < 100) {
         let speedEstimate = Math.log(zoomAmount) / dt;
         this.zoomMomentum = (this.zoomMomentum * 0.5) + (speedEstimate * 0.5);
-        console.log(speedEstimate);
       } else {
         this.zoomMomentum = 0;
       }
       if (this.zoomMomentumTimeoutID !== null) {
         clearTimeout(this.zoomMomentumTimeoutID);
       }
+      let startTime = document.timeline.currentTime;
       this.zoomMomentumTimeoutID = setTimeout(() => {
         this.zoomMomentumTimeoutID = null;
-        this.enableZoomMomentum();
-      }, 30);
+        this.enableZoomMomentum(startTime, e.offsetX, e.offsetY);
+      }, 15);
     } else {
       // pan
       this.panX -= e.deltaX * 0.5;
@@ -1394,13 +1395,17 @@ class Diagram {
     this.renderFrame(this.lastRenderedFrame);
 
   }
-  enableZoomMomentum(startTime) {
+  enableZoomMomentum(startTime, cursorRealX, cursorRealY) {
     this.disableZoomMomentum();
     if (this.dead || this.lastRenderedFrame === null || Math.abs(this.zoomMomentum) < 0.001) {
       return;
     }
-    this.zoomMomentumStartZoom = this.zoomLevel;
-    this.zoomMomentumStartTime = document.timeline.currentTime;
+    this.zoomMomentumStartZoomLevel = this.zoomLevel;
+    this.zoomMomentumStartPanX = this.panX;
+    this.zoomMomentumStartPanY = this.panY;
+    this.zoomMomentumStartTime = startTime;
+    this.zoomMomentumCursorRealX = cursorRealX;
+    this.zoomMomentumCursorRealY = cursorRealY;
     let cb = (endTime) => {
       if (this.dead || this.lastRenderedFrame === null) {
         return;
@@ -1408,20 +1413,34 @@ class Diagram {
       this.zoomMomentumRAFID = null;
       let dt = endTime - this.zoomMomentumStartTime;
       // integrate (v * (1 - decay)^t) from 0 to t_0...
-      // -> v * ((1 - decay)^t / log(1 - decay) - 1)
-      let dtScale = 0.001;
-      let decay = 0.5;
-      //let amount = this.zoomMomentum * Math.exp(Math.log(1 - decay) * (dt * dtScale) - (1 - decay)) / dtScale;
-      let amount = this.zoomMomentum * Math.exp(Math.log(1 - decay) * (dt * dtScale) - (1 - decay)) / dtScale;
+      // -> v * ((1 - decay)^t - 1) / log(1 - decay)
+      let dtScale = 0.01;
+      let decay = 0.8;
+      let momentumMultiplier = ((1 - decay) ** (dt * dtScale) - 1) / Math.log(1 - decay);
+      let amount = (this.zoomMomentum / dtScale) * momentumMultiplier;
       let multiplier = Math.exp(amount);
-      console.log(`dt=${dt} / ${amount}`);
 
-      this.zoomLevel = this.zoomMomentumStartZoom * multiplier;
+
+
+      //let avgSpeed = amount / dt;
+      //console.log(`dt=${dt * dtScale} / avgSpeed=${avgSpeed} momentum=${this.zoomMomentum} mm=${momentumMultiplier}`);
+      if (dt * dtScale >= 5) {
+        // done
+        this.zoomMomentumRAFID = null;
+        return;
+      }
+
+
+      this.zoomLevel = this.zoomMomentumStartZoomLevel;
+      this.panX = this.zoomMomentumStartPanX;
+      this.panY = this.zoomMomentumStartPanY;
+      this.zoomByAmountKeepingPointConstant(multiplier, this.zoomMomentumCursorRealX, this.zoomMomentumCursorRealY);
+
       this.renderFrame(this.lastRenderedFrame);
 
       this.zoomMomentumRAFID = requestAnimationFrame(cb);
     };
-    this.zoomMomentumRAFID = requestAnimationFrame(cb);
+    cb(document.timeline.currentTime);
   }
   disableZoomMomentum() {
     if (this.zoomMomentumRAFID !== null) {

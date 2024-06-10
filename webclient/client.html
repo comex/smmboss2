@@ -564,7 +564,6 @@ class Signal {
   }
   bump() {
     assert(this.hasValue || this.hasException);
-    console.log('bumping with', this.valueOrException, this.linksOut);
     for (let link of this.linksOut) {
       link.update(this.hasException, this.valueOrException, link);
     }
@@ -600,7 +599,7 @@ class Signal {
     }
   }
 
-  [Symbol.asyncIterator] = () => {
+  [Symbol.asyncIterator]() {
     return new SignalAsyncIterator(this);
   }
 
@@ -661,28 +660,43 @@ class Signal {
 
 class SignalAsyncIterator {
   constructor(signal) {
-    this.curPR = Promise.withResolvers();
+    this.state = 1;
+    this.signal = signal;
+    this.curPR = null;
     this.link = SignalLink.create(signal, null, (hasException, valueOrException, link) => {
-      console.log('&&', valueOrException);
-      let curPR = this.curPR;
-      this.curPR = Promise.withResolvers();
-      if (hasException) {
-        if (link !== null) {
-          link.kill();
+      if (this.state == -1) {
+        this.state = 0;
+        let curPR = this.curPR;
+        this.curPR = null;
+        if (hasException) {
+          curPR.reject(valueOrException);
+        } else {
+          curPR.resolve({done: false, value: valueOrException});
         }
-        curPR.reject(valueOrException);
-      } else {
-        curPR.resolve({done: false, value: valueOrException});
+      } else if (this.state == 0) {
+        this.state = 1;
       }
     });
   }
-  [Symbol.asyncIterator] = () => { return this; }
+  [Symbol.asyncIterator]() { return this; }
   next() {
-    console.log('called next');
+    if (this.state == 1) {
+      this.state = 0;
+      if (this.signal.hasException) {
+        return Promise.reject(this.signal.valueOrException);
+      } else if (this.signal.hasValue) {
+        return Promise.resolve({done: false, value: this.signal.valueOrException});
+      }
+    }
+    if (this.state == 0) {
+      this.state = -1;
+      this.curPR = Promise.withResolvers();
+    }
     return this.curPR.promise;
   }
   return(value) {
     this.link.kill();
+    console.log('>> return', value);
     return Promise.resolve({value, done: true});
   }
   throw(e) {
@@ -1883,7 +1897,7 @@ setInterval(() => {
   document.getElementById('js-mem').textContent = Math.floor(mem);
 }, 2000);
 
-function test() {
+function testSignals() {
   let sig = new Signal;
   let moresigs = [new Signal, new Signal];
   let sig3 = sig.bind(i => moresigs[i]).map(x => x * 2);
@@ -1900,7 +1914,6 @@ function test() {
   moresigs[1].set(44);
   console.log('*', sig3.cur);
 }
-test();
 
 /*
 if (0) {

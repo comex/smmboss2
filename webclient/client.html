@@ -1305,8 +1305,25 @@ class Diagram {
     this.pushKillEventListener(this.svg, 'wheel', this.onWheel.bind(this),
                                {passive: false});
     this.pushKillEventListener(this.svg, 'mousedown', this.onMouseDown.bind(this));
+
     this.onMouseMoveBound = this.onMouseMove.bind(this);
     this.onMouseUpBound = this.onMouseUp.bind(this);
+
+    for (let ev of [
+      'pointerdown',
+      'pointerup',
+      'pointercancel',
+      'pointermove',
+      'pointerrawupdate',
+      'pointerover',
+      'pointerout',
+      'pointerenter',
+      'pointerleave',
+    ]) {
+      this.pushKillEventListener(this.svg, ev, (e) => {
+        console.log(ev, e);
+      });
+    }
   }
   renderFrame(frame) {
     this.curFrame = frame;
@@ -1345,7 +1362,7 @@ class Diagram {
     e.preventDefault();
     let cursorRealX = e.offsetX, cursorRealY = e.offsetY;
     let cursorVirtualX = this.untransformX(cursorRealX), cursorVirtualY = this.untransformY(cursorRealY);
-    this.zoomLevel *= 1 + e.deltaY * 0.002;
+    this.zoomLevel *= 1 - e.deltaY * 0.002;
 
     // stay centered on the cursor
     this.panX += cursorRealX - this.transformX(cursorVirtualX);
@@ -1380,12 +1397,31 @@ class Diagram {
 
     this.renderFrame(this.lastRenderedFrame);
   }
-  kill() {
-    this.removeMouseMoveUp();
-  }
+
   removeMouseMoveUp() {
     window.removeEventListener('mousemove', this.onMouseMoveBound);
     window.removeEventListener('mouseup', this.onMouseUpBound);
+  }
+
+/*
+  onPointerDown(e) {
+    console.log('down', e);
+  }
+  onPointerUp(e) {
+    console.log('up', e);
+  }
+  onPointerCancel(e) {
+    console.log('cancel',e);
+  }
+  onPointerMove(e) {
+    console.log('move',e);
+  }
+  onPointerRawUpdate(e) {
+    console.log('rawupdate',e);
+  }
+*/
+  kill() {
+    this.removeMouseMoveUp();
   }
 };
 
@@ -1988,8 +2024,14 @@ class LoadedConns extends BaseConns {
 }
 
 setInterval(() => {
-  let mem = performance.memory.usedJSHeapSize / 1048576;
-  document.getElementById('js-mem').textContent = Math.floor(mem);
+  let text;
+  try {
+    let mem = performance.memory.usedJSHeapSize / 1048576;
+    text = Math.floor(mem);
+  } catch (e) {
+    text = '[error]';
+  }
+  document.getElementById('js-mem').textContent = text;
 }, 2000);
 
 function testSignals() {

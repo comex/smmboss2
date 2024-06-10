@@ -1293,6 +1293,10 @@ class Diagram {
     this.panX = 0;
     this.panY = 400;
 
+    this.lastWheelTimeStamp = 0;
+    this.zoomMomentum = 0;
+    this.zoomMomentumTimeoutID = null;
+
     this.kinds = [
       this.hitboxes = new DiagramHitboxes(this),
       this.normalColliders = new DiagramNormalColliders(this),
@@ -1308,22 +1312,6 @@ class Diagram {
 
     this.onMouseMoveBound = this.onMouseMove.bind(this);
     this.onMouseUpBound = this.onMouseUp.bind(this);
-
-    for (let ev of [
-      'pointerdown',
-      'pointerup',
-      'pointercancel',
-      'pointermove',
-      'pointerrawupdate',
-      'pointerover',
-      'pointerout',
-      'pointerenter',
-      'pointerleave',
-    ]) {
-      this.pushKillEventListener(this.svg, ev, (e) => {
-        console.log(ev, e);
-      });
-    }
   }
   renderFrame(frame) {
     this.curFrame = frame;
@@ -1355,25 +1343,97 @@ class Diagram {
     this.svg.innerHTML = '';
     this.lastRenderedFrame = null;
   }
+  guessIsTrackpad(e) {
+    // https://stackoverflow.com/questions/10744645/detect-touchpad-vs-mouse-in-javascript
+    // hack...
+    return e.deltaMode == 0;
+  }
   onWheel(e) {
     if (this.lastRenderedFrame === null) {
       return;
     }
     e.preventDefault();
-    let cursorRealX = e.offsetX, cursorRealY = e.offsetY;
-    let cursorVirtualX = this.untransformX(cursorRealX), cursorVirtualY = this.untransformY(cursorRealY);
-    this.zoomLevel *= 1 - e.deltaY * 0.002;
+    this.disableZoomMomentum();
+    let trackpad = this.guessIsTrackpad(e);
+    let shouldZoom = !trackpad || e.ctrlKey;
+    if (shouldZoom) {
+      
+      // zoom
+      let cursorRealX = e.offsetX, cursorRealY = e.offsetY;
+      let cursorVirtualX = this.untransformX(cursorRealX), cursorVirtualY = this.untransformY(cursorRealY);
+      let zoomAmount = 1 - e.deltaY * (trackpad ? 0.009 : 0.002);
+      this.zoomLevel *= zoomAmount;
 
-    // stay centered on the cursor
-    this.panX += cursorRealX - this.transformX(cursorVirtualX);
-    this.panY += cursorRealY - this.transformY(cursorVirtualY);
+      // stay centered on the cursor
+      this.panX += cursorRealX - this.transformX(cursorVirtualX);
+      this.panY += cursorRealY - this.transformY(cursorVirtualY);
+
+      // momentum
+      let dt = e.timeStamp - this.lastWheelTimeStamp;
+      this.lastWheelTimeStamp = e.timeStamp;
+      if (dt < 100) {
+        let speedEstimate = Math.log(zoomAmount) / dt;
+        this.zoomMomentum = (this.zoomMomentum * 0.5) + (speedEstimate * 0.5);
+        console.log(speedEstimate);
+      } else {
+        this.zoomMomentum = 0;
+      }
+      if (this.zoomMomentumTimeoutID !== null) {
+        clearTimeout(this.zoomMomentumTimeoutID);
+      }
+      this.zoomMomentumTimeoutID = setTimeout(() => {
+        this.zoomMomentumTimeoutID = null;
+        this.enableZoomMomentum();
+      }, 30);
+    } else {
+      // pan
+      this.panX -= e.deltaX * 0.5;
+      this.panY -= e.deltaY * 0.5;
+    }
 
     this.renderFrame(this.lastRenderedFrame);
+
+  }
+  enableZoomMomentum(startTime) {
+    this.disableZoomMomentum();
+    if (this.dead || this.lastRenderedFrame === null || Math.abs(this.zoomMomentum) < 0.001) {
+      return;
+    }
+    this.zoomMomentumStartZoom = this.zoomLevel;
+    this.zoomMomentumStartTime = document.timeline.currentTime;
+    let cb = (endTime) => {
+      if (this.dead || this.lastRenderedFrame === null) {
+        return;
+      }
+      this.zoomMomentumRAFID = null;
+      let dt = endTime - this.zoomMomentumStartTime;
+      // integrate (v * (1 - decay)^t) from 0 to t_0...
+      // -> v * ((1 - decay)^t / log(1 - decay) - 1)
+      let dtScale = 0.001;
+      let decay = 0.5;
+      //let amount = this.zoomMomentum * Math.exp(Math.log(1 - decay) * (dt * dtScale) - (1 - decay)) / dtScale;
+      let amount = this.zoomMomentum * Math.exp(Math.log(1 - decay) * (dt * dtScale) - (1 - decay)) / dtScale;
+      let multiplier = Math.exp(amount);
+      console.log(`dt=${dt} / ${amount}`);
+
+      this.zoomLevel = this.zoomMomentumStartZoom * multiplier;
+      this.renderFrame(this.lastRenderedFrame);
+
+      this.zoomMomentumRAFID = requestAnimationFrame(cb);
+    };
+    this.zoomMomentumRAFID = requestAnimationFrame(cb);
+  }
+  disableZoomMomentum() {
+    if (this.zoomMomentumRAFID !== null) {
+      cancelAnimationFrame(this.zoomMomentumRAFID);
+      this.zoomMomentumRAFID = null;
+    }
   }
   onMouseDown(e) {
     if (this.lastRenderedFrame === null) {
       return;
     }
+    this.disableZoomMomentum();
     this.mouseDownClientX = e.clientX;
     this.mouseDownClientY = e.clientY;
     window.addEventListener('mousemove', this.onMouseMoveBound);
@@ -1403,23 +1463,6 @@ class Diagram {
     window.removeEventListener('mouseup', this.onMouseUpBound);
   }
 
-/*
-  onPointerDown(e) {
-    console.log('down', e);
-  }
-  onPointerUp(e) {
-    console.log('up', e);
-  }
-  onPointerCancel(e) {
-    console.log('cancel',e);
-  }
-  onPointerMove(e) {
-    console.log('move',e);
-  }
-  onPointerRawUpdate(e) {
-    console.log('rawupdate',e);
-  }
-*/
   kill() {
     this.removeMouseMoveUp();
   }

@@ -1,3 +1,9 @@
+# /// script
+# dependencies = [
+#     "PyYAML",
+# ]
+# ///
+
 import smmboss
 import guest_access
 

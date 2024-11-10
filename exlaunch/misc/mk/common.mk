@@ -170,12 +170,12 @@ $(OFILES_SRC)	: $(HFILES_BIN)
 
 # added by comex
 $(DEPSDIR)/generated.hpp:
-	python3 $(TOPDIR)/../py/export.py cpp_header $(DEPSDIR)/generated.hpp $(DEPSDIR)/generated.hpp.d
+	uv run $(TOPDIR)/../py/export.py cpp_header $(DEPSDIR)/generated.hpp $(DEPSDIR)/generated.hpp.d
 -include $(DEPSDIR)/generated.hpp.d
 main.o: $(DEPSDIR)/generated.hpp
 
 $(DEPSDIR)/export.json:
-	python3 $(TOPDIR)/../py/export.py json $(DEPSDIR)/export.json $(DEPSDIR)/export.json.d
+	uv run $(TOPDIR)/../py/export.py json $(DEPSDIR)/export.json $(DEPSDIR)/export.json.d
 -include $(DEPSDIR)/export.json.d
 all: $(DEPSDIR)/export.json
 

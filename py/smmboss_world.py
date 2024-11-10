@@ -648,9 +648,15 @@ class AreaSystem(GuestStruct):
     rngplus = prop(0xf8, ptr_to(RNGPlus))
     tiler2 = prop(0x110, ptr_to(Tiler2))
 
+    flower = prop(0x178, lambda: ptr_to(Flower))
+
     # XXX: just for testing
     if mm.version >= 302:
         fake_prop = prop(0x120, u32)
+
+# random name, I have no idea what this is
+class Flower(GuestStruct):
+    elmd_tree_outer = prop(0x18, lambda: ptr_to(ELMDTreeOuter))
 
 class World(GuestStruct):
     name = prop(8, FancyString)
@@ -768,6 +774,29 @@ class BgUnitGroupMgr(GuestStruct):
     @staticmethod
     def get():
         return guest_read_ptr(BgUnitGroupMgr, mm.addr.bg_unit_group_mgr)
+
+# ELMD = ELinkMapData, from the name of the unit heap
+class ELMDEntry(GuestStruct):
+    another_str = prop(0x00, FancyString)
+    sizeof_star = 0xb8
+
+class ELMDTreeNode(GuestStruct):
+    vt = prop(0x00, GuestPtrPtr)
+    left = prop(0x08, lambda: ptr_to(ELMDTreeNode))
+    right = prop(0x10, lambda: ptr_to(ELMDTreeNode))
+    name = prop(0x20, FancyString)
+    content = prop(0x30, ptr_to(ELMDEntry))
+    owner = prop(0x38, lambda: ptr_to(ELMDTree))
+
+class ELMDTree(GuestStruct):
+    root = prop(0x00, ptr_to(ELMDTreeNode))
+    first_free = prop(0x08, ptr_to(ELMDTreeNode))
+    storage = prop(0x10, ptr_to(ELMDTreeNode))
+    storage_count = prop(0x18, u32)
+    storage_cap = prop(0x1c, u32)
+
+class ELMDTreeOuter(GuestStruct):
+    tree = prop(0x20, ELMDTree)
 
 def block_kind_info_array():
     return fixed_array(BlockKindInfo, 0x1e)(mm.addr.block_kind_info_array)

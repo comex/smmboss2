@@ -431,6 +431,70 @@ HOOK_DEFINE_TRAMPOLINE(Stub_cctx_bg_collide_against_point) {
     static constexpr auto GetAddr = &mm_addrs::cctx_bg_collide_against_point;
 };
 
+
+__attribute__((used))
+uint32_t sh_match;
+bool sh_need_clear;
+StupidHash<uint32_t, Nothing, 12289> sh_seen;
+
+HOOK_DEFINE_TRAMPOLINE(Stub_xlink2_ResourceAccessorSLink_getAssetName) {
+    static const char *Callback(void *self, void *arg) {
+        const char *name = Orig(self, arg);
+        uint32_t hash = (uint32_t)XXH3_64bits(name, strlen(name));
+        if (sh_need_clear) {
+            sh_need_clear = false;
+            sh_seen.clear();
+        }
+        if (!sh_seen.lookup(hash, /*insert*/ true).second) {
+            xprintf("S.getAssetName: [%s] -> 0x%08x\n", name, hash);
+        }
+        if (hash == sh_match) {
+            asm volatile("nop\nnop\nnop");
+        }
+        return name;
+    }
+    static uint32_t GetAddr() { return s_target_start + 0x00595b00; }
+};
+
+HOOK_DEFINE_TRAMPOLINE(Stub_xlink2_ResourceAccessorELink_getAssetName) {
+    static const char *Callback(void *self, void *arg) {
+        const char *name = Orig(self, arg);
+        uint32_t hash = (uint32_t)XXH3_64bits(name, strlen(name));
+        if (sh_need_clear) {
+            sh_need_clear = false;
+            sh_seen.clear();
+        }
+        if (!sh_seen.lookup(hash, /*insert*/ true).second) {
+            xprintf("E.getAssetName: [%s] -> 0x%08x\n", name, hash);
+        }
+        if (hash == sh_match) {
+            asm volatile("nop\nnop\nnop");
+        }
+        return name;
+    }
+    static uint32_t GetAddr() { return s_target_start + 0x00590b40; }
+};
+HOOK_DEFINE_TRAMPOLINE(Stub_xlink2_UserInstance_printLogEmitFailed) {
+    static void Callback(void *a, void *b, const char *fmt, ...) {
+        char buf[196];
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(buf, sizeof(buf), fmt, ap);
+        va_end(ap);
+        log_str(buf);
+    }
+    static uint32_t GetAddr() { return s_target_start + 0x005abe90; }
+
+};
+
+HOOK_DEFINE_TRAMPOLINE(Stub_xlink2_SwitchContainer_getConditionMatchChildCallTable_) {
+    static void *Callback(char *self) {
+        xprintf("gCMCCT: %s\n", (char *)(**(unsigned **)(self + 8) + 0x2100000000));
+        return Orig(self);
+    }
+    static uint32_t GetAddr() { return s_target_start + 0x005a23b0; }
+};
+
 template <typename StubFoo>
 void install() {
     StubFoo::InstallAtPtr(StubFoo::GetAddr());
@@ -688,13 +752,20 @@ extern "C" void exl_main(void* x0, void* x1) {
 
     // TODO: make these dynamic hooks (and for the ones that can't be, make
     // sending conditional at least)
-    install<Stub_hitbox_collide>();
-    install<Stub_AreaSystem_do_many_collisions>();
-    install<Stub_Collider_add_to_collision_grid>();
-    install<Stub_Collider_remove_from_collision_grid_and_lists>();
-    install<Stub_scol_true_outmost>();
-    install<Stub_cctx_bg_collide_against_twopoint>();
-    install<Stub_cctx_bg_collide_against_point>();
+    if (0) {
+        install<Stub_hitbox_collide>();
+        install<Stub_AreaSystem_do_many_collisions>();
+        install<Stub_Collider_add_to_collision_grid>();
+        install<Stub_Collider_remove_from_collision_grid_and_lists>();
+        install<Stub_scol_true_outmost>();
+        install<Stub_cctx_bg_collide_against_twopoint>();
+        install<Stub_cctx_bg_collide_against_point>();
+    }
+
+    install<Stub_xlink2_ResourceAccessorELink_getAssetName>();
+    install<Stub_xlink2_ResourceAccessorSLink_getAssetName>();
+    install<Stub_xlink2_UserInstance_printLogEmitFailed>();
+    install<Stub_xlink2_SwitchContainer_getConditionMatchChildCallTable_>();
     log_str("done hooking");
 }
 

@@ -28,6 +28,23 @@
 }
 #scrubber-shuttle > button {
   font-family: fa-solid-900;
+  height: 22px;
+}
+#controls-left > label {
+  padding: 3px;
+  display: flex;
+  align-items: center;
+  user-select: none;
+}
+#controls-left > label > input[type=checkbox] {
+  display: block;
+  vertical-align: middle;
+  margin: 0;
+  margin-right: 3px;
+}
+#controls-left > label > span {
+  display: block;
+  vertical-align: middle;
 }
 </style>
 
@@ -58,8 +75,8 @@
 
     <div id="controls" style="border: 1px solid grey; align-content: stretch; display: flex; flex-direction: row">
       <div id="controls-left">
-        <label for="controls-backpressure"><input type="checkbox" id="controls-backpressure">Backpressure</label>
-        <label for="controls-bg-events"><input type="checkbox" id="controls-bg-events">Background Collision Events</label>
+        <label for="controls-backpressure"><input type="checkbox" id="controls-backpressure"><span>Backpressure</span></label>
+        <label for="controls-bg-events"><input type="checkbox" id="controls-bg-events"><span>Background Collision Events</span></label>
       </div>
       <div id="controls-right">
         <div id="js-mem-container">
@@ -1510,6 +1527,8 @@ class Scrubbable {
     this.onChangeOrInput = this.onChangeOrInput.bind(this);
     this.pushKillEventListener(this.scrubber, 'change', this.onChangeOrInput.bind(this));
     this.pushKillEventListener(this.scrubber, 'input', this.onChangeOrInput.bind(this));
+    this.pushKillEventListener(this.scrubber, 'wheel', this.onWheel.bind(this),
+                               {passive: false});
 
     this.frameIdx = 0;
     this.framesLength = 0;
@@ -1520,6 +1539,13 @@ class Scrubbable {
     this.frameIdx = this.frames.length <= 1 ? 0 : parseInt(this.scrubber.value);
     this.framesLength = this.frames.length;
     this.updateRender();
+  }
+  onWheel(e) {
+    if (e.deltaX == 0) {
+      return;
+    }
+    e.preventDefault();
+    console.log(e);
   }
   updateRender(oldFrameIdx) {
     let text;

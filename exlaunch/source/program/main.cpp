@@ -327,8 +327,14 @@ struct mm_BgCollisionSystem {
     PSEUDO_TYPE_UNSIZED;
 };
 
+struct mm_as20 {
+    PROP(skin_p, 0xb0, int *);
+    PSEUDO_TYPE_UNSIZED;
+};
+
 struct mm_AreaSystem {
     PROP(world_id,            0x18, uint32_t);
+    PROP(as20,                0x20, mm_as20 *);
     PROP(hitbox_mgr,          0x40, mm_hitbox_manager *);
     PROP(bg_collision_system, 0x90, mm_BgCollisionSystem *);
     PROP(terrain_mgr,         0xa0, mm_terrain_manager *);
@@ -619,6 +625,20 @@ HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
     static constexpr auto GetAddr = &mm_addrs::AreaSystem_do_many_collisions;
 };
 
+HOOK_DEFINE_TRAMPOLINE(Stub_grab_runtime_asset_name_from_elmdtree) {
+    static mm_SafeString *Callback(void *node, mm_SafeString *find_name, mm_AreaSystem *area_system) {
+        int **skin_pp = &area_system->as20()->skin_p();
+        // Pretend we are in skin 3 (Wii U) while calling this function.
+        int new_skin = 3;
+        int *orig_skin_p = *skin_pp;
+        *skin_pp = &new_skin;
+        auto ret = Orig(node, find_name, area_system);
+        *skin_pp = orig_skin_p;
+        return ret;
+    }
+    static constexpr auto GetAddr = &mm_addrs::grab_runtime_asset_name_from_elmdtree;
+};
+
 static void fetch_build_ids() {
     for (int mod_idx = 0; mod_idx < exl::util::mem_layout::s_ModuleCount; mod_idx++) {
         const exl::util::Range &rodata = exl::util::GetModuleInfo(mod_idx).m_Rodata;
@@ -697,6 +717,10 @@ extern "C" void exl_main(void* x0, void* x1) {
         install<Stub_scol_true_outmost>();
         install<Stub_cctx_bg_collide_against_twopoint>();
         install<Stub_cctx_bg_collide_against_point>();
+    }
+
+    if (0) {
+        install<Stub_grab_runtime_asset_name_from_elmdtree>();
     }
 
     log_str("done hooking");

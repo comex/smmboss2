@@ -1,4 +1,4 @@
-import functools, io, sys, struct, inspect, re
+import functools, io, sys, struct, inspect, re, os
 
 class GuestPtrMeta(type):
     def __matmul__(self, addr):
@@ -198,13 +198,14 @@ def fixed_array(ptr_ty, count):
     return GuestFixedArray
 
 class MyProperty(property):
-    def __init__(self, offset, ptr_cls_or_f, dump=True, dump_deep=False):
+    def __init__(self, offset, ptr_cls_or_f, dump=True, dump_deep=False, include_in_repr=False):
         assert isinstance(offset, int)
         self.offset = offset
         self.ptr_cls_or_f = ptr_cls_or_f
         self.must_call = not inspect.isclass(ptr_cls_or_f)
         self.dump = dump
         self.dump_deep = dump_deep
+        self.include_in_repr = include_in_repr
         super().__init__(self.read, self.write)
     @property
     def ptr_cls(self):
@@ -268,21 +269,34 @@ class GuestStruct(GuestPtr):
     full_repr = False
     def __repr__(self):
         ret = super().__repr__()
-        if self.full_repr and self.addr != 0:
+        if self.full_repr:
+            include_properties = self._properties()
+        else:
+            include_properties = self._include_in_repr_properties()
+        if include_properties and self.addr != 0:
             subreprs = []
-            for key, prop in self._properties():
-                subreprs.append(repr(getattr(self, key)))
+            for key, prop in include_properties:
+                subreprs.append(f"{key}={getattr(self, key)!r}")
             ret += '({})'.format(', '.join(subreprs))
         return ret
 
     @classmethod
+    @functools.cache
+    def _include_in_repr_properties(cls):
+        return [
+            (key, prop) for (key, prop) in cls._properties()
+            if prop.include_in_repr
+        ]
+
+    @classmethod
+    @functools.cache
     def _properties(cls):
-        return (
+        return [
             (key, prop)
             for supercls in cls.mro()[::-1]
             for key, prop in supercls.__dict__.items()
             if isinstance(prop, MyProperty)
-        )
+        ]
 
     @classmethod
     def _base_guest_struct(cls):
@@ -300,10 +314,10 @@ class GuestCString(GuestPtr):
             return None
         return guest.read_cstr(self.addr)
     def as_str(self):
-        return self.get().decode('utf-8')
+        return os.fsdecode(self.get())
     def __repr__(self):
         #return '%s %s' % (super().__repr__(), self.get())
-        return repr(self.get())
+        return repr(self.as_str())
 
 class GuestPtrToMemberFunction(GuestStruct):
     # todo: we are not doing a good job distinguishing values and pointers.

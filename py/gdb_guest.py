@@ -1,7 +1,7 @@
 import guest_access
 import smmboss
 import gdb
-import re, struct
+import re, struct, traceback
 
 class GDBGuest(smmboss.Guest):
     def __init__(self):
@@ -71,8 +71,12 @@ class SomeCommand(gdb.Command):
         self.func = func
         self.guest = guest
     def invoke(self, arg, from_tty):
-        with self.guest:
-            self.func()
+        try:
+            with self.guest:
+                self.func()
+        except:
+            traceback.print_exc()
+            raise
 
 class MemDump:
     def __init__(self):

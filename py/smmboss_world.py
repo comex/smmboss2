@@ -133,6 +133,16 @@ def ptr_array(ty):
     C.__name__ = f'ptr_array({ty.__name__})'
     return C
 
+@functools.cache
+def upsidedown_ptr_array(ty):
+    class C(GuestStruct, GuestArray):
+        base = prop(0, ptr_to(ptr_to(ty)))
+        count = prop(4, u32)
+        capacity = prop(8, u32)
+        ptr_ty = ptr_to(ty)
+    C.__name__ = f'upsidedown_ptr_array({ty.__name__})'
+    return C
+
 class StateMgrState(GuestStruct):
     sizeof_star = 0x40
     vtable = prop(0, usize)
@@ -659,7 +669,7 @@ class Flower(GuestStruct):
     elmd_tree_outer = prop(0x18, lambda: ptr_to(ELMDTreeOuter))
 
 class World(GuestStruct):
-    name = prop(8, FancyString)
+    name = prop(8, FancyString, include_in_repr=True)
     id = prop(0x20, u32)
     actor_mgr = prop(0x18, lambda: ptr_to(ActorMgr))
     area_sys = prop(0x140, ptr_to(AreaSystem)) # was 0x130
@@ -776,24 +786,51 @@ class BgUnitGroupMgr(GuestStruct):
         return guest_read_ptr(BgUnitGroupMgr, mm.addr.bg_unit_group_mgr)
 
 # ELMD = ELinkMapData, from the name of the unit heap
+class ELMDEntryRuntimeName(GuestStruct):
+    condition_callback = prop(0, GuestPtrPtr)
+    runtime_asset_name = prop(8, ptr_to(FancyString))
+
+class ELMDEntryRuntimeNameArray(GuestArray, GuestStruct):
+    ptr_ty = ptr_to(ELMDEntryRuntimeName)
+    base = prop(0, ptr_ty)
+    cap = prop(8, u32)
+    firstidx = prop(0xc, u32)
+    count = prop(0x10, u32)
+
 class ELMDEntry(GuestStruct):
-    another_str = prop(0x00, FancyString)
+    name = prop(0x00, FancyString)
+    runtime_asset_names = prop(0xa0, ELMDEntryRuntimeNameArray)
     sizeof_star = 0xb8
 
 class ELMDTreeNode(GuestStruct):
     vt = prop(0x00, GuestPtrPtr)
     left = prop(0x08, lambda: ptr_to(ELMDTreeNode))
     right = prop(0x10, lambda: ptr_to(ELMDTreeNode))
-    name = prop(0x20, FancyString)
-    content = prop(0x30, ptr_to(ELMDEntry))
+    name = prop(0x20, FancyString, include_in_repr=True)
+    content = prop(0x30, ptr_to(ELMDEntry), dump_deep=True)
     owner = prop(0x38, lambda: ptr_to(ELMDTree))
+
+    def __iter__(self):
+        yield self
+        left, right = self.left, self.right
+        if left:
+            yield from left
+        if right:
+            yield from right
 
 class ELMDTree(GuestStruct):
     root = prop(0x00, ptr_to(ELMDTreeNode))
     first_free = prop(0x08, ptr_to(ELMDTreeNode))
-    storage = prop(0x10, ptr_to(ELMDTreeNode))
-    storage_count = prop(0x18, u32)
-    storage_cap = prop(0x1c, u32)
+    storage = prop(0x10, upsidedown_ptr_array(ELMDTreeNode))
+    def dump(self, fp, indent, **opts):
+        super().dump(fp, indent, **opts)
+        indent2 = indent + '  '
+        fp.write(f'\n{indent2}all nodes:')
+        for node in self:
+            fp.write(f'\n{indent2}')
+            dump(node, fp, indent2, **opts)
+    def __iter__(self):
+        return iter(self.root)
 
 class ELMDTreeOuter(GuestStruct):
     tree = prop(0x20, ELMDTree)
@@ -933,3 +970,8 @@ def print_collider_sources():
 def print_all_colliders():
     for collider in all_colliders_from(collider_sources()):
         dump(collider)
+
+@commandlike
+def print_elmd_tree():
+    dump(ActorMgr.get().cur_world.area_sys.flower.elmd_tree_outer.tree)
+

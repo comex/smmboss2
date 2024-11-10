@@ -431,35 +431,6 @@ HOOK_DEFINE_TRAMPOLINE(Stub_cctx_bg_collide_against_point) {
     static constexpr auto GetAddr = &mm_addrs::cctx_bg_collide_against_point;
 };
 
-
-__attribute__((used))
-uint32_t sh_drop;
-__attribute__((used))
-uint32_t sh_match;
-bool sh_need_clear;
-StupidHash<uint32_t, Nothing, 12289> sh_seen;
-
-HOOK_DEFINE_TRAMPOLINE(Stub_sead_HashCRC32_calcStringHash) {
-    static uint32_t Callback(const char *str) {
-        uint32_t crc = Orig(str);
-        if (sh_need_clear) {
-            sh_need_clear = false;
-            sh_seen.clear();
-        }
-        if (!sh_seen.lookup(crc, /*insert*/ true).second) {
-            xprintf("crc32: [%s] -> 0x%08x\n", str, crc);
-        }
-        if (crc == sh_drop) {
-            crc = 1;
-        }
-        if (crc == sh_match) {
-            asm volatile("nop\nnop\nnop");
-        }
-        return crc;
-    }
-    static uint32_t GetAddr() { return s_target_start + 0x0029b340; }
-};
-
 template <typename StubFoo>
 void install() {
     StubFoo::InstallAtPtr(StubFoo::GetAddr());
@@ -717,17 +688,13 @@ extern "C" void exl_main(void* x0, void* x1) {
 
     // TODO: make these dynamic hooks (and for the ones that can't be, make
     // sending conditional at least)
-    if (0) {
-        install<Stub_hitbox_collide>();
-        install<Stub_AreaSystem_do_many_collisions>();
-        install<Stub_Collider_add_to_collision_grid>();
-        install<Stub_Collider_remove_from_collision_grid_and_lists>();
-        install<Stub_scol_true_outmost>();
-        install<Stub_cctx_bg_collide_against_twopoint>();
-        install<Stub_cctx_bg_collide_against_point>();
-    }
-
-    install<Stub_sead_HashCRC32_calcStringHash>();
+    install<Stub_hitbox_collide>();
+    install<Stub_AreaSystem_do_many_collisions>();
+    install<Stub_Collider_add_to_collision_grid>();
+    install<Stub_Collider_remove_from_collision_grid_and_lists>();
+    install<Stub_scol_true_outmost>();
+    install<Stub_cctx_bg_collide_against_twopoint>();
+    install<Stub_cctx_bg_collide_against_point>();
     log_str("done hooking");
 }
 

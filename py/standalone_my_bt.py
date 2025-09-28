@@ -1,3 +1,7 @@
+import struct, gdb
+
+def reg(name):
+    return int(gdb.parse_and_eval(name))
 
 class MyBT(gdb.Command):
     def __init__(self):
@@ -15,5 +19,6 @@ class MyBT(gdb.Command):
             self.print_frame(f'f{i}', fpc, f' [{f:#x}]')
             f = new_f
     def print_frame(self, idx, addr, extra):
+        addr &= (1 << 40) - 1 # browser CFI
         gdb.write(f'{idx:5}: 0x{addr:016x}{extra}\n')
 MyBT()

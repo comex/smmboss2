@@ -1238,7 +1238,13 @@ class DiagramScolColliders extends DiagramThingKind {
     if (1) {
       for (let i = 0; i < 4; i++) {
         let fakePtr = data.ptr + BigInt(i);
-        let xxy = scol.readPtrFromWithin(scol.xxy_ptrs_cur.get(i), this.mmTypes.XXY);
+        let xxyPtr = scol.xxy_ptrs_cur.get(i);
+        if (xxyPtr == 0n) {
+          // TODO (2025-09-28): not sure what null here means, might be I
+          // forgot something, but I'm getting it
+          continue;
+        }
+        let xxy = scol.readPtrFromWithin(xxyPtr , this.mmTypes.XXY);
 
         this.line(
           fakePtr,

@@ -35,6 +35,7 @@ class RPCGuest(smmboss.Guest):
                 info[f'{prefix}_start'] = read64(fp)
                 info[f'{prefix}_size'] = read64(fp)
                 info[f'{prefix}_end'] = info[f'{prefix}_start'] + info[f'{prefix}_size']
+            info['build_id'] = must_read(fp, 16)
             image_infos.append(info)
         self.image_infos = image_infos
 
@@ -91,7 +92,7 @@ if shell.started_shell_with == 'rpc_guest':
     if guest := getattr(__main__, 'guest', None):
         guest.kill()
     __main__.guest = RPCGuest(sys.argv[1])
-    __main__.mm = smmboss.MM(__main__.guest)
+    __main__.mm = smmboss.MM.with_guest(__main__.guest)
 
 if __name__ == '__main__':
     shell.main('rpc_guest')

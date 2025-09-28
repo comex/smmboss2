@@ -66,6 +66,7 @@
         <button id="save-button">Save</button>
         <button id="load-button">Load</button>
         <button id="live-button">Live</button>
+        <button id="disconnect-button">Disconnect</button>
       </div>
     </div>
   </div>
@@ -2248,6 +2249,12 @@ class UI {
       g_connsSig.set(new LiveConns('ws://neb-solidus:8000'));
     }));
 
+    this.pushKill(this.pushKill(new ButtonWrapper('disconnect-button', {
+      enabled: true,
+    })).clicks.map(async () => {
+      g_connsSig.maybeCur?.kill();
+    }));
+
     this.pushKill(this.pushKill(new ButtonWrapper('save-button', {
       enabled: this.notLoadingSig,
     })).clicks.map(async () => {
@@ -2260,18 +2267,6 @@ class UI {
 
 g_connsSig = new Signal(null);
 g_ui = new UI(g_connsSig);
-
-/*
-if (0) {
-new ButtonWrapper('save-button', {
-  onClick: async () => {
-  }
-);
-new ButtonWrapper('live-button', {
-  onClick: async () => {
-  }
-}
-*/
 
 
 function loadByHash() {

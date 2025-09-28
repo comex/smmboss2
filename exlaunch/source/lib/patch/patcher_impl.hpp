@@ -2,15 +2,16 @@
 
 #include <lib/util/sys/rw_pages.hpp>
 #include <lib/util/sys/mem_layout.hpp>
+#include <lib/util/sys/modules.hpp>
 #include <lib/util/typed_storage.hpp>
 #include <optional>
 
 namespace exl::patch {
 
     namespace impl {
-        inline util::TypedStorage<const util::RwPages> s_Storage;
+        inline util::TypedStorage<util::RwPages> s_Storage;
 
-        inline const util::RwPages& GetRwPages() { return util::GetReference(s_Storage); }
+        [[gnu::const]] inline const util::RwPages& GetRwPages() { return util::GetReference(s_Storage); }
 
         inline void InitPatcherImpl() {
             auto& mod = util::GetMainModuleInfo();

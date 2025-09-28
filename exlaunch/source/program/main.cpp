@@ -11,7 +11,7 @@
 #include "../../externals/xxhash/xxhash.h"
 #include "stupid_hash.hpp"
 
-std::array<std::optional<BuildId>, exl::util::mem_layout::s_MaxModules> g_build_ids;
+std::array<std::optional<BuildId>, static_cast<size_t>(exl::util::ModuleIndex::End)> g_build_ids;
 
 // TODO: move this
 
@@ -640,8 +640,12 @@ HOOK_DEFINE_TRAMPOLINE(Stub_grab_runtime_asset_name_from_elmdtree) {
 };
 
 static void fetch_build_ids() {
-    for (int mod_idx = 0; mod_idx < exl::util::mem_layout::s_ModuleCount; mod_idx++) {
-        const exl::util::Range &rodata = exl::util::GetModuleInfo(mod_idx).m_Rodata;
+    for (size_t smi = 0; smi < static_cast<size_t>(exl::util::ModuleIndex::End); smi++) {
+        auto mi = static_cast<exl::util::ModuleIndex>(smi);
+        if (!exl::util::HasModule(mi)) {
+            continue;
+        }
+        const exl::util::Range &rodata = exl::util::GetModuleInfo(mi).m_Rodata;
 
         constexpr char gnu_tag[4] = "GNU";
         size_t needle_size = sizeof(gnu_tag) + sizeof(BuildId);
@@ -652,7 +656,7 @@ static void fetch_build_ids() {
         uintptr_t haystack_ptr = rodata.GetEnd() - needle_size;
         for (size_t i = 0; i < haystack_size; i++) {
             if (!memcmp((void *)haystack_ptr, gnu_tag, sizeof(gnu_tag))) {
-                BuildId &build_id = g_build_ids.at(mod_idx).emplace();
+                BuildId &build_id = g_build_ids.at(smi).emplace();
                 memcpy(&build_id, (void *)(haystack_ptr + sizeof(gnu_tag)), sizeof(build_id));
             }
             haystack_ptr--;
@@ -661,7 +665,7 @@ static void fetch_build_ids() {
 }
 
 static void init_version() {
-    const BuildId &build_id = g_build_ids.at(exl::util::mem_layout::s_MainModuleIdx).value();
+    const BuildId &build_id = g_build_ids.at(static_cast<size_t>(exl::util::ModuleIndex::Main)).value();
     for (uint8_t i = 0; i < VER_COUNT; i++) {
         if (s_version_to_build_id[i] == build_id) {
             s_cur_mm_version = (mm_version)i;
@@ -727,8 +731,8 @@ extern "C" void exl_main(void* x0, void* x1) {
 }
 
 extern "C" NORETURN void exl_exception_entry() {
-    /* TODO: exception handling */
+    /* Note: this is only applicable in the context of applets/sysmodules. */
     log_str("exl_exception_entry");
-    EXL_ABORT(0x420);
+    EXL_ABORT("Default exception handler called!");
 }
 

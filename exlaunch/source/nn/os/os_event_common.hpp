@@ -15,6 +15,8 @@
  */
 #pragma once
 
+#include "nn_common.hpp"
+
 namespace nn::os {
 
     enum EventClearMode {

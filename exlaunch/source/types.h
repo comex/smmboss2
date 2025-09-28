@@ -17,10 +17,6 @@ typedef int32_t s32;     ///<  32-bit signed integer.
 typedef int64_t s64;     ///<  64-bit signed integer.
 typedef __int128_t s128; ///< 128-bit unsigned integer.
 
-typedef float f32;           ///<  32-bit float.
-typedef double f64;          ///<  64-bit float.
-typedef __Float64x2_t f64x2; ///<  Two 64-bit floats.
-
 typedef volatile u8 vu8;     ///<   8-bit volatile unsigned integer.
 typedef volatile u16 vu16;   ///<  16-bit volatile unsigned integer.
 typedef volatile u32 vu32;   ///<  32-bit volatile unsigned integer.
@@ -38,6 +34,8 @@ typedef	unsigned short	ushort;
 typedef	unsigned int	uint;	
 typedef	unsigned long	ulong;
 
+typedef float f32;
+typedef double f64;
 
 #define ALIGN_UP(x, a) ((((uintptr_t)x) + (((uintptr_t)a)-1)) & ~(((uintptr_t)a)-1))
 #define ALIGN_DOWN(x, a) ((uintptr_t)(x) & ~(((uintptr_t)(a)) - 1))
@@ -48,4 +46,7 @@ typedef	unsigned long	ulong;
 #define UNREACHABLE __builtin_unreachable()
 #define PAGE_SIZE (0x1000)
 #define ALWAYS_INLINE inline __attribute__((always_inline))
+#define ALWAYS_INLINE_LAMBDA __attribute__((always_inline))
 #define BITSIZEOF(x) (sizeof(x) * CHAR_BIT)
+#define STRINGIFY(a) STRINGIFY_(a)
+#define STRINGIFY_(a) #a

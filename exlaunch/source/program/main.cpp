@@ -713,7 +713,7 @@ extern "C" void exl_main(void* x0, void* x1) {
 
     // TODO: make these dynamic hooks (and for the ones that can't be, make
     // sending conditional at least)
-    if (1) {
+    if (0) {
         install<Stub_hitbox_collide>();
         install<Stub_AreaSystem_do_many_collisions>();
         install<Stub_Collider_add_to_collision_grid>();

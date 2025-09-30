@@ -246,12 +246,13 @@ struct mem_monitor {
 
     mem_monitor() : triple_buffer_{&s_hose_thread, &s_main_thread} {}
 
-    void set_config(const monitor_config &cfg_in) {
+    bool set_config(const monitor_config &cfg_in) {
+        if (!validate_config(cfg_in)) { return false; }
         uint8_t new_cfg_idx = triple_buffer_.prep_write();
         monitor_config *new_cfg = &configs_[new_cfg_idx];
         *new_cfg = cfg_in;
         triple_buffer_.post_write(new_cfg_idx);
-    };
+    }
 
     void do_reads() {
         const monitor_config &cfg = configs_[triple_buffer_.prep_read()];
@@ -259,17 +260,25 @@ struct mem_monitor {
             w.write_tag({"memmon"});
             w.write_prim(cfg.uniqid);
             for (auto entry : cfg.entries) {
-                bool ok = true;
                 void *buf = w.reserve_raw(entry.len);
                 if (buf) {
-                    size_t actual = safe_memcpy(buf, false, (void *)entry.addr, true, entry.len);
-                    ok = actual == entry.len;
+                    memcpy(buf, (void *)entry.addr, entry.len);
                 }
-                w.write_prim(ok);
             }
         });
 
     }
+
+private:
+    bool validate_config(const monitor_config &cfg_in) {
+        for (auto entry : cfg_in.entries) {
+            if (s_mem_regions.accessible_bytes_at(entry.addr, false) < entry.len) {
+                return false;
+            }
+        }
+        return true;
+    }
+
 };
 
 void hose::init() {

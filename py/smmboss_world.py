@@ -157,18 +157,37 @@ class StateMgr(GuestStruct):
     state_objs = prop(0x28, count4_ptr(StateMgrState))
     names = prop(0x38, count4_ptr(FancyString))
 
-    def dump_states(self):
+    def dump_states_inner(self):
         count = self.state_objs.count
         assert count == self.names.count
         for i in range(count):
             state = self.state_objs[i]
-            line = f'State {i}: name={self.names[i]}'
+            info = {'id': i, 'name': self.names[i].as_str()}
             for kind in ['in', 'tick', 'out']:
                 cb = getattr(state, f'cb_{kind}')
-                func = guest.unslide(cb.resolve(state.target).addr)
-                line += f' {kind}={func:#x}'
-            line += f' [target={state.target.addr:#x}]'
+                func = mm.unslide(cb.resolve(state.target).addr)
+                info[kind] = func
+            info['target'] = state.target.addr
+            yield info
+
+    def dump_states(self):
+        for info in self.dump_states_inner():
+            line = f'State {info["id"]}: name={info["name"]}'
+            for kind in ['in', 'tick', 'out']:
+                line += f" {kind}={info[kind]:#x}"
+            line += f' [target={info["target"]:#x}]'
             print(line)
+
+    def dump_states_bn(self, prefix):
+        for info in self.dump_states_inner():
+            for kind in ['in', 'tick', 'out']:
+                if info['name'] == 'cState_None' and kind == 'tick':
+                    continue # this doesn't get overridden?
+                name = prefix + '_' + info['name'] + '_' + kind
+                addr = info[kind]
+                if not addr:
+                    continue
+                print(f'bv.define_user_symbol(Symbol(sym_type=SymbolType.FunctionSymbol, addr={addr:#x}, short_name={name!r}))')
 
 class ObjRec(GuestStruct):
     vt = prop(0, usize)
@@ -217,16 +236,14 @@ class EditActor(ActorBase):
     relly = prop(0x320, ptr_to(Relly))
 
 class Actor(ActorBase):
-    if mm.version >= 300:
-        loc = prop(0x230, Point3D)
-    else:
-        loc = prop(0x228, Point3D)
-        houvelo = prop(0x234, Point3D)
-        rngthing = prop(0x264, u32)
-        source_xvel = prop(0x26c, f32)
-        source_xvel_goal = prop(0x270, f32)
-        gravity = prop(0x278, f32)
-        source_xvel_step = prop(0x27c, f32)
+    _ofs = 0 if mm.version >= 300 else 8
+    loc = prop(0x230 - _ofs, Point3D)
+    houvelo = prop(0x23c - _ofs, Point3D)
+    rngthing = prop(0x26c - _ofs, u32)
+    source_xvel = prop(0x274 - _ofs, f32)
+    source_xvel_goal = prop(0x278 - _ofs, f32)
+    gravity = prop(0x280 - _ofs, f32)
+    source_xvel_step = prop(0x284 - _ofs, f32)
 
 class ScolNode(GuestStruct):
     node = prop(0, SeadListNode)
@@ -681,6 +698,7 @@ class ActorMgr(GuestStruct):
     mp5 = prop(0x30, ptr_to(MP5))
     cur_world = prop(0x98, ptr_to(World))
     worlds = prop(0x80, count4_ptr(ptr_to(World)))
+    idbits_hash = prop(0x110, count4_ptr(GuestPtr))
 
 class OtherTimerRelated(GuestStruct):
     @staticmethod

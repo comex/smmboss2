@@ -5,9 +5,11 @@
 
 #include <string.h>
 
+#include <array>
 #include <vector>
 #include <algorithm>
 #include <mutex>
+#include <memory>
 
 #include "common.hpp"
 #include "util/modules.hpp"
@@ -59,7 +61,7 @@ static void start_thread(const char *name, void *(*f)(void *), void *ctx) {
     assert(!setname_ret);
 }
 
-static pthread_t s_main_thread;
+static pthread_t s_main_thread, s_hose_thread, s_mongoose_thread;
 
 struct mem_regions {
 private:
@@ -176,6 +178,99 @@ static size_t safe_memcpy(void *dst, bool check_dst,
 
 #define offsetof_end(ty, what) \
     (offsetof(ty, what) + sizeof(((ty *)0)->what))
+
+void atomic_update(auto &atomic, std::memory_order order, auto &&callback) {
+    auto expected = atomic.load(std::memory_order_relaxed);
+    while (1) {
+        auto desired = expected;
+        callback(&desired);
+        if (atomic.compare_exchange_weak(expected, desired, order)) {
+            break;
+        }
+    }
+}
+
+// overengineered for fun
+struct atomic_triple_buffer {
+    struct atomic_state {
+        uint8_t inuse_buf_idx:2, next_buf_idx:2, pad:4;
+    };
+    std::atomic<atomic_state> atomic_state_{};
+    const pthread_t *writer_, *reader_;
+
+    // these are pointers because the pthread_ts might not be set yet
+    atomic_triple_buffer(const pthread_t *writer, const pthread_t *reader) : writer_{writer}, reader_{reader} {}
+
+    uint8_t prep_write() {
+        assert(pthread_self() == *writer_);
+        atomic_state st = atomic_state_.load(std::memory_order_acquire);
+        assert(st.inuse_buf_idx < 3);
+        assert(st.next_buf_idx < 3);
+        uint8_t new_buf_idx;
+        if (st.inuse_buf_idx == st.next_buf_idx) {
+            new_buf_idx = 2 - st.inuse_buf_idx;
+        } else {
+            new_buf_idx = (0 + 1 + 2) - st.inuse_buf_idx - st.next_buf_idx;
+        }
+        return new_buf_idx;
+    }
+
+    void post_write(uint8_t new_buf_idx) {
+        atomic_update(atomic_state_, std::memory_order_acq_rel, [&](atomic_state *st) {
+            assert(new_buf_idx != st->inuse_buf_idx && new_buf_idx != st->next_buf_idx);
+            st->next_buf_idx = new_buf_idx;
+        });
+    }
+
+    uint8_t prep_read() {
+        assert(pthread_self() == *reader_);
+        uint8_t ret;
+        // release previous read and acquire current one
+        atomic_update(atomic_state_, std::memory_order_acq_rel, [&](atomic_state *st) {
+            ret = st->next_buf_idx;
+            st->inuse_buf_idx = ret;
+        });
+        return ret;
+    }
+};
+
+struct mem_monitor {
+    struct monitor_config {
+        struct entry { uint64_t addr, len; };
+        uint64_t uniqid;
+        entry entries[16];
+    };
+
+    std::array<monitor_config, 3> configs_;
+    atomic_triple_buffer triple_buffer_;
+
+    mem_monitor() : triple_buffer_{&s_hose_thread, &s_main_thread} {}
+
+    void set_config(const monitor_config &cfg_in) {
+        uint8_t new_cfg_idx = triple_buffer_.prep_write();
+        monitor_config *new_cfg = &configs_[new_cfg_idx];
+        *new_cfg = cfg_in;
+        triple_buffer_.post_write(new_cfg_idx);
+    };
+
+    void do_reads() {
+        const monitor_config &cfg = configs_[triple_buffer_.prep_read()];
+        s_hose.write_packet([&](auto &w) {
+            w.write_tag({"memmon"});
+            w.write_prim(cfg.uniqid);
+            for (auto entry : cfg.entries) {
+                bool ok = true;
+                void *buf = w.reserve_raw(entry.len);
+                if (buf) {
+                    size_t actual = safe_memcpy(buf, false, (void *)entry.addr, true, entry.len);
+                    ok = actual == entry.len;
+                }
+                w.write_prim(ok);
+            }
+        });
+
+    }
+};
 
 void hose::init() {
     nn::os::InitializeEvent(&sent_event_, /*signaled*/ false, nn::os::EventClearMode_AutoClear);
@@ -611,10 +706,12 @@ void serve_main() {
     s_main_thread = pthread_self();
     s_hose.init();
     start_thread("hose", [](void *ignored) -> void * {
+        s_hose_thread = pthread_self();
         s_hose.thread_func();
         return nullptr;
     }, nullptr);
     start_thread("mongoose", [](void *ignored) -> void * {
+        s_mongoose_thread = pthread_self();
         s_mongoose_server.serve();
         return nullptr;
     }, nullptr);

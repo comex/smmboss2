@@ -1,6 +1,5 @@
 #pragma once
 #include <atomic>
-#include <pthread.h>
 #include <tuple>
 #include <string.h>
 #include "stuff.hpp"
@@ -38,19 +37,32 @@ struct writer_base {
 };
 
 struct size_calculator : public writer_base<size_calculator> {
+    const bool is_size_calc_ = true;
     size_t size_;
-    void write_raw(const void *ptr, size_t write_size) {
-        size_t old_size = size_;
-        size_t new_size = old_size + write_size;
-        size_ = new_size > old_size ? new_size : SIZE_MAX;
+    void write_raw(const void *ptr, uint64_t write_size) {
+        if (__builtin_add_overflow(size_, write_size, &size_)) {
+            size_ = SIZE_MAX;
+        }
+    }
+
+    void *reserve_raw(uint64_t write_size) {
+        write_raw(nullptr, write_size);
+        return nullptr;
     }
 };
 
 struct actual_writer : public writer_base<actual_writer> {
+    const bool is_size_calc_ = false;
     uint8_t *cur_ptr_;
     void write_raw(const void *ptr, size_t size) {
         memcpy(cur_ptr_, ptr, size);
         cur_ptr_ += size;
+    }
+
+    void *reserve_raw(size_t size) {
+        void *ret = cur_ptr_;
+        cur_ptr_ += size;
+        return ret;
     }
 };
 
@@ -164,4 +176,3 @@ static inline bool test_rpc_flag(uint64_t flag) {
     uint64_t flags = g_cur_rpc_flags.load(std::memory_order_acquire);
     return (flags & flag) == flag;
 }
-

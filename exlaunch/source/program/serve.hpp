@@ -176,3 +176,5 @@ static inline bool test_rpc_flag(uint64_t flag) {
     uint64_t flags = g_cur_rpc_flags.load(std::memory_order_acquire);
     return (flags & flag) == flag;
 }
+
+void mem_monitor_do_reads();

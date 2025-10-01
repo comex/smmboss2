@@ -179,12 +179,12 @@ static size_t safe_memcpy(void *dst, bool check_dst,
 #define offsetof_end(ty, what) \
     (offsetof(ty, what) + sizeof(((ty *)0)->what))
 
-void atomic_update(auto &atomic, std::memory_order order, auto &&callback) {
-    auto expected = atomic.load(std::memory_order_relaxed);
+void atomic_update(auto *atomic, std::memory_order order, auto &&callback) {
+    auto expected = atomic->load(std::memory_order_relaxed);
     while (1) {
         auto desired = expected;
         callback(&desired);
-        if (atomic.compare_exchange_weak(expected, desired, order)) {
+        if (atomic->compare_exchange_weak(expected, desired, order)) {
             break;
         }
     }
@@ -216,7 +216,7 @@ struct atomic_triple_buffer {
     }
 
     void post_write(uint8_t new_buf_idx) {
-        atomic_update(atomic_state_, std::memory_order_acq_rel, [&](atomic_state *st) {
+        atomic_update(&atomic_state_, std::memory_order_acq_rel, [&](atomic_state *st) {
             assert(new_buf_idx != st->inuse_buf_idx && new_buf_idx != st->next_buf_idx);
             st->next_buf_idx = new_buf_idx;
         });
@@ -226,7 +226,7 @@ struct atomic_triple_buffer {
         assert(pthread_self() == *reader_);
         uint8_t ret;
         // release previous read and acquire current one
-        atomic_update(atomic_state_, std::memory_order_acq_rel, [&](atomic_state *st) {
+        atomic_update(&atomic_state_, std::memory_order_acq_rel, [&](atomic_state *st) {
             ret = st->next_buf_idx;
             st->inuse_buf_idx = ret;
         });
@@ -235,33 +235,56 @@ struct atomic_triple_buffer {
 };
 
 struct mem_monitor {
+    static constexpr size_t MAX_ENTRIES = 32;
+
     struct monitor_config {
         struct entry { uint64_t addr, len; };
         uint64_t uniqid;
-        entry entries[16];
+        uint64_t entry_count;
+        std::array<entry, MAX_ENTRIES> entries;
     };
 
     std::array<monitor_config, 3> configs_;
     atomic_triple_buffer triple_buffer_;
 
-    mem_monitor() : triple_buffer_{&s_hose_thread, &s_main_thread} {}
+    mem_monitor() : triple_buffer_{&s_mongoose_thread, &s_main_thread} {}
 
-    bool set_config(const monitor_config &cfg_in) {
-        if (!validate_config(cfg_in)) { return false; }
+    const char *set_config(std::span<const char> data) {
+        size_t remaining;
+        if (__builtin_sub_overflow(data.size(), offsetof(monitor_config, entries), &remaining) ||
+            remaining % sizeof(monitor_config::entry)) {
+            return "invalid size";
+        }
+        size_t entry_count = remaining / sizeof(monitor_config::entry);
+        if (entry_count > MAX_ENTRIES) {
+            return "too many entries";
+        }
         uint8_t new_cfg_idx = triple_buffer_.prep_write();
         monitor_config *new_cfg = &configs_[new_cfg_idx];
-        *new_cfg = cfg_in;
+        memset(new_cfg, 0, sizeof(*new_cfg));
+        memcpy(new_cfg, data.data(), data.size());
+        if (new_cfg->entry_count != entry_count) {
+            return "invalid size";
+        }
+        if (const char *err = validate_config(*new_cfg)) {
+            return err;
+        }
         triple_buffer_.post_write(new_cfg_idx);
+        return nullptr;
     }
 
     void do_reads() {
         const monitor_config &cfg = configs_[triple_buffer_.prep_read()];
+        if (cfg.uniqid == 0) {
+            return;
+        }
         s_hose.write_packet([&](auto &w) {
             w.write_tag({"memmon"});
             w.write_prim(cfg.uniqid);
-            for (auto entry : cfg.entries) {
+            for (size_t i = 0; i < cfg.entry_count; i++) {
+                const auto &entry = cfg.entries[i];
                 void *buf = w.reserve_raw(entry.len);
-                if (buf) {
+                if (buf && entry.len) {
                     memcpy(buf, (void *)entry.addr, entry.len);
                 }
             }
@@ -270,16 +293,23 @@ struct mem_monitor {
     }
 
 private:
-    bool validate_config(const monitor_config &cfg_in) {
+    const char *validate_config(const monitor_config &cfg_in) {
+        if (cfg_in.uniqid == 0 && cfg_in.entry_count) {
+            return "uniqid must be nonzero";
+        }
         for (auto entry : cfg_in.entries) {
             if (s_mem_regions.accessible_bytes_at(entry.addr, false) < entry.len) {
-                return false;
+                return "invalid address";
             }
         }
-        return true;
+        return nullptr;
     }
 
 };
+static mem_monitor s_mem_monitor;
+void mem_monitor_do_reads() {
+    s_mem_monitor.do_reads();
+}
 
 void hose::init() {
     nn::os::InitializeEvent(&sent_event_, /*signaled*/ false, nn::os::EventClearMode_AutoClear);
@@ -502,6 +532,7 @@ private:
         RPC_REQ_WRITE = 2,
         RPC_REQ_GET_STATS = 3,
         RPC_REQ_SET_FLAGS = 4,
+        RPC_REQ_SET_MONITOR_CONFIG = 5,
     };
 
     struct rpc_req {
@@ -521,8 +552,8 @@ private:
                 uint64_t clear;
                 uint64_t set;
             } __attribute__((packed)) set_flags;
+            char set_monitor_config[0];
         };
-
     } __attribute__((packed));
     // end protocol
 
@@ -599,13 +630,25 @@ private:
                 err = "wrong len for set_flags";
                 goto err;
             }
-            uint64_t expected = 0, desired;
-            do {
-                desired = (expected & ~req->set_flags.clear) | req->set_flags.set;
-            } while (!g_cur_rpc_flags.compare_exchange_weak(expected, desired, std::memory_order_acq_rel));
+            uint64_t new_flags;
+            atomic_update(&g_cur_rpc_flags, std::memory_order_acq_rel, [&](uint64_t *flags) {
+                new_flags = *flags = (*flags & ~req->set_flags.clear) | req->set_flags.set;
+            });
 
-            s_hose.set_enable_backpressure(desired & RPC_FLAG_BACKPRESSURE);
-            mg_ws_send(c, &desired, sizeof(desired), WEBSOCKET_OP_BINARY);
+            s_hose.set_enable_backpressure(new_flags & RPC_FLAG_BACKPRESSURE);
+            mg_ws_send(c, &new_flags, sizeof(new_flags), WEBSOCKET_OP_BINARY);
+            return;
+        }
+
+        case RPC_REQ_SET_MONITOR_CONFIG: {
+            static_assert(offsetof_end(rpc_req, type) == offsetof(rpc_req, set_monitor_config));
+            if ((err = s_mem_monitor.set_config({
+                req->set_monitor_config,
+                len - offsetof(rpc_req, set_monitor_config)
+            }))) {
+                goto err;
+            }
+            mg_ws_send(c, nullptr, 0, WEBSOCKET_OP_BINARY);
             return;
         }
         default:

@@ -639,6 +639,14 @@ HOOK_DEFINE_TRAMPOLINE(Stub_grab_runtime_asset_name_from_elmdtree) {
     static constexpr auto GetAddr = &mm_addrs::grab_runtime_asset_name_from_elmdtree;
 };
 
+HOOK_DEFINE_TRAMPOLINE(Stub_huge_frame_func) {
+    static void Callback(void *self) {
+        mem_monitor_do_reads();
+        Orig(self);
+    }
+    static constexpr auto GetAddr = &mm_addrs::huge_frame_func;
+};
+
 static void fetch_build_ids() {
     for (size_t smi = 0; smi < static_cast<size_t>(exl::util::ModuleIndex::End); smi++) {
         auto mi = static_cast<exl::util::ModuleIndex>(smi);
@@ -713,7 +721,8 @@ extern "C" void exl_main(void* x0, void* x1) {
 
     // TODO: make these dynamic hooks (and for the ones that can't be, make
     // sending conditional at least)
-    if (1) {
+    install<Stub_huge_frame_func>();
+    if (0) {
         install<Stub_hitbox_collide>();
         install<Stub_AreaSystem_do_many_collisions>();
         install<Stub_Collider_add_to_collision_grid>();

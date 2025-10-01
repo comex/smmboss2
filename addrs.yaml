@@ -38,6 +38,7 @@ edb8feede2bfa3ffd1adf65a4424361a00000000000000000000000000000000:
         scol_true_outmost: 0xe192f0
         cctx_bg_collide_against_twopoint: 0xe2d240
         cctx_bg_collide_against_point: 0xe2dc60
+        huge_frame_func: 0x16c2bd0
 
         grab_runtime_asset_name_from_elmdtree: 0x0131f230
 

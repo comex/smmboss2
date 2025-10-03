@@ -449,7 +449,8 @@ static StupidHash<UInt48, uint64_t, 3079> s_hashed_scols;
 static StupidHash<UInt48, Nothing, 3079> s_hitboxes_this_frame;
 
 void note_new_hose_connection() { // run on hose thread
-    g_cur_rpc_flags.fetch_or(RPC_FLAG_SEND_COLLS, std::memory_order_release);
+    //g_cur_rpc_flags.fetch_or(RPC_FLAG_SEND_COLLS, std::memory_order_release);
+    // TODO: make this unnecessary
 }
 
 static void report_hitbox(mm_hitbox *hb, bool surprise) {
@@ -642,6 +643,10 @@ HOOK_DEFINE_TRAMPOLINE(Stub_grab_runtime_asset_name_from_elmdtree) {
 HOOK_DEFINE_TRAMPOLINE(Stub_huge_frame_func) {
     static void Callback(void *self) {
         mem_monitor_do_reads();
+        while (test_rpc_flag(RPC_FLAG_PAUSE)) {
+            wait_until_set_flags_req_clears(RPC_FLAG_PAUSE);
+            // TODO: why does busylooping block other threads?  is our cpu mask wrong?
+        }
         Orig(self);
     }
     static constexpr auto GetAddr = &mm_addrs::huge_frame_func;

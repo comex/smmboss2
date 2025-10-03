@@ -8,6 +8,7 @@ import sys
 import shell
 import threading
 import asyncio
+from enum import Flag
 
 def must_read(fp, n):
     ret = fp.read(n)
@@ -16,6 +17,13 @@ def must_read(fp, n):
 
 def read64(fp):
     return struct.unpack('<Q', fp.read(8))[0]
+
+
+class RPCFlags(Flag):
+    BACKPRESSURE = 1
+    SEND_COLLS = 2
+    SEND_BG_EVENTS = 4
+    PAUSE = 8
 
 class RPCGuest(smmboss.Guest):
     def __init__(self, base_url, lifeboat={}):
@@ -95,29 +103,29 @@ class RPCGuest(smmboss.Guest):
             self.connect() # ignore hello
             self.ws.send(data)
 
+    def send_and_recv(self, data):
+        self.send_with_reconnect(data)
+        resp = self.ws.recv()
+        if isinstance(resp, str):
+            raise Exception(f"error: {resp!r}")
+        assert isinstance(resp, bytes)
+        return resp
+
     def try_read(self, addr, size):
-        self.send_with_reconnect(struct.pack('<BQQ',
+        resp = self.send_and_recv(struct.pack('<BQQ',
             1, # RPC_REQ_READ
             addr,
             size
         ))
-        resp = self.ws.recv()
-        if isinstance(resp, str):
-            raise Exception(f"read error: {resp!r}")
-        assert isinstance(resp, bytes)
         assert len(resp) <= size
         return resp
 
     def try_write(self, addr, data):
-        self.send_with_reconnect(struct.pack('<BQQ',
+        resp = self.send_and_recv(struct.pack('<BQQ',
             2, # RPC_REQ_WRITE
             addr,
             len(data)
         ) + data)
-        resp = self.ws.recv()
-        if isinstance(resp, str):
-            raise Exception(f"write error: {resp!r}")
-        assert isinstance(resp, bytes)
         assert len(resp) == 8
         actual = struct.unpack('<Q', resp)[0]
         assert actual <= len(data)
@@ -126,16 +134,41 @@ class RPCGuest(smmboss.Guest):
     def set_monitor_config(self, addr_lens):
         data = struct.pack('<BQQ',
             5, # RPC_REQ_SET_MONITOR_CONFIG,
-            1234, # uniqid
-            len(addr_lens), # entry_count
+            1234 if addr_lens is not None else 0, # uniqid
+            len(addr_lens) if addr_lens is not None else 0, # entry_count
         )
-        for addr, length in addr_lens:
-            data += struct.pack('<QQ', addr, length)
-        self.send_with_reconnect(data)
-        resp = self.ws.recv()
-        if isinstance(resp, str):
-            raise Exception(f"error: {resp!r}")
+        if addr_lens:
+            for addr, length in addr_lens:
+                data += struct.pack('<QQ', addr, length)
+        resp = self.send_and_recv(data)
         assert len(resp) == 0
+
+    def set_flags_impl(self, set=RPCFlags(0), clear=RPCFlags(0)):
+        assert isinstance(set, RPCFlags)
+        assert isinstance(clear, RPCFlags)
+        resp = self.send_and_recv(struct.pack('<BQQ',
+            4, # RPC_REQ_SET_FLAGS,
+            clear.value,
+            set.value
+        ))
+        assert len(resp) == 8
+        return RPCFlags(struct.unpack('<Q', resp)[0])
+
+    def set_flags(self, backpressure=None, send_colls=None, send_bg_events=None, pause=None):
+        set = clear = RPCFlags(0)
+        for (flag, val) in [
+            (RPCFlags.BACKPRESSURE, backpressure),
+            (RPCFlags.SEND_COLLS, send_colls),
+            (RPCFlags.SEND_BG_EVENTS, send_bg_events),
+            (RPCFlags.PAUSE, pause),
+        ]:
+            if val is True:
+                set |= flag
+            elif val is False:
+                clear |= flag
+            elif val is not None:
+                raise Exception(f'unexpected value {val!r}')
+        return self.set_flags_impl(set=set, clear=clear)
 
 import random
 foo = random.randint(1, 1000)

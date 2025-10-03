@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <array>
+#include <condition_variable>
 #include <vector>
 #include <algorithm>
 #include <mutex>
@@ -17,6 +18,12 @@
 #include "../../externals/mongoose/mongoose.h"
 
 #include "nn/time/time_timespan.hpp"
+#include "nn/os/os_thread_api.hpp"
+
+std::atomic<uint64_t> g_cur_rpc_flags = 0;
+
+static std::mutex s_set_flags_req_mutex;
+static std::condition_variable s_set_flags_req_cond;
 
 size_t add_ws_header_size(size_t size) {
     if (size < 126) {
@@ -50,12 +57,28 @@ uint8_t *fill_ws_header(uint8_t *p, size_t size) {
     }
 }
 
-static void start_thread(const char *name, void *(*f)(void *), void *ctx) {
+template <typename F>
+static void start_thread(const char *name, F &&func) {
     pthread_attr_t attr;
     assert(!pthread_attr_init(&attr));
     assert(!pthread_attr_setstacksize(&attr, 0x4000));
     pthread_t pt;
-    int create_ret = pthread_create(&pt, &attr, f, ctx);
+
+    auto wrapper = [func = std::move(func)] -> void * {
+        nn::os::SetThreadCoreMask(nn::os::GetCurrentThread(), /*ideal_core*/1, /*affinity_mask*/ nn::os::GetThreadAvailableCoreMask());
+        func();
+        return nullptr;
+    };
+    using Wrapper = decltype(wrapper);
+    Wrapper *heap_wrapper = new Wrapper(std::move(wrapper));
+
+    void *(*callout)(void *) = [](void *ctx) -> void * {
+        Wrapper *heap_wrapper_ = (Wrapper *)ctx;
+        Wrapper third_wrapper = std::move(*heap_wrapper_);
+        delete heap_wrapper_;
+        return third_wrapper();
+    };
+    int create_ret = pthread_create(&pt, &attr, callout, heap_wrapper);
     assert(!create_ret);
     int setname_ret = pthread_setname_np(pt, name);
     assert(!setname_ret);
@@ -131,7 +154,7 @@ private:
 
 public:
     size_t accessible_bytes_at(uintptr_t addr, bool want_write) {
-        std::lock_guard lk(mutex_);
+        std::unique_lock lk(mutex_);
         // This assumes that mapped things are never unmapped or have their
         // protections changed, but non-mapped things might be mapped later.
         // It would be easier to just yolo the access and install an exception
@@ -631,9 +654,13 @@ private:
                 goto err;
             }
             uint64_t new_flags;
-            atomic_update(&g_cur_rpc_flags, std::memory_order_acq_rel, [&](uint64_t *flags) {
-                new_flags = *flags = (*flags & ~req->set_flags.clear) | req->set_flags.set;
-            });
+            {
+                std::unique_lock lk(s_set_flags_req_mutex);
+                atomic_update(&g_cur_rpc_flags, std::memory_order_acq_rel, [&](uint64_t *flags) {
+                    new_flags = *flags = (*flags & ~req->set_flags.clear) | req->set_flags.set;
+                });
+                s_set_flags_req_cond.notify_all();
+            }
 
             s_hose.set_enable_backpressure(new_flags & RPC_FLAG_BACKPRESSURE);
             mg_ws_send(c, &new_flags, sizeof(new_flags), WEBSOCKET_OP_BINARY);
@@ -749,6 +776,15 @@ private:
 
 static mongoose_server s_mongoose_server;
 
+static void dump_core_info() {
+    s32 ideal_core;
+    u64 affinity_mask;
+    nn::os::GetThreadCoreMask(&ideal_core, &affinity_mask, nn::os::GetCurrentThread());
+    u64 avail_mask = nn::os::GetThreadAvailableCoreMask();
+    const char *name = nn::os::GetThreadNamePointer(nn::os::GetCurrentThread());
+    xprintf("thread %s: ideal=%d affinity=%lx avail=%lx\n", name, ideal_core, affinity_mask, avail_mask);
+}
+
 static char s_socket_heap[0x600000] alignas(0x1000);
 void serve_main() {
     int e = nnsocketInitialize(s_socket_heap, sizeof(s_socket_heap), 0x20000, 0xe);
@@ -757,16 +793,24 @@ void serve_main() {
     }
     s_main_thread = pthread_self();
     s_hose.init();
-    start_thread("hose", [](void *ignored) -> void * {
+    dump_core_info();
+    start_thread("hose", []{
+        dump_core_info();
         s_hose_thread = pthread_self();
         s_hose.thread_func();
         return nullptr;
-    }, nullptr);
-    start_thread("mongoose", [](void *ignored) -> void * {
+    });
+    start_thread("mongoose", []{
+        dump_core_info();
         s_mongoose_thread = pthread_self();
         s_mongoose_server.serve();
         return nullptr;
-    }, nullptr);
+    });
 }
 
-std::atomic<uint64_t> g_cur_rpc_flags = 0;
+void wait_until_set_flags_req_clears(uint64_t flags) {
+    std::unique_lock lk(s_set_flags_req_mutex);
+    while ((g_cur_rpc_flags.load(std::memory_order_relaxed) & flags) == flags) {
+        s_set_flags_req_cond.wait(lk);
+    }
+}

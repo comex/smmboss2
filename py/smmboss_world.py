@@ -239,6 +239,7 @@ class Actor(ActorBase):
     _ofs = 0 if mm.version >= 300 else 8
     loc = prop(0x230 - _ofs, Point3D)
     houvelo = prop(0x23c - _ofs, Point3D)
+    angle = prop(0x268 - _ofs, u32)
     rngthing = prop(0x26c - _ofs, u32)
     source_xvel = prop(0x274 - _ofs, f32)
     source_xvel_goal = prop(0x278 - _ofs, f32)

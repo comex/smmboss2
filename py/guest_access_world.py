@@ -56,7 +56,7 @@ def make_GuestPrimPtr(code, class_name):
         sizeof_star = size
         @staticmethod
         def decode_data(data):
-            return struct.unpack(code, data)[0]
+            return struct.unpack(code, data[:size])[0]
         @staticmethod
         def encode_data(val):
             return struct.pack(code, val)
@@ -143,6 +143,7 @@ class GuestArray(GuestPtr):
     def get(self):
         return self
     def get_all(self, decoder=None):
+        # TODO: this should just be a decode_data impl combined with something else?
         count = self.count
         sizeof_elm = self.ptr_ty.sizeof_star
         if decoder is None:
@@ -290,6 +291,15 @@ class GuestStruct(GuestPtr):
 
     @classmethod
     @functools.cache
+    def _decodable_properties(cls):
+        return [
+            (key, prop)
+            for (key, prop) in cls._properties()
+            if hasattr(prop.ptr_cls, 'decode_data')
+        ]
+
+    @classmethod
+    @functools.cache
     def _properties(cls):
         return [
             (key, prop)
@@ -304,6 +314,16 @@ class GuestStruct(GuestPtr):
         if (issubclass(base, GuestStruct) and
             base is not GuestStruct):
             return base
+
+    @classmethod
+    def decode_data(cls, data):
+        # TODO: why is this not autoreloading?
+        ret = {}
+        for key, prop in cls._decodable_properties():
+            start = prop.offset
+            assert start <= len(data)
+            ret[key] = prop.ptr_cls.decode_data(data[start:])
+        return ret
 
 class GuestCString(GuestPtr):
     def sizeof_star(self):

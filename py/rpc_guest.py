@@ -8,6 +8,8 @@ import sys
 import shell
 import threading
 import asyncio
+import random
+from queue import Queue
 from enum import Flag
 
 def must_read(fp, n):
@@ -29,7 +31,11 @@ class RPCGuest(smmboss.Guest):
     def __init__(self, base_url, lifeboat={}):
         self.base_url = base_url
 
-        self.hose_data = lifeboat.get('hose_data', [])
+        self.hose_data = lifeboat.get('hose_data', Queue())
+        self.lock = threading.Lock()
+        # TODO: asyncio here was intended to allow fast cancellation, but it
+        # doesn't even work properly.  maybe we can just share the socket in
+        # the lifeboat
         self.async_loop = asyncio.new_event_loop()
         self.async_thread = threading.Thread(target=self.async_thread_func, daemon=True)
         self.async_thread.start()
@@ -42,7 +48,7 @@ class RPCGuest(smmboss.Guest):
         self.ws.close()
         self.async_loop.call_soon_threadsafe(self.kill_async)
         #self.async_thread.join() <-- seems like websockets is broken and only cancels after quite a while, yay
-        return {'hose_data': self.hose_data[:]}
+        return {'hose_data': self.hose_data}
 
     def kill_async(self):
         print('cancelling', file=sys.stderr)
@@ -91,7 +97,7 @@ class RPCGuest(smmboss.Guest):
                             print('hose disconnected', file=sys.stderr)
                             break
                         else:
-                            self.hose_data.append(resp)
+                            self.hose_data.put(resp)
                 finally:
                     await hose_socket.close() # why do I have to do this?
             print('<<')
@@ -104,12 +110,13 @@ class RPCGuest(smmboss.Guest):
             self.ws.send(data)
 
     def send_and_recv(self, data):
-        self.send_with_reconnect(data)
-        resp = self.ws.recv()
-        if isinstance(resp, str):
-            raise Exception(f"error: {resp!r}")
-        assert isinstance(resp, bytes)
-        return resp
+        with self.lock:
+            self.send_with_reconnect(data)
+            resp = self.ws.recv()
+            if isinstance(resp, str):
+                raise Exception(f"error: {resp!r}")
+            assert isinstance(resp, bytes)
+            return resp
 
     def try_read(self, addr, size):
         resp = self.send_and_recv(struct.pack('<BQQ',
@@ -121,20 +128,19 @@ class RPCGuest(smmboss.Guest):
         return resp
 
     def try_write(self, addr, data):
-        resp = self.send_and_recv(struct.pack('<BQQ',
+        resp = self.send_and_recv(struct.pack('<BQ',
             2, # RPC_REQ_WRITE
             addr,
-            len(data)
         ) + data)
         assert len(resp) == 8
         actual = struct.unpack('<Q', resp)[0]
-        assert actual <= len(data)
+        assert actual <= len(data), (resp, data, actual, len(data))
         return actual
 
-    def set_monitor_config(self, addr_lens):
+    def set_monitor_config(self, addr_lens, uniqid=1234):
         data = struct.pack('<BQQ',
             5, # RPC_REQ_SET_MONITOR_CONFIG,
-            1234 if addr_lens is not None else 0, # uniqid
+            uniqid if addr_lens is not None else 0, # uniqid
             len(addr_lens) if addr_lens is not None else 0, # entry_count
         )
         if addr_lens:
@@ -170,7 +176,38 @@ class RPCGuest(smmboss.Guest):
                 raise Exception(f'unexpected value {val!r}')
         return self.set_flags_impl(set=set, clear=clear)
 
-import random
+    def monitor(self, guest_ptrs):
+        was_paused = bool(self.set_flags_impl() & RPCFlags.PAUSE)
+        addr_lens = [(p.addr, p.sizeof_star) for p in guest_ptrs]
+        uniqid = random.randint(1, (1 << 64) - 1)
+        try:
+            self.set_monitor_config(addr_lens, uniqid)
+            # ok, now get ready for new data
+            if was_paused:
+                self.set_flags(pause=False)
+            while True:
+                data = self.hose_data.get()
+                assert data.startswith(b'memmon\0\0')
+                fp = io.BytesIO(data)
+                magic = must_read(fp, 8)
+                if magic != b'memmon\0\0':
+                    print('ignoring non-memmon:', data, file=sys.stderr)
+                    continue
+                seen_uniqid = read64(fp)
+                if seen_uniqid != uniqid:
+                    print('ignoring stale memmon:', data, file=sys.stderr)
+                    continue
+                vals = []
+                for ((_, length), p) in zip(addr_lens, guest_ptrs):
+                    my_data = must_read(fp, length)
+                    vals.append(p.decode_data(my_data))
+                assert fp.read() == b''
+                print(vals)
+        finally:
+            self.set_monitor_config(None)
+            if was_paused:
+                self.set_flags(pause=True)
+
 foo = random.randint(1, 1000)
 print('Hello', foo)
 

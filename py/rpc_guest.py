@@ -9,18 +9,16 @@ import guest_access
 import smmboss
 import struct
 import websockets.sync.client
-import websockets.asyncio.client
 import io
 import sys
 import shell
 import threading
-import asyncio
 import random
 import traceback
 import faulthandler
 import signal
+import queue
 from concurrent.futures import ThreadPoolExecutor, Future
-from queue import Queue
 from enum import Flag
 
 if hasattr(signal, 'SIGINFO'):
@@ -43,7 +41,7 @@ class RPCFlags(Flag):
 
 class RPCConn:
     def __init__(self, base_url):
-        self.response_queue = Queue()
+        self.response_queue = queue.Queue()
         self.lock = threading.Lock()
 
         self.ws = websockets.sync.client.connect(f'{base_url}/ws/rpc')
@@ -76,6 +74,32 @@ class RPCConn:
                 f = self.response_queue.get_nowait()
                 f.set_exception(the_exc)
 
+class HoseConn:
+    def __init__(self, base_url):
+        self.ws = websockets.sync.client.connect(f'{base_url}/ws/hose')
+        self.queue = queue.Queue()
+        threading.Thread(target=self.recv_thread_func, daemon=True).start()
+
+    def recv_thread_func(self):
+        while True:
+            try:
+                resp = self.ws.recv()
+            except websockets.ConnectionClosedError as e:
+                self.shutdown()
+                raise
+            try:
+                self.queue.put(resp)
+            except queue.ShutDown:
+                break
+
+    def shutdown(self):
+        self.queue.shutdown()
+        threading.Thread(target=self.ws.close, daemon=True).start()
+
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        self.shutdown()
 
 class RPCGuest(smmboss.Guest):
     def __init__(self, base_url, lifeboat={}):
@@ -84,14 +108,6 @@ class RPCGuest(smmboss.Guest):
         self.lock = threading.Lock()
         self.executor = ThreadPoolExecutor()
         self.rpc_resp_queue = []
-
-        self.hose_data = lifeboat.get('hose_data', Queue())
-        # TODO: asyncio here was intended to allow fast cancellation, but it
-        # doesn't even work properly.  maybe we can just share the socket in
-        # the lifeboat
-        self.async_loop = asyncio.new_event_loop()
-        self.async_thread = threading.Thread(target=self.async_thread_func, daemon=True)
-        self.async_thread.start()
 
         self.conn = None
         self.connect(if_conn_is=None)
@@ -135,30 +151,15 @@ class RPCGuest(smmboss.Guest):
     def extract_image_info(self):
         return self.image_infos
 
+    def connect_hose(self):
+        return HoseConn(self.base_url)
+
     def connect(self, if_conn_is):
         with self.lock:
             if self.conn is if_conn_is:
                 if self.conn is not None:
                     self.conn.shutdown()
                 self.conn = RPCConn(self.base_url)
-
-    async def hose(self):
-        while True:
-            async with websockets.asyncio.client.connect(f'{self.base_url}/ws/hose') as hose_socket:
-                try:
-                    print('hose connected', file=sys.stderr)
-                    while True:
-                        try:
-                            resp = await hose_socket.recv()
-                        except websockets.ConnectionClosedError:
-                            traceback.print_exc()
-                            print('hose disconnected', file=sys.stderr)
-                            break
-                        else:
-                            self.hose_data.put(resp)
-                finally:
-                    await hose_socket.close() # why do I have to do this?
-            print('<<')
 
     def send_and_recv(self, data):
         try:
@@ -241,28 +242,29 @@ class RPCGuest(smmboss.Guest):
         addr_lens = [(p.addr, p.sizeof_star) for p in guest_ptrs]
         uniqid = random.randint(1, (1 << 64) - 1)
         try:
-            self.set_monitor_config(addr_lens, uniqid)
-            # ok, now get ready for new data
-            if was_paused:
-                self.set_flags(pause=False)
-            while True:
-                data = self.hose_data.get()
-                assert data.startswith(b'memmon\0\0')
-                fp = io.BytesIO(data)
-                magic = must_read(fp, 8)
-                if magic != b'memmon\0\0':
-                    print('ignoring non-memmon:', data, file=sys.stderr)
-                    continue
-                seen_uniqid = read64(fp)
-                if seen_uniqid != uniqid:
-                    print('ignoring stale memmon:', data, file=sys.stderr)
-                    continue
-                vals = []
-                for ((_, length), p) in zip(addr_lens, guest_ptrs):
-                    my_data = must_read(fp, length)
-                    vals.append(p.decode_data(my_data))
-                assert fp.read() == b''
-                print(vals)
+            with self.connect_hose() as hose_conn:
+                self.set_monitor_config(addr_lens, uniqid)
+                # ok, now get ready for new data
+                if was_paused:
+                    self.set_flags(pause=False)
+                while True:
+                    data = hose_conn.queue.get()
+                    assert data.startswith(b'memmon\0\0')
+                    fp = io.BytesIO(data)
+                    magic = must_read(fp, 8)
+                    if magic != b'memmon\0\0':
+                        print('ignoring non-memmon:', data, file=sys.stderr)
+                        continue
+                    seen_uniqid = read64(fp)
+                    if seen_uniqid != uniqid:
+                        print('ignoring stale memmon:', data, file=sys.stderr)
+                        continue
+                    vals = []
+                    for ((_, length), p) in zip(addr_lens, guest_ptrs):
+                        my_data = must_read(fp, length)
+                        vals.append(p.decode_data(my_data))
+                    assert fp.read() == b''
+                    print(vals)
         finally:
             self.set_monitor_config(None)
             if was_paused:

@@ -239,6 +239,14 @@ class ActorBase(GuestStruct):
         except:
             return f'?Actor?@{self.addr:#x}'
 
+    def downcast(self):
+        # todo: be smarter?
+        if self.objrec.get_name().startswith('Edit'):
+            return EditActor(self)
+        else:
+            return Actor(self)
+
+
 class EditActor(ActorBase):
     relly = prop(0x320, ptr_to(Relly))
 
@@ -905,10 +913,30 @@ def print_one_ent(yatsu):
 def print_ent():
     list(guest.par_map(print_one_ent, ActorMgr.get().get_all_actors()))
 
-def actors_named(name):
-   [yatsu
-    for yatsu in ActorMgr.get().mp5.pointers.get_all()
-    if yatsu and yatsu.objrec.get_name_no_idee() == name]
+def find_ents(name=None, x=None, y=None):
+    def filter_ent(yatsu):
+        yatsu = yatsu.downcast()
+        if name is not None:
+            if yatsu.objrec.get_name_no_idee() != name:
+                return None
+        if x is not None:
+            if abs(yatsu.loc.x - x) > 4:
+                return None
+        if y is not None:
+            if abs(yatsu.loc.y - y) > 4:
+                return None
+        return yatsu
+    return [
+        yatsu
+        for yatsu in guest.par_map(filter_ent, ActorMgr.get().get_all_actors())
+        if yatsu is not None
+    ]
+
+def find_ent(*args, **kwargs):
+    ents = find_ents(*args, **kwargs)
+    if len(ents) != 1:
+        raise Exception(f'got {ents} for {args}, {kwargs}')
+    return ents[0]
 
 @commandlike
 def print_timer():

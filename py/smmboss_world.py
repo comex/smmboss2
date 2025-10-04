@@ -189,6 +189,10 @@ class StateMgr(GuestStruct):
                     continue
                 print(f'bv.define_user_symbol(Symbol(sym_type=SymbolType.FunctionSymbol, addr={addr:#x}, short_name={name!r}))')
 
+    def dump_states_as_enum(self):
+        for i, name in enumerate(self.names):
+            print(f'    {name.as_str()} = {i},')
+
 class ObjRec(GuestStruct):
     vt = prop(0, usize)
     ctor = prop(8, usize)
@@ -705,7 +709,13 @@ class OtherTimerRelated(GuestStruct):
     @staticmethod
     def get():
         return guest_read_ptr(OtherTimerRelated, mm.addr.other_timer_related)
-    frames = prop(0x38, u32)
+    time_taken_frames = prop(0x2c, u32)
+    time_limit_frames = prop(0x30, u32)
+    unk_frames = prop(0x38, u32)
+    unk2frames = prop(0x40, u32)
+
+    def time_left(self):
+        return (self.time_limit_frames - self.time_taken_frames) / 60
 
 class BlockKindInfo(GuestStruct):
     bits = prop(0, u32)

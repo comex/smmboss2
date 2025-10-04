@@ -40,6 +40,11 @@ class GDBGuest(smmboss.Guest):
                     'text_start': int(segs[0].attrib['address'], 16),
                 }
 
+    def par_map(self, func, iterable):
+        # TODO: not actually parallel
+        # We must do all calls on the GDB thread:
+        # https://sourceware.org/gdb/current/onlinedocs/gdb.html/Threading-in-GDB.html
+        return map(func, iterable)
 
 def reg(name):
     return int(gdb.parse_and_eval(name))

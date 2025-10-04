@@ -17,8 +17,14 @@ import threading
 import asyncio
 import random
 import traceback
+import faulthandler
+import signal
+from concurrent.futures import ThreadPoolExecutor, Future
 from queue import Queue
 from enum import Flag
+
+if hasattr(signal, 'SIGINFO'):
+    faulthandler.register(signal.SIGINFO)
 
 def must_read(fp, n):
     ret = fp.read(n)
@@ -35,12 +41,51 @@ class RPCFlags(Flag):
     SEND_BG_EVENTS = 4
     PAUSE = 8
 
+class RPCConn:
+    def __init__(self, base_url):
+        self.response_queue = Queue()
+        self.lock = threading.Lock()
+
+        self.ws = websockets.sync.client.connect(f'{base_url}/ws/rpc')
+        self.hello = self.ws.recv()
+
+        threading.Thread(target=self.recv_thread_func, daemon=True).start()
+
+    def shutdown(self):
+        self.ws.close()
+
+    def send_and_recv(self, data):
+        with self.lock:
+            f = Future()
+            self.ws.send(data)
+            self.response_queue.put(f)
+        return f.result()
+
+    def recv_thread_func(self):
+        try:
+            while True:
+                try:
+                    resp = self.ws.recv()
+                except websockets.ConnectionClosedError as e:
+                    the_exc = e
+                f = self.response_queue.get_nowait()
+                f.set_result(resp)
+        finally:
+            self.response_queue.shutdown()
+            while not self.response_queue.empty():
+                f = self.response_queue.get_nowait()
+                f.set_exception(the_exc)
+
+
 class RPCGuest(smmboss.Guest):
     def __init__(self, base_url, lifeboat={}):
         self.base_url = base_url
 
-        self.hose_data = lifeboat.get('hose_data', Queue())
         self.lock = threading.Lock()
+        self.executor = ThreadPoolExecutor()
+        self.rpc_resp_queue = []
+
+        self.hose_data = lifeboat.get('hose_data', Queue())
         # TODO: asyncio here was intended to allow fast cancellation, but it
         # doesn't even work properly.  maybe we can just share the socket in
         # the lifeboat
@@ -48,14 +93,16 @@ class RPCGuest(smmboss.Guest):
         self.async_thread = threading.Thread(target=self.async_thread_func, daemon=True)
         self.async_thread.start()
 
-        hello = self.connect()
-        self.parse_hello(hello)
+        self.conn = None
+        self.connect(if_conn_is=None)
+        self.parse_hello(self.conn.hello)
         super().__init__()
 
     def kill(self):
         self.ws.close()
         self.async_loop.call_soon_threadsafe(self.kill_async)
         #self.async_thread.join() <-- seems like websockets is broken and only cancels after quite a while, yay
+        self.executor.shutdown(wait=False)
         return {'hose_data': self.hose_data}
 
     def kill_async(self):
@@ -88,10 +135,12 @@ class RPCGuest(smmboss.Guest):
     def extract_image_info(self):
         return self.image_infos
 
-    def connect(self):
-        self.ws = websockets.sync.client.connect(f'{self.base_url}/ws/rpc')
-        hello = self.ws.recv()
-        return hello
+    def connect(self, if_conn_is):
+        with self.lock:
+            if self.conn is if_conn_is:
+                if self.conn is not None:
+                    self.conn.shutdown()
+                self.conn = RPCConn(self.base_url)
 
     async def hose(self):
         while True:
@@ -111,21 +160,20 @@ class RPCGuest(smmboss.Guest):
                     await hose_socket.close() # why do I have to do this?
             print('<<')
 
-    def send_with_reconnect(self, data):
-        try:
-            self.ws.send(data)
-        except websockets.ConnectionClosedError:
-            self.connect() # ignore hello
-            self.ws.send(data)
-
     def send_and_recv(self, data):
-        with self.lock:
-            self.send_with_reconnect(data)
-            resp = self.ws.recv()
-            if isinstance(resp, str):
-                raise Exception(f"error: {resp!r}")
-            assert isinstance(resp, bytes)
-            return resp
+        try:
+            conn = self.conn
+            resp = conn.send_and_recv(data)
+        except websockets.ConnectionClosedError:
+            # reconnect, unless someone else did
+            self.connect(if_conn_is=conn)
+            # retry
+            resp = self.conn.send_and_recv(data)
+
+        if isinstance(resp, str):
+            raise Exception(f"error: {resp!r}")
+        assert isinstance(resp, bytes)
+        return resp
 
     def try_read(self, addr, size):
         resp = self.send_and_recv(struct.pack('<BQQ',
@@ -145,6 +193,9 @@ class RPCGuest(smmboss.Guest):
         actual = struct.unpack('<Q', resp)[0]
         assert actual <= len(data), (resp, data, actual, len(data))
         return actual
+
+    def par_map(self, func, iterable):
+        return self.executor.map(func, iterable)
 
     def set_monitor_config(self, addr_lens, uniqid=1234):
         data = struct.pack('<BQQ',

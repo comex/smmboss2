@@ -141,3 +141,7 @@ class CachingGuest(Guest):
 
     def extract_image_info(self):
         return self.backing.extract_image_info()
+
+    def par_map(self, *args, **kwargs):
+        return self.backing.par_map(*args, **kwargs)
+

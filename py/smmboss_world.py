@@ -708,6 +708,9 @@ class ActorMgr(GuestStruct):
     worlds = prop(0x80, count4_ptr(ptr_to(World)))
     idbits_hash = prop(0x110, count4_ptr(GuestPtr))
 
+    def get_all_actors(self):
+        return [yatsu for yatsu in self.mp5.pointers.get_all() if yatsu]
+
 class OtherTimerRelated(GuestStruct):
     @staticmethod
     def get():
@@ -888,21 +891,19 @@ def print_idees():
         objrec = ObjRec.by_idee(idee)
         print(f'{idee:x} -> {objrec.base_name},{objrec.variation_name} {objrec.get_name()} or={objrec}')
 
+def print_one_ent(yatsu):
+    name = yatsu.objrec.get_name()
+    if name.startswith('Edit'):
+        yatsu = yatsu.cast(EditActor)
+        relly = yatsu.relly
+        loc_str = '%f,%f' % (relly.x, relly.y)
+    else:
+        yatsu = yatsu.cast(Actor)
+        loc_str = '%f,%f' % (yatsu.loc.x, yatsu.loc.y)
+    print(f'{name} @ {loc_str} {yatsu} {yatsu.idbits:#x}')
 @commandlike
 def print_ent():
-   for yatsu in ActorMgr.get().mp5.pointers.get_all():
-        if yatsu and (
-            True
-        ):
-            name = yatsu.objrec.get_name()
-            if name.startswith('Edit'):
-                yatsu = yatsu.cast(EditActor)
-                relly = yatsu.relly
-                loc_str = '%f,%f' % (relly.x, relly.y)
-            else:
-                yatsu = yatsu.cast(Actor)
-                loc_str = '%f,%f' % (yatsu.loc.x, yatsu.loc.y)
-            print(f'{name} @ {loc_str} {yatsu} {yatsu.idbits:#x}')
+    list(guest.par_map(print_one_ent, ActorMgr.get().get_all_actors()))
 
 def actors_named(name):
    [yatsu

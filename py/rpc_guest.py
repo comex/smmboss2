@@ -1,3 +1,10 @@
+# /// script
+# dependencies = [
+#     "pyyaml",
+#     "ipython",
+#     "websockets",
+# ]
+# ///
 import guest_access
 import smmboss
 import struct
@@ -9,6 +16,7 @@ import shell
 import threading
 import asyncio
 import random
+import traceback
 from queue import Queue
 from enum import Flag
 
@@ -94,6 +102,7 @@ class RPCGuest(smmboss.Guest):
                         try:
                             resp = await hose_socket.recv()
                         except websockets.ConnectionClosedError:
+                            traceback.print_exc()
                             print('hose disconnected', file=sys.stderr)
                             break
                         else:

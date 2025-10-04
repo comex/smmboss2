@@ -203,8 +203,11 @@ class ObjRec(GuestStruct):
 
     @functools.lru_cache(None)
     def get_name(self):
-        name = self.variation_name.as_str() or self.base_name.as_str()
-        return '%s(%x)' % (name, self.idee)
+        return '%s(%x)' % (self.get_name_no_idee(), self.idee)
+
+    @functools.lru_cache(None)
+    def get_name_no_idee(self):
+        return self.variation_name.as_str() or self.base_name.as_str()
 
     @staticmethod
     @functools.lru_cache(None)
@@ -900,6 +903,11 @@ def print_ent():
                 yatsu = yatsu.cast(Actor)
                 loc_str = '%f,%f' % (yatsu.loc.x, yatsu.loc.y)
             print(f'{name} @ {loc_str} {yatsu} {yatsu.idbits:#x}')
+
+def actors_named(name):
+   [yatsu
+    for yatsu in ActorMgr.get().mp5.pointers.get_all()
+    if yatsu and yatsu.objrec.get_name_no_idee() == name]
 
 @commandlike
 def print_timer():

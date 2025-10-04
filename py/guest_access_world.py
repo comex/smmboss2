@@ -317,7 +317,6 @@ class GuestStruct(GuestPtr):
 
     @classmethod
     def decode_data(cls, data):
-        # TODO: why is this not autoreloading?
         ret = {}
         for key, prop in cls._decodable_properties():
             start = prop.offset

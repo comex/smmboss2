@@ -30,10 +30,14 @@ class MM:
     def __init__(self):
         raise 'do not call'
 
+    def _init(self):
+        self._world = None
+
     @classmethod
     def with_guest(cls, guest):
         self = cls.__new__(cls)
         self.guest = guest
+        self._init()
         self.extract_image_info_etc()
         self.process_main_image_info()
         return self
@@ -42,6 +46,7 @@ class MM:
     def detached(cls, build_id):
         self = cls.__new__(cls, 42)
         self.guest = None
+        self._init()
         self.main_image_info = {
             'build_id': build_id,
         }
@@ -130,6 +135,8 @@ class MM:
         world._import('smmboss_world.py')
         return world
 
-    @functools.cached_property
+    @property
     def world(self):
-        return self.make_world()
+        if self._world is None or self._world.stale_code:
+            self._world = self.make_world()
+        return self._world

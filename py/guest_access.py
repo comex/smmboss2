@@ -1,11 +1,24 @@
-import functools, struct, os
+import functools, struct, os, weakref
 
-extra_dep_filenames = set()
+extra_dep_filenames = {} # path -> mtime
+all_worlds = weakref.WeakKeyDictionary()
+
+def mark_worlds_stale():
+    for world in all_worlds:
+        world.stale_code = True
+
+def mark_worlds_stale_if_necessary():
+    for filename, mtime in extra_dep_filenames.items():
+        if os.path.getmtime(filename) != mtime:
+            mark_worlds_stale()
 
 class World:
+    def __init__(self):
+        self.stale_code = False
+        all_worlds[self] = None
     def _import(self, filename):
         filename = os.path.join(os.path.dirname(__file__), filename)
-        extra_dep_filenames.add(filename) # used by export.py
+        extra_dep_filenames[filename] = os.path.getmtime(filename) # used by export.py and shell.py
         code = compile(open(filename).read(), filename, 'exec')
         exec(code, self.__dict__)
 

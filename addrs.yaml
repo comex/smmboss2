@@ -28,7 +28,6 @@ edb8feede2bfa3ffd1adf65a4424361a00000000000000000000000000000000:
         scol_subclass_vt20: 0xe23a70
         normal_collider_vt20: 0xdd0e00
 
-        # 
         StateMachine_changeState: 0x8b9280
         hitbox_vtable: 0x28694a0
         hitbox_collide: 0xe28a50
@@ -41,6 +40,12 @@ edb8feede2bfa3ffd1adf65a4424361a00000000000000000000000000000000:
         huge_frame_func: 0x16c2bd0
 
         grab_runtime_asset_name_from_elmdtree: 0x0131f230
+
+        # ActorBase metaclasses: These are the return values of the second
+        # method of the vtable.  (The third method returns the type name.)
+        metaclass_EnemyUber: 0x02a55218
+        metaclass_Actor: 0x02a51030
+        metaclass_EditActor: 0x02a90e78
 
 aac32b77fb8e040b18e5940f37ca6c7f00000000000000000000000000000000:
     version: 302

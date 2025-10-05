@@ -3,6 +3,7 @@
 #     "pyyaml",
 #     "ipython",
 #     "websockets",
+#     "unicorn",
 # ]
 # ///
 import guest_access

@@ -189,7 +189,7 @@ class StateMgr(GuestStruct):
                     continue
                 print(f'bv.define_user_symbol(Symbol(sym_type=SymbolType.FunctionSymbol, addr={addr:#x}, short_name={name!r}))')
 
-    def dump_states_as_enum(self):
+    def dump_states_enum(self):
         for i, name in enumerate(self.names):
             print(f'    {name.as_str()} = {i},')
 
@@ -227,8 +227,29 @@ class Relly(GuestStruct):
     y2 = prop(0x120, f32)
     z2 = prop(0x124, f32)
 
+class VtableForActorBase(GuestStruct):
+    _instance_cacheable = True
+    dyn_cast = prop(0, GuestPtrPtr)
+    get_metaclass = prop(8, GuestPtrPtr)
+    get_name = prop(0x10, GuestPtrPtr)
+
+    @functools.cache
+    def is_subclass_of(self, metaclass: int) -> bool:
+        emu = emulate_call(self.dyn_cast.addr, x0=0, x1=metaclass)
+        return bool(emu.regs.x0)
+
+    @functools.cached_property
+    def metaclass(self) -> int:
+        emu = emulate_call(self.get_metaclass.addr, x0=0)
+        return emu.regs.x0
+
+    @functools.cached_property
+    def class_name(self) -> str:
+        emu = emulate_call(self.get_name.addr, x0=0)
+        return emu.guest.read_cstr(emu.regs.x0)
+
 class ActorBase(GuestStruct):
-    vtable = prop(0, GuestPtrPtr)
+    vtable = prop(0, ptr_to(VtableForActorBase))
     idbits = prop(0x30, s32)
     objrec = prop(0x38, lambda: ptr_to(ObjRec))
     world = prop(0x48, lambda: ptr_to(World)) # ?
@@ -241,17 +262,22 @@ class ActorBase(GuestStruct):
 
     def downcast(self):
         # todo: be smarter?
-        if self.objrec.get_name().startswith('Edit'):
+        vtable = self.vtable
+        if vtable.is_subclass_of(mm.addr.metaclass_EnemyUber):
+            return EnemyUber(self)
+        elif vtable.is_subclass_of(mm.addr.metaclass_Actor):
+            return Actor(self)
+        elif vtable.is_subclass_of(mm.addr.metaclass_EditActor):
             return EditActor(self)
         else:
-            return Actor(self)
+            return self
 
 
 class EditActor(ActorBase):
     relly = prop(0x320, ptr_to(Relly))
 
 class Actor(ActorBase):
-    _ofs = 0 if mm.version >= 300 else 8
+    _ofs = 0 if mm.version >= 300 else 8 # ...this probably doesn't actually work on older versions
     loc = prop(0x230 - _ofs, Point3D)
     houvelo = prop(0x23c - _ofs, Point3D)
     angle = prop(0x268 - _ofs, u32)
@@ -260,6 +286,20 @@ class Actor(ActorBase):
     source_xvel_goal = prop(0x278 - _ofs, f32)
     gravity = prop(0x280 - _ofs, f32)
     source_xvel_step = prop(0x284 - _ofs, f32)
+
+class EnemyUber(Actor):
+    p_enemysys_state_manager = prop(0x3f0, ptr_to(StateMgr))
+    enemysys_state_manager = prop(0x3f8, StateMgr)
+    something_of_me = prop(0x4e8, GuestPtrPtr)
+    helpers_by_state = prop(0x440, fixed_array(GuestPtrPtr, 0x13))
+    tower_manager_idbits = prop(0x600, u64)
+    bounds = prop(0x610, fixed_array(f32, 4))
+    tower_member_under_me_idbits = prop(0x620, u64)
+    tower_member_over_me_idbits = prop(0x628, u64)
+    floor_y = prop(0x640, f32)
+    old_floor_y = prop(0x644, f32)
+    scolwrap_for_enemyuber = prop(0x650, lambda: ptr_to(ScolWrap))
+    callback_for_boing = prop(0xc30, GuestPtrPtr)
 
 class ScolNode(GuestStruct):
     node = prop(0, SeadListNode)
@@ -358,10 +398,10 @@ class Scol(GuestStruct):
     # ridden_by_scol_lists[(2,3,1,0)[i]]
 
 
-class PlayerScolWrap(GuestStruct):
+class ScolWrap(GuestStruct):
     scol = prop(0x10, Scol)
 class Player(Actor):
-    scol_wrap = prop(0x12a0, PlayerScolWrap)
+    scol_wrap = prop(0x12a0, ScolWrap)
 
 class LiftSegmentIsh(GuestStruct):
     smgr = prop(0xd0, StateMgr)
@@ -716,8 +756,10 @@ class ActorMgr(GuestStruct):
     worlds = prop(0x80, count4_ptr(ptr_to(World)))
     idbits_hash = prop(0x110, count4_ptr(GuestPtr))
 
-    def get_all_actors(self):
+    def get_all_actors_nocast(self):
         return [yatsu for yatsu in self.mp5.pointers.get_all() if yatsu]
+    def get_all_actors(self):
+        return list(guest.par_map(ActorBase.downcast, self.get_all_actors_nocast()))
 
 class OtherTimerRelated(GuestStruct):
     @staticmethod
@@ -781,11 +823,11 @@ class CoinMan(GuestStruct):
     def get():
         return guest_read_ptr(CoinMan, mm.addr.coinman)
 
-class BgUnitGroupTypeSpecificVtable(GuestStruct):
+class VtableForBgUnitGroupTypeSpecific(GuestStruct):
     get_name = prop(0x50, GuestPtrPtr)
 
 class BgUnitGroupTypeSpecific(GuestStruct):
-    vt = prop(0, ptr_to(BgUnitGroupTypeSpecificVtable))
+    vt = prop(0, ptr_to(VtableForBgUnitGroupTypeSpecific))
     @functools.cached_property
     def name(self):
         emu = emulate_call(self.vt.get_name.addr, x0=self.addr)
@@ -911,7 +953,7 @@ def print_one_ent(yatsu):
     print(f'{name} @ {loc_str} {yatsu} {yatsu.idbits:#x}')
 @commandlike
 def print_ent():
-    list(guest.par_map(print_one_ent, ActorMgr.get().get_all_actors()))
+    list(guest.par_map(print_one_ent, ActorMgr.get().get_all_actors_nocast()))
 
 def find_ents(name=None, x=None, y=None):
     def filter_ent(yatsu):

@@ -6,6 +6,22 @@ class GuestPtrMeta(type):
         # though it doesn't bind tightly - you would need parens in (Foo@0x1234).bar
         return self(addr)
 
+    def __init__(cls, name, bases, attributes):
+        super().__init__(name, bases, attributes)
+        if getattr(cls, '_instance_cacheable', False):
+            cls._instance_cache = {}
+        else:
+            cls._instance_cache = None
+    def __call__(cls, *args, **kwargs):
+        if (cache := cls._instance_cache) is not None:
+            assert len(args) == 1 and len(kwargs) == 0
+            addr, = args
+            obj = cache.get(addr)
+            if obj is None:
+                obj = cache[addr] = super().__call__(addr)
+            return obj
+        return super().__call__(*args, **kwargs)
+
 @functools.total_ordering
 class GuestPtr(metaclass=GuestPtrMeta):
     def __init__(self, addr):

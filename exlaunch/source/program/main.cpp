@@ -645,7 +645,6 @@ HOOK_DEFINE_TRAMPOLINE(Stub_huge_frame_func) {
         mem_monitor_do_reads();
         while (test_rpc_flag(RPC_FLAG_PAUSE)) {
             wait_until_set_flags_req_clears(RPC_FLAG_PAUSE);
-            // TODO: why does busylooping block other threads?  is our cpu mask wrong?
         }
         Orig(self);
     }

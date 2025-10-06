@@ -1,11 +1,3 @@
-# /// script
-# dependencies = [
-#     "pyyaml",
-#     "ipython",
-#     "websockets",
-#     "unicorn",
-# ]
-# ///
 import guest_access
 import smmboss
 import struct

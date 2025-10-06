@@ -240,6 +240,7 @@ class VtableForActorBase(GuestStruct):
     def is_subclass_of(self, metaclass: int) -> bool:
         print(f'>>> {self.addr:#x} is_subclass_of {metaclass:#x}', file=sys.stderr)
         # TODO: this is slow especially under GDB.  maybe just keep a persistent cache?
+        # TODO: switch to ruamel.yaml
         emu = emulate_call(self.dyn_cast.addr, x0=0, x1=metaclass, mm=mm)
         return bool(emu.regs.x0)
 

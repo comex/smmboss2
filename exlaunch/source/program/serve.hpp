@@ -158,9 +158,10 @@ void serve_main();
 
 enum rpc_flags : uint64_t {
     RPC_FLAG_BACKPRESSURE = 1,
-    RPC_FLAG_SEND_COLLS = 2,
+    RPC_FLAG_SEND_ALL_COLLS = 2,
     RPC_FLAG_SEND_BG_EVENTS = 4,
     RPC_FLAG_PAUSE = 8,
+    RPC_FLAG_SEND_COLL_STUFF = 0x10,
 };
 
 extern std::atomic<uint64_t> g_cur_rpc_flags;

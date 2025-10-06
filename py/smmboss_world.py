@@ -194,6 +194,8 @@ class StateMgr(GuestStruct):
             print(f'    {name.as_str()} = {i},')
 
 class ObjRec(GuestStruct):
+    _instance_cacheable = True
+
     vt = prop(0, usize)
     ctor = prop(8, usize)
     idee = prop(0x10, u32)
@@ -229,28 +231,45 @@ class Relly(GuestStruct):
 
 class VtableForActorBase(GuestStruct):
     _instance_cacheable = True
+
     dyn_cast = prop(0, GuestPtrPtr)
     get_metaclass = prop(8, GuestPtrPtr)
     get_name = prop(0x10, GuestPtrPtr)
 
     @functools.cache
     def is_subclass_of(self, metaclass: int) -> bool:
-        emu = emulate_call(self.dyn_cast.addr, x0=0, x1=metaclass)
+        print(f'>>> {self.addr:#x} is_subclass_of {metaclass:#x}', file=sys.stderr)
+        # TODO: this is slow especially under GDB.  maybe just keep a persistent cache?
+        emu = emulate_call(self.dyn_cast.addr, x0=0, x1=metaclass, mm=mm)
         return bool(emu.regs.x0)
 
     @functools.cached_property
     def metaclass(self) -> int:
-        emu = emulate_call(self.get_metaclass.addr, x0=0)
+        emu = emulate_call(self.get_metaclass.addr, x0=0, mm=mm)
         return emu.regs.x0
 
     @functools.cached_property
     def class_name(self) -> str:
-        emu = emulate_call(self.get_name.addr, x0=0)
-        return emu.guest.read_cstr(emu.regs.x0)
+        emu = emulate_call(self.get_name.addr, x0=0, mm=mm)
+        return emu.guest.read_cstr(emu.regs.x0).decode()
+
+    @functools.cached_property
+    def python_class(self) -> type:
+        class_name = self.class_name
+        if class_name == 'GameEnemyTowerManager':
+            return GameEnemyTowerManager
+        elif self.is_subclass_of(mm.addr.metaclass_EnemyUber):
+            return EnemyUber
+        elif self.is_subclass_of(mm.addr.metaclass_Actor):
+            return Actor
+        elif self.is_subclass_of(mm.addr.metaclass_EditActor):
+            return EditActor
+        else:
+            return ActorBase
 
 class ActorBase(GuestStruct):
     vtable = prop(0, ptr_to(VtableForActorBase))
-    idbits = prop(0x30, s32)
+    idbits = prop(0x30, u64)
     objrec = prop(0x38, lambda: ptr_to(ObjRec))
     world = prop(0x48, lambda: ptr_to(World)) # ?
     def __repr__(self):
@@ -261,16 +280,7 @@ class ActorBase(GuestStruct):
             return f'?Actor?@{self.addr:#x}'
 
     def downcast(self):
-        # todo: be smarter?
-        vtable = self.vtable
-        if vtable.is_subclass_of(mm.addr.metaclass_EnemyUber):
-            return EnemyUber(self)
-        elif vtable.is_subclass_of(mm.addr.metaclass_Actor):
-            return Actor(self)
-        elif vtable.is_subclass_of(mm.addr.metaclass_EditActor):
-            return EditActor(self)
-        else:
-            return self
+        return self.vtable.python_class(self.addr)
 
 
 class EditActor(ActorBase):
@@ -287,6 +297,9 @@ class Actor(ActorBase):
     gravity = prop(0x280 - _ofs, f32)
     source_xvel_step = prop(0x284 - _ofs, f32)
 
+def actor(addr):
+    return ActorBase(addr).downcast()
+
 class EnemyUber(Actor):
     p_enemysys_state_manager = prop(0x3f0, ptr_to(StateMgr))
     enemysys_state_manager = prop(0x3f8, StateMgr)
@@ -300,6 +313,17 @@ class EnemyUber(Actor):
     old_floor_y = prop(0x644, f32)
     scolwrap_for_enemyuber = prop(0x650, lambda: ptr_to(ScolWrap))
     callback_for_boing = prop(0xc30, GuestPtrPtr)
+
+class GameEnemyTowerManager_Entry(GuestStruct):
+    idbits = prop(0, u64)
+
+class GameEnemyTowerManager(Actor):
+    idbits_of_base = prop(0x3f0, u64)
+    entries = prop(0x400, ptr_array(GameEnemyTowerManager_Entry))
+
+    def members(self) -> list[ActorBase]:
+        world = self.world
+        return list(guest.par_map(lambda entry: world.actor_with_idbits(entry.idbits), self.entries))
 
 class ScolNode(GuestStruct):
     node = prop(0, SeadListNode)
@@ -355,8 +379,8 @@ class Scol(GuestStruct):
     xxy_ptrs_cur = prop(0x1a8, fixed_array(ptr_to(XXY), 4))
     xxy_ptrs_old = prop(0x1c8, fixed_array(ptr_to(XXY), 4))
     xxys_storage = prop(0x1e8, fixed_array(XXY, 8), dump=False)
-    other_xxy_ptrs_by_point_idx = prop(0x248, fixed_array(ptr_to(XXY), 4)) # copied in from p1250
-    other_xxys_storage = prop(0x268, fixed_array(XXY, 4), dump=False)
+    pre_xxy_ptrs = prop(0x248, fixed_array(ptr_to(XXY), 4)) # copied in from p1250 or elsewhere; copied to xxy_ptrs_cur/old
+    pre_xxys_storage = prop(0x268, fixed_array(XXY, 4), dump=False)
     owner_idbits = prop(0x298, u64)
 
     ptr_owners_pos_cur = prop(0x2a0, ptr_to(Point2D))
@@ -368,9 +392,9 @@ class Scol(GuestStruct):
     bitmask_old = prop(0x2c0, fixed_array(u32, 2)) # copied from cur
 
     rects = prop(0x2c8, fixed_array(Rect, 4))
-    point308 = prop(0x308, Point2D)
-    point310 = prop(0x310, Point2D)
-    point318 = prop(0x318, Point2D)
+    owners_pos = prop(0x308, Point2D)
+    clamped_delta = prop(0x310, Point2D)
+    desired_delta = prop(0x318, Point2D)
     point326 = prop(0x326, u16)
 
     something_from_collider = prop(0x328, u32)
@@ -745,7 +769,13 @@ class World(GuestStruct):
     name = prop(8, FancyString, include_in_repr=True)
     id = prop(0x20, u32)
     actor_mgr = prop(0x18, lambda: ptr_to(ActorMgr))
+    idbits_hash = prop(0x108, count4_ptr(ptr_to(ActorBase)))
     area_sys = prop(0x140, ptr_to(AreaSystem)) # was 0x130
+
+    def actor_with_idbits(self, idbits) -> ActorBase:
+        ret = self.idbits_hash[idbits >> 32]
+        assert ret.idbits == idbits, (hex(ret.idbits), hex(idbits))
+        return ret.downcast()
 
 class ActorMgr(GuestStruct):
     @staticmethod
@@ -754,7 +784,6 @@ class ActorMgr(GuestStruct):
     mp5 = prop(0x30, ptr_to(MP5))
     cur_world = prop(0x98, ptr_to(World))
     worlds = prop(0x80, count4_ptr(ptr_to(World)))
-    idbits_hash = prop(0x110, count4_ptr(GuestPtr))
 
     def get_all_actors_nocast(self):
         return [yatsu for yatsu in self.mp5.pointers.get_all() if yatsu]
@@ -830,7 +859,7 @@ class BgUnitGroupTypeSpecific(GuestStruct):
     vt = prop(0, ptr_to(VtableForBgUnitGroupTypeSpecific))
     @functools.cached_property
     def name(self):
-        emu = emulate_call(self.vt.get_name.addr, x0=self.addr)
+        emu = emulate_call(self.vt.get_name.addr, x0=self.addr, mm=mm)
         return emu.guest.read_cstr(emu.regs.x0)
 
 class BgUnitGroup(GuestStruct):
@@ -955,18 +984,26 @@ def print_one_ent(yatsu):
 def print_ent():
     list(guest.par_map(print_one_ent, ActorMgr.get().get_all_actors_nocast()))
 
+def match_xy_filter(filt, actual_f):
+    if filt is None:
+        return True
+    actual = actual_f()
+    if isinstance(filt, (int, float)):
+        return abs(actual - filt) < 4
+    if callable(filt):
+        return filt(actual)
+    raise ValueError(filt)
+
 def find_ents(name=None, x=None, y=None):
     def filter_ent(yatsu):
         yatsu = yatsu.downcast()
         if name is not None:
             if yatsu.objrec.get_name_no_idee() != name:
                 return None
-        if x is not None:
-            if abs(yatsu.loc.x - x) > 4:
-                return None
-        if y is not None:
-            if abs(yatsu.loc.y - y) > 4:
-                return None
+        if not match_xy_filter(x, lambda: yatsu.loc.x):
+            return None
+        if not match_xy_filter(y, lambda: yatsu.loc.y):
+            return None
         return yatsu
     return [
         yatsu

@@ -5,6 +5,7 @@ import socket, struct, sys, os, time, importlib
 from threading import Lock
 from binascii import hexlify
 from functools import cache
+from typing import Callable
 
 def addrs_yaml_path():
     return os.path.join(os.path.dirname(__file__), '..', 'addrs.yaml')
@@ -140,3 +141,9 @@ class MM:
         if self._world is None or self._world.stale_code:
             self._world = self.make_world()
         return self._world
+
+    def stubbed_functions(self) -> dict[int, Callable[[], int]]:
+        return {
+            self.addr.cxa_guard_acquire: lambda: 0,
+            self.addr.cxa_guard_release: lambda: 0,
+        }

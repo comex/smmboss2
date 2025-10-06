@@ -78,6 +78,8 @@
       <div id="controls-left">
         <label for="controls-backpressure"><input type="checkbox" id="controls-backpressure"><span>Backpressure</span></label>
         <label for="controls-bg-events"><input type="checkbox" id="controls-bg-events"><span>Background Collision Events</span></label>
+        <label for="controls-pause"><input type="checkbox" id="controls-pause"><span>Pause</span></label>
+        <label for="controls-send-coll-stuff"><input type="checkbox" id="controls-send-coll-stuff" checked><span>Send Collision Info</span></label>
       </div>
       <div id="controls-right">
         <div id="js-mem-container">
@@ -1030,6 +1032,7 @@ class DiagramThingKind {
       assert(elm.tagName == wantedTag);
       //console.log(`creating ${wantedTag}`);
       elm.ptr = ptr;
+      elm.setAttribute('ptr', hex(ptr)); // ** remove this if perf is an issue
       elm.createdFrameNum = this.diagram.curFrame.number;
       elm.deleteMe = () => {
         //console.log(`** deleteMe for ${wantedTag} ptr=${ptr}`);
@@ -1922,9 +1925,9 @@ class HoseParser {
       enable1: r.read(ty.u8),
       enable2: r.read(ty.u8),
       ret: r.read(ty.u8),
-      cp: r.read(this.mmTypes.CollisionPoint),
+      cp: r.read(ty.u8) ? r.read(this.mmTypes.CollisionPoint) : null,
     };
-    data.bic = data.cp.bic;
+    data.bic = data.cp?.bic;
     this.curFrame.bgCollisionTwoPointEvents.push(data);
   }
   parseBGCollisionPoint(r) {
@@ -2073,7 +2076,10 @@ class LiveConns extends BaseConns {
   async updateFlags() {
     let flags = [
       ['controls-backpressure', 1n],
+      ['controls-send-coll-stuff', 2n], // XXX
       ['controls-bg-events', 4n],
+      ['controls-pause', 8n],
+      ['controls-send-coll-stuff', 0x10n],
     ];
     let allFlagVals = 0n;
     let setFlagVals = 0n;

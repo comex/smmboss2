@@ -1,4 +1,4 @@
-import functools, io, sys, struct, inspect, re, os
+import functools, io, sys, struct, inspect, re, os, traceback, time
 
 class GuestPtrMeta(type):
     def __matmul__(self, addr):
@@ -438,23 +438,35 @@ class Emu:
     pass
 
 # barebones (for now)
-def emulate_call(pc, verbose=False, slide=0, mm=None, **kwargs):
+def emulate_call(pc, verbose=False, slide=0, mm=None, stubbed_functions=None, **kwargs):
     if mm is not None:
         slide = mm.slide
         unslide = mm.unslide
+        if stubbed_functions is None:
+            stubbed_functions = mm.stubbed_functions()
     else:
         slide = unslide = lambda addr: addr
+        if stubbed_functions is None:
+            stubbed_functions = {}
     import unicorn
     import unicorn.arm64_const as ac
     mu = unicorn.Uc(unicorn.UC_ARCH_ARM64, unicorn.UC_MODE_ARM)
 
     from guest_access import CachingGuest
     fake_guest = CachingGuest(GuestPlusFakeStack(guest), imaginary_mode=True)
+    got_exc = False
 
     fake_mem = {}
 
     def mmio_read_cb(uc, offset, size, data):
-        ret = int.from_bytes(fake_guest.read(offset, size), 'little') 
+        nonlocal got_exc
+        try:
+            ret = int.from_bytes(fake_guest.read(offset, size), 'little')
+        except:
+            traceback.print_exc()
+            got_exc = True
+            ret = 0
+
         if verbose and 0:
             print(f">>> read {size} from {offset:#x} => {ret:#x}")
         return ret
@@ -462,22 +474,41 @@ def emulate_call(pc, verbose=False, slide=0, mm=None, **kwargs):
     def mmio_write_cb(uc, offset, size, value, data):
         if verbose:
             print(f">>> write {value:#x} size {size} to {offset:#x}")
-        fake_guest.write(offset, value.to_bytes(size, 'little'))
+        nonlocal got_exc
+        try:
+            fake_guest.write(offset, value.to_bytes(size, 'little'))
+        except:
+            traceback.print_exc()
+            got_exc = True
+
+    def handle_stubbed_function(sf):
+        mu.reg_write(ac.UC_ARM64_REG_X0, sf())
+        return mu.reg_read(ac.UC_ARM64_REG_LR)
 
     ADDR = 0
     SIZE = 1 << 48
+    dummy_ret_addr = 0x1234
+
     mu.mmio_map(ADDR, SIZE, mmio_read_cb, None, mmio_write_cb, None)
     mu.mem_protect(ADDR, SIZE, unicorn.UC_PROT_READ | unicorn.UC_PROT_WRITE | unicorn.UC_PROT_EXEC)
     mu.reg_write(ac.UC_ARM64_REG_SP, 0x10000)
-    mu.reg_write(ac.UC_ARM64_REG_LR, 0x1234)
+    mu.reg_write(ac.UC_ARM64_REG_LR, dummy_ret_addr)
     rw = RegsWrap(mu)
     for reg, val in kwargs.items():
         rw.set(reg, val)
-    single_step = verbose or True
-    max_insns = 300
+    single_step = verbose #or True
     prev_reg_vals_raw = {}
-    pc = slide(pc)
-    for step in range(max_insns if single_step else 1):
+
+    max_time = 0.3
+    max_ss_insns = 300
+    cur_ss_insns = 0
+
+    mu.ctl_exits_enabled(True)
+    mu.ctl_set_exits([dummy_ret_addr, *stubbed_functions])
+
+    deadline = time.time() + max_time
+
+    while True:
         if verbose:
             print(f'pc={unslide(pc):#x}', end='')
             for name, reg in rw.uregs.items():
@@ -490,12 +521,26 @@ def emulate_call(pc, verbose=False, slide=0, mm=None, **kwargs):
                     print(f' {name}={val}', end='')
                     prev_reg_vals_raw[name] = val_raw
             print()
-        mu.emu_start(begin=pc, until=0x1234, timeout=10_000_000, count=1 if single_step else max_insns)
+        # Outside of single-step mode, use timeout instead of instruction
+        # counter because instruction counter internally forces Unicorn to
+        # single-step.  Not that it really matters since jit will be slow
+        # anyway for this.  Whatever!
+        timeout = int((deadline - time.time()) * 1_000_000)
+        if timeout == 0:
+            raise Exception(f"took too long ({max_time}s)")
+        mu.emu_start(begin=pc, until=0, count=1 if single_step else 0, timeout=timeout)
         pc = mu.reg_read(ac.UC_ARM64_REG_PC)
-        if pc == 0x1234:
+        if pc == dummy_ret_addr:
             break
-    else:
-        raise Exception("took too long")
+        sf = stubbed_functions.get(pc)
+        if sf is not None:
+            pc = handle_stubbed_function(sf)
+        cur_ss_insns += 1
+        if cur_ss_insns == max_ss_insns:
+            raise Exception("took too long (single-step instruction counter)")
+
+    if got_exc:
+        raise Exception('got exception while emulating, see above')
 
     emu = Emu()
     emu.guest = fake_guest

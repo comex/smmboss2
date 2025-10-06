@@ -410,7 +410,10 @@ HOOK_DEFINE_TRAMPOLINE(Stub_cctx_bg_collide_against_twopoint) {
                 w.write_prim(enable1);
                 w.write_prim(enable2);
                 w.write_prim(ret);
-                w.write_prim(*cp);
+                w.write_prim((uint8_t)(cp != nullptr));
+                if (cp != nullptr) {
+                    w.write_prim(*cp);
+                }
             });
         }
         return ret;
@@ -450,7 +453,6 @@ static StupidHash<UInt48, Nothing, 3079> s_hitboxes_this_frame;
 
 void note_new_hose_connection() { // run on hose thread
     //g_cur_rpc_flags.fetch_or(RPC_FLAG_SEND_COLLS, std::memory_order_release);
-    // TODO: make this unnecessary
 }
 
 static void report_hitbox(mm_hitbox *hb, bool surprise) {
@@ -480,14 +482,16 @@ static void report_hitbox(mm_hitbox *hb, bool surprise) {
 HOOK_DEFINE_TRAMPOLINE(Stub_hitbox_collide) {
     static long Callback(mm_hitbox *hb1, mm_hitbox *hb2) {
         long ret = Orig(hb1, hb2);
-        report_hitbox(hb1, /*surprise*/ true);
-        report_hitbox(hb2, /*surprise*/ true);
-        s_hose.write_packet([&](auto &w) {
-            w.write_tag({"collisi"});
-            w.write_prim(hb1);
-            w.write_prim(hb2);
-            w.write_prim(ret);
-        });
+        if (test_rpc_flag(RPC_FLAG_SEND_COLL_STUFF)) {
+            report_hitbox(hb1, /*surprise*/ true);
+            report_hitbox(hb2, /*surprise*/ true);
+            s_hose.write_packet([&](auto &w) {
+                w.write_tag({"collisi"});
+                w.write_prim(hb1);
+                w.write_prim(hb2);
+                w.write_prim(ret);
+            });
+        }
         return ret;
     }
     static constexpr auto GetAddr = &mm_addrs::hitbox_collide;
@@ -541,40 +545,33 @@ static void report_normal_collider(mm_normal_collider *nc, tag8 tag) {
     });
 }
 
-static void frame_start_actions() {
-    s_hitboxes_this_frame.clear();
-    if (test_and_clear_rpc_flag(RPC_FLAG_SEND_COLLS)) {
-        s_hashed_scols.clear();
-        for (auto &entry : s_colliders) {
-            auto nc = (mm_normal_collider *)entry.key;
-            report_normal_collider(nc, {"normco*"});
-        }
-    }
-}
-
 HOOK_DEFINE_TRAMPOLINE(Stub_Collider_add_to_collision_grid) {
     static void Callback(mm_normal_collider *self) {
         Orig(self);
-        if (s_colliders.lookup(UInt48(self), /*insert*/ true).second) {
-            xprintf("%p added but already in s_colliders", self);
+        if (test_rpc_flag(RPC_FLAG_SEND_COLL_STUFF)) {
+            if (s_colliders.lookup(UInt48(self), /*insert*/ true).second) {
+                xprintf("%p added but already in s_colliders", self);
+            }
+            report_normal_collider(self, {"normco+"});
         }
-        report_normal_collider(self, {"normco+"});
     }
     static constexpr auto GetAddr = &mm_addrs::Collider_add_to_collision_grid;
 };
 
 HOOK_DEFINE_TRAMPOLINE(Stub_Collider_remove_from_collision_grid_and_lists) {
     static void Callback(mm_normal_collider *self) {
-        auto [entry, _] = s_colliders.lookup(UInt48(self), /*insert*/ false);
-        if (entry) {
-            s_colliders.remove(entry);
-            s_hose.write_packet([&](auto &w) {
-                w.write_tag({"normco-"});
-                w.write_prim(self);
-            });
-        } else {
-            // this happens at startup.
-            //xprintf("%p removed but not in s_colliders", self);
+        if (test_rpc_flag(RPC_FLAG_SEND_COLL_STUFF)) {
+            auto [entry, _] = s_colliders.lookup(UInt48(self), /*insert*/ false);
+            if (entry) {
+                s_colliders.remove(entry);
+                s_hose.write_packet([&](auto &w) {
+                    w.write_tag({"normco-"});
+                    w.write_prim(self);
+                });
+            } else {
+                // this happens at startup.
+                //xprintf("%p removed but not in s_colliders", self);
+            }
         }
         Orig(self);
     }
@@ -584,27 +581,29 @@ HOOK_DEFINE_TRAMPOLINE(Stub_Collider_remove_from_collision_grid_and_lists) {
 HOOK_DEFINE_TRAMPOLINE(Stub_scol_true_outmost) {
     static void Callback(mm_scol_collider *self) {
         Orig(self);
-        auto [entry, found] = s_hashed_scols.lookup(UInt48(self), /*insert*/ true);
-        bool sent = write_cached_dump(entry, found, [&](auto &w){
-            w.write_tag({"scolcol"});
-            w.write_prim(self);
-            w.write_raw(self, mm_scol_collider::initial_dump_size);
-            w.write_n(self->ext_pos_cur() ?: s_dummy_pos, 2);
-            w.write_n(self->ext_pos_old() ?: s_dummy_pos, 2);
-
-            int8_t world_id = -1;
-            if (mm_actor *actor = self->owner()) {
-                if (mm_world *world = actor->world()) {
-                    world_id = (int8_t)world->id();
-                }
-            }
-            w.write_prim(world_id);
-        });
-        if (!sent) {
-            s_hose.write_packet([&](auto &w) {
-                w.write_tag({"scolco~"});
+        if (test_rpc_flag(RPC_FLAG_SEND_COLL_STUFF)) {
+            auto [entry, found] = s_hashed_scols.lookup(UInt48(self), /*insert*/ true);
+            bool sent = write_cached_dump(entry, found, [&](auto &w){
+                w.write_tag({"scolcol"});
                 w.write_prim(self);
+                w.write_raw(self, mm_scol_collider::initial_dump_size);
+                w.write_n(self->ext_pos_cur() ?: s_dummy_pos, 2);
+                w.write_n(self->ext_pos_old() ?: s_dummy_pos, 2);
+
+                int8_t world_id = -1;
+                if (mm_actor *actor = self->owner()) {
+                    if (mm_world *world = actor->world()) {
+                        world_id = (int8_t)world->id();
+                    }
+                }
+                w.write_prim(world_id);
             });
+            if (!sent) {
+                s_hose.write_packet([&](auto &w) {
+                    w.write_tag({"scolco~"});
+                    w.write_prim(self);
+                });
+            }
         }
     }
     static constexpr auto GetAddr = &mm_addrs::scol_true_outmost;
@@ -612,15 +611,14 @@ HOOK_DEFINE_TRAMPOLINE(Stub_scol_true_outmost) {
 
 HOOK_DEFINE_TRAMPOLINE(Stub_AreaSystem_do_many_collisions) {
     static void Callback(mm_AreaSystem *self) {
-        if (self->world_id() == 0) {
-            frame_start_actions();
+        if (test_rpc_flag(RPC_FLAG_SEND_COLL_STUFF)) {
+            s_hose.write_packet([&](auto &w) {
+                w.write_tag({"do_many"});
+                w.write_prim(self);
+                w.write_prim((uint64_t)self->world_id());
+            });
+            report_all_hitboxes(self);
         }
-        s_hose.write_packet([&](auto &w) {
-            w.write_tag({"do_many"});
-            w.write_prim(self);
-            w.write_prim((uint64_t)self->world_id());
-        });
-        report_all_hitboxes(self);
         Orig(self);
     }
     static constexpr auto GetAddr = &mm_addrs::AreaSystem_do_many_collisions;
@@ -640,12 +638,41 @@ HOOK_DEFINE_TRAMPOLINE(Stub_grab_runtime_asset_name_from_elmdtree) {
     static constexpr auto GetAddr = &mm_addrs::grab_runtime_asset_name_from_elmdtree;
 };
 
+static void frame_start_collision_actions() {
+    if (!test_rpc_flag(RPC_FLAG_SEND_COLL_STUFF)) {
+        return;
+    }
+    static bool installed;
+    if (!installed) {
+        installed = true;
+        install<Stub_hitbox_collide>();
+        install<Stub_AreaSystem_do_many_collisions>();
+        install<Stub_Collider_add_to_collision_grid>();
+        install<Stub_Collider_remove_from_collision_grid_and_lists>();
+        install<Stub_scol_true_outmost>();
+        install<Stub_cctx_bg_collide_against_twopoint>();
+        install<Stub_cctx_bg_collide_against_point>();
+    }
+    s_hitboxes_this_frame.clear();
+    if (test_and_clear_rpc_flag(RPC_FLAG_SEND_ALL_COLLS)) {
+        s_hashed_scols.clear();
+        s_hose.write_packet([&](auto &w) {
+            w.write_tag({"allcols"});
+        });
+        for (auto &entry : s_colliders) {
+            auto nc = (mm_normal_collider *)entry.key;
+            report_normal_collider(nc, {"normco*"});
+        }
+    }
+}
+
 HOOK_DEFINE_TRAMPOLINE(Stub_huge_frame_func) {
     static void Callback(void *self) {
         mem_monitor_do_reads();
         while (test_rpc_flag(RPC_FLAG_PAUSE)) {
             wait_until_set_flags_req_clears(RPC_FLAG_PAUSE);
         }
+        frame_start_collision_actions();
         Orig(self);
     }
     static constexpr auto GetAddr = &mm_addrs::huge_frame_func;
@@ -723,18 +750,7 @@ extern "C" void exl_main(void* x0, void* x1) {
     exl::patch::CodePatcher(0x012dc9e8).Write<uint32_t>(0xf9005a7f); // cFall
 
 
-    // TODO: make these dynamic hooks (and for the ones that can't be, make
-    // sending conditional at least)
     install<Stub_huge_frame_func>();
-    if (0) {
-        install<Stub_hitbox_collide>();
-        install<Stub_AreaSystem_do_many_collisions>();
-        install<Stub_Collider_add_to_collision_grid>();
-        install<Stub_Collider_remove_from_collision_grid_and_lists>();
-        install<Stub_scol_true_outmost>();
-        install<Stub_cctx_bg_collide_against_twopoint>();
-        install<Stub_cctx_bg_collide_against_point>();
-    }
 
     if (0) {
         install<Stub_grab_runtime_asset_name_from_elmdtree>();

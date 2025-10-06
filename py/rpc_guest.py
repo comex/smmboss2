@@ -36,9 +36,10 @@ def read64(fp):
 
 class RPCFlags(Flag):
     BACKPRESSURE = 1
-    SEND_COLLS = 2
+    SEND_ALL_COLLS = 2
     SEND_BG_EVENTS = 4
     PAUSE = 8
+    SEND_COLL_STUFF = 0x10
 
 class RPCConn:
     def __init__(self, base_url):
@@ -101,6 +102,9 @@ class HoseConn:
         return self
     def __exit__(self, *args):
         self.shutdown()
+
+class RPCError(Exception):
+    pass
 
 class RPCGuest(smmboss.Guest):
     def __init__(self, base_url, lifeboat={}):
@@ -173,16 +177,25 @@ class RPCGuest(smmboss.Guest):
             resp = self.conn.send_and_recv(data)
 
         if isinstance(resp, str):
-            raise Exception(f"error: {resp!r}")
+            raise RPCError(resp)
         assert isinstance(resp, bytes)
         return resp
 
     def try_read(self, addr, size):
-        resp = self.send_and_recv(struct.pack('<BQQ',
-            1, # RPC_REQ_READ
-            addr,
-            size
-        ))
+        while True:
+            try:
+                resp = self.send_and_recv(struct.pack('<BQQ',
+                    1, # RPC_REQ_READ
+                    addr,
+                    size
+                ))
+            except RPCError as e:
+                if e.args[0] != "i'm overstuffed":
+                    raise
+                else:
+                    # Too many parallel requests.  Just try again.
+                    continue
+            break
         assert len(resp) <= size
         return resp
 
@@ -222,13 +235,14 @@ class RPCGuest(smmboss.Guest):
         assert len(resp) == 8
         return RPCFlags(struct.unpack('<Q', resp)[0])
 
-    def set_flags(self, backpressure=None, send_colls=None, send_bg_events=None, pause=None):
+    def set_flags(self, backpressure=None, send_all_colls=None, send_bg_events=None, pause=None, send_coll_stuff=None):
         set = clear = RPCFlags(0)
         for (flag, val) in [
             (RPCFlags.BACKPRESSURE, backpressure),
-            (RPCFlags.SEND_COLLS, send_colls),
+            (RPCFlags.SEND_ALL_COLLS, send_all_colls),
             (RPCFlags.SEND_BG_EVENTS, send_bg_events),
             (RPCFlags.PAUSE, pause),
+            (RPCFlags.SEND_COLL_STUFF, send_coll_stuff),
         ]:
             if val is True:
                 set |= flag
@@ -238,7 +252,7 @@ class RPCGuest(smmboss.Guest):
                 raise Exception(f'unexpected value {val!r}')
         return self.set_flags_impl(set=set, clear=clear)
 
-    def monitor(self, guest_ptrs):
+    def monitor(self, guest_ptrs, f=lambda x: x):
         was_paused = bool(self.set_flags_impl() & RPCFlags.PAUSE)
         addr_lens = [(p.addr, p.sizeof_star) for p in guest_ptrs]
         uniqid = random.randint(1, (1 << 64) - 1)
@@ -265,7 +279,7 @@ class RPCGuest(smmboss.Guest):
                         my_data = must_read(fp, length)
                         vals.append(p.decode_data(my_data))
                     assert fp.read() == b''
-                    print(vals)
+                    print(f(vals))
         finally:
             self.set_monitor_config(None)
             if was_paused:

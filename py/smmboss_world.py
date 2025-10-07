@@ -1,4 +1,9 @@
-import struct
+from pathlib import Path
+import smmboss, guest_access
+persistent_cache = guest_access.PersistentCache(
+    path=smmboss.addrs_yaml_path().parent / 'persistent_cache.jsonl',
+    build_id=mm.main_image_info['build_id'],
+)
 
 class Point2D(GuestStruct):
     x = prop(0, f32)
@@ -236,21 +241,30 @@ class VtableForActorBase(GuestStruct):
     get_metaclass = prop(8, GuestPtrPtr)
     get_name = prop(0x10, GuestPtrPtr)
 
-    @functools.cache
-    def is_subclass_of(self, metaclass: int) -> bool:
+    def uncached_is_subclass_of(self, metaclass: int) -> bool:
         print(f'>>> {self.addr:#x} is_subclass_of {metaclass:#x}', file=sys.stderr)
-        # TODO: this is slow especially under GDB.  maybe just keep a persistent cache?
-        # TODO: switch to ruamel.yaml
         emu = emulate_call(self.dyn_cast.addr, x0=0, x1=metaclass, mm=mm)
         return bool(emu.regs.x0)
 
-    @functools.cached_property
+    def is_subclass_of(self, metaclass: int) -> bool:
+        return persistent_cache.get('AB.is_subclass_of', self.addr, metaclass,
+            compute=lambda: self.uncached_is_subclass_of(metaclass))
+
+    @property
     def metaclass(self) -> int:
+        return persistent_cache.get('AB.metaclass', self.addr,
+            compute=self.uncached_metaclass)
+
+    def uncached_metaclass(self) -> int:
         emu = emulate_call(self.get_metaclass.addr, x0=0, mm=mm)
         return emu.regs.x0
 
-    @functools.cached_property
+    @property
     def class_name(self) -> str:
+        return persistent_cache.get('AB.class_name', self.addr,
+            compute=self.uncached_class_name)
+
+    def uncached_class_name(self) -> str:
         emu = emulate_call(self.get_name.addr, x0=0, mm=mm)
         return emu.guest.read_cstr(emu.regs.x0).decode()
 

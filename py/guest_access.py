@@ -1,4 +1,4 @@
-import functools, struct, os, weakref
+import functools, struct, os, weakref, contextlib, threading, fcntl, json
 
 extra_dep_filenames = {} # path -> mtime
 all_worlds = weakref.WeakKeyDictionary()
@@ -145,3 +145,44 @@ class CachingGuest(Guest):
     def par_map(self, *args, **kwargs):
         return self.backing.par_map(*args, **kwargs)
 
+class PersistentCache:
+    def __init__(self, path, build_id):
+        self.path = path
+        self.build_id = build_id
+        self.lock = threading.Lock()
+        with open(self.path) as fp:
+            with self.flock(fp):
+                self.load(fp)
+
+    @contextlib.contextmanager
+    def flock(self, fp):
+        fcntl.flock(fp, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fp, fcntl.LOCK_UN)
+
+    def load(self, fp):
+        self.cache = {}
+        for line in fp:
+            if line:
+                key, val = json.loads(line)
+                self.cache[tuple(key)] = val
+
+    def get(self, *key, compute):
+        key = (self.build_id, *key)
+        with self.lock:
+            if key in self.cache:
+                return self.cache[key]
+        val = compute()
+        with self.lock:
+            if key in self.cache:
+                return self.cache[key]
+            with open(self.path, 'a+') as fp:
+                with self.flock(fp):
+                    self.load(fp)
+                    if key in self.cache:
+                        return self.cache[key]
+                    fp.write(json.dumps([key, val]) + '\n')
+                    self.cache[key] = val
+        return self.cache[key]

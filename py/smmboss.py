@@ -3,12 +3,12 @@
 from guest_access import *
 import socket, struct, sys, os, time, importlib
 from threading import Lock
-from binascii import hexlify
 from functools import cache
 from typing import Callable
+from pathlib import Path
 
 def addrs_yaml_path():
-    return os.path.join(os.path.dirname(__file__), '..', 'addrs.yaml')
+    return Path(__file__).parent / '../addrs.yaml'
 
 @cache
 def get_addrs_yaml():

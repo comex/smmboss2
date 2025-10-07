@@ -22,6 +22,7 @@ try:
         sys.path.insert(0, str(site_packages_dirs[0]))
         # also add this directory as an import directory
         sys.path.append(str(py_dir))
+        _sopy_loaded_into_venv = True
 
     def _sopy_reload_all():
         import guest_access, smmboss, gdb_guest

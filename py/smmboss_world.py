@@ -162,6 +162,10 @@ class StateMgr(GuestStruct):
     state_objs = prop(0x28, count4_ptr(StateMgrState))
     names = prop(0x38, count4_ptr(FancyString))
 
+    @property
+    def cur_state_name(self):
+        return self.names[self.state].as_str()
+
     def dump_states_inner(self):
         count = self.state_objs.count
         assert count == self.names.count
@@ -316,7 +320,7 @@ def actor(addr):
     return ActorBase(addr).downcast()
 
 class EnemyUber(Actor):
-    p_enemysys_state_manager = prop(0x3f0, ptr_to(StateMgr))
+    #p_enemysys_state_manager_not = prop(0x3f0, ptr_to(StateMgr))
     enemysys_state_manager = prop(0x3f8, StateMgr)
     something_of_me = prop(0x4e8, GuestPtrPtr)
     helpers_by_state = prop(0x440, fixed_array(GuestPtrPtr, 0x13))
@@ -999,9 +1003,11 @@ def print_one_ent(yatsu):
 def print_ent():
     list(guest.par_map(print_one_ent, ActorMgr.get().get_all_actors_nocast()))
 
-def match_xy_filter(filt, actual_f):
+def match_xy_filter(filt, yatsu, actual_f):
     if filt is None:
         return True
+    if not isinstance(yatsu, Actor):
+        return False
     actual = actual_f()
     if isinstance(filt, (int, float)):
         return abs(actual - filt) < 4
@@ -1015,9 +1021,9 @@ def find_ents(name=None, x=None, y=None):
         if name is not None:
             if yatsu.objrec.get_name_no_idee() != name:
                 return None
-        if not match_xy_filter(x, lambda: yatsu.loc.x):
+        if not match_xy_filter(x, yatsu, lambda: yatsu.loc.x):
             return None
-        if not match_xy_filter(y, lambda: yatsu.loc.y):
+        if not match_xy_filter(y, yatsu, lambda: yatsu.loc.y):
             return None
         return yatsu
     return [

@@ -156,7 +156,6 @@ class Py(gdb.Function):
     def invoke(self, *args):
         if len(args) < 1:
             raise TypeError("Expected at least one argument to $py (expression to evaluate)")
-        self.globals['wtf'] = args
         args = list(map(gdb_value_to_py, args))
         expr, *args = args
         if not isinstance(expr, str):

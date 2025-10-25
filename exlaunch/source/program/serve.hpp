@@ -162,6 +162,7 @@ enum rpc_flags : uint64_t {
     RPC_FLAG_SEND_BG_EVENTS = 4,
     RPC_FLAG_PAUSE = 8,
     RPC_FLAG_SEND_COLL_STUFF = 0x10,
+    RPC_FLAG_PAUSE_NEXT_FRAME = 0x20,
 };
 
 extern std::atomic<uint64_t> g_cur_rpc_flags;

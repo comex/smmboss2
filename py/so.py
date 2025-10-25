@@ -32,9 +32,7 @@ try:
         guest = guest_access.CachingGuest(gdb_guest.GDBGuest())
         mm = smmboss.MM.with_guest(guest)
         gdb_guest.add_niceties(mm, globals())
-        for (_attr, _attrval) in mm.world.__dict__.items():
-            if not _attr.startswith('_'):
-                globals()[_attr] = _attrval
+        globals().update(mm.world._symbols_to_inject())
 
     _sopy_load_into_venv()
     _sopy_reload_all()

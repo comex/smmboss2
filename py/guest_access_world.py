@@ -372,7 +372,7 @@ class GuestPtrToMemberFunction(GuestStruct):
 def dump(val, fp=sys.stdout, indent='', **opts):
     if hasattr(val, 'dump'):
         val.dump(fp, indent, **opts)
-    elif isinstance(val, int):
+    elif type(val) is int:
         fp.write('%#x' % val)
     elif hasattr(val, '__iter__') and not isinstance(val, (list, tuple)):
         fp.write(f'iterable (type {type(val)}):')

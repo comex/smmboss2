@@ -10,6 +10,12 @@ def startup():
     ip = IPython.get_ipython()
     ip.events.register("pre_run_cell", pre_run_cell)
 
+def inject_symbols(syms):
+    assert isinstance(syms, dict)
+    import IPython
+    ip = IPython.get_ipython()
+    ip.push(syms)
+
 def main(module_name):
     import sys
     import os

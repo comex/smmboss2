@@ -1,5 +1,7 @@
 from pathlib import Path
+import math
 import smmboss, guest_access
+
 persistent_cache = guest_access.PersistentCache(
     path=smmboss.addrs_yaml_path().parent / 'persistent_cache.jsonl',
     build_id=mm.main_image_info['build_id'],
@@ -148,6 +150,29 @@ def upsidedown_ptr_array(ty):
     C.__name__ = f'upsidedown_ptr_array({ty.__name__})'
     return C
 
+class AngleVal(int):
+    def degrees(self) -> float:
+        return self / 0x1_0000_0000 * 360
+    def radians(self) -> float:
+        return self / 0x1_0000_0000 * math.tau
+    @staticmethod
+    def with_degrees(degrees: float) -> 'AngleVal':
+        return AngleVal(round(degrees / 360 * 0x1_0000_0000))
+    @staticmethod
+    def with_radians(radians: float) -> 'AngleVal':
+        return AngleVal(round(radians / math.tau * 0x1_0000_0000))
+    def __repr__(self) -> str:
+        return f'AngleVal({int(self):#08x} ~= {self.degrees():.1f}º)'
+    __str__ = __repr__
+
+class Angle(u32):
+    @classmethod
+    def decode_data(cls, data):
+        return AngleVal(super().decode_data(data))
+    @classmethod
+    def encode_data(cls, val):
+        return super().encode_data(int(val))
+
 class StateMgrState(GuestStruct):
     sizeof_star = 0x40
     vtable = prop(0, usize)
@@ -187,7 +212,7 @@ class StateMgr(GuestStruct):
             line += f' [target={info["target"]:#x}]'
             print(line)
 
-    def dump_states_bn(self, prefix):
+    def dump_states_bn(self, prefix, self_ty='void *'):
         for info in self.dump_states_inner():
             for kind in ['in', 'tick', 'out']:
                 if info['name'] == 'cState_None' and kind == 'tick':
@@ -196,7 +221,9 @@ class StateMgr(GuestStruct):
                 addr = info[kind]
                 if not addr:
                     continue
-                print(f'bv.define_user_symbol(Symbol(sym_type=SymbolType.FunctionSymbol, addr={addr:#x}, short_name={name!r}))')
+                #print(f'bv.define_user_symbol(Symbol(sym_type=SymbolType.FunctionSymbol, addr={addr:#x}, short_name={name!r}))')
+                func_ty = f'void {name}({self_ty})'
+                print(f'bv.create_user_function({addr:#x}).type = {func_ty!r}')
 
     def dump_states_enum(self):
         for i, name in enumerate(self.names):
@@ -376,8 +403,9 @@ class Actor(ActorBase):
     _ofs = 0 if mm.version >= 300 else 8 # ...this probably doesn't actually work on older versions
     loc = prop(0x230 - _ofs, Point3D)
     houvelo = prop(0x23c - _ofs, Point3D)
-    angle = prop(0x268 - _ofs, u32)
-    rngthing = prop(0x26c - _ofs, u32)
+    angles25c = prop(0x25c - _ofs, fixed_array(Angle, 3))
+    angle = prop(0x268 - _ofs, Angle)
+    probably_facing_direction = prop(0x26c - _ofs, u32)
     source_xvel = prop(0x274 - _ofs, f32)
     source_xvel_goal = prop(0x278 - _ofs, f32)
     gravity = prop(0x280 - _ofs, f32)
@@ -437,7 +465,7 @@ class ScolResult(GuestStruct):
     f2 = prop(2, u8)
     f3 = prop(3, u8)
     f4 = prop(4, u32)
-    angle = prop(8, u32)
+    angle = prop(8, Angle)
     first_point = prop(0xc, Point2D)
     intersection_point = prop(0x14, Point2D)
     f1c = prop(0x1c, u32)
@@ -734,7 +762,7 @@ class CollisionBIC(GuestStruct):
 class CollisionPoint(GuestStruct):
     segment_which_side = prop(0, u8)
     intersection_point = prop(4, Point2D)
-    angle = prop(0xc, u32)
+    angle = prop(0xc, Angle)
     bic = prop(0x10, CollisionBIC)
     sizeof_star = 0x20
 

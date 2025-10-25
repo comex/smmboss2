@@ -21,6 +21,9 @@ class World:
         extra_dep_filenames[filename] = os.path.getmtime(filename) # used by export.py and shell.py
         code = compile(open(filename).read(), filename, 'exec')
         exec(code, self.__dict__)
+    def _symbols_to_inject(self):
+        return {attr: val for (attr, val) in self.__dict__.items()
+            if not attr.startswith('_')}
 
 @functools.total_ordering
 class Guest:

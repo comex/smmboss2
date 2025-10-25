@@ -287,8 +287,9 @@ if shell.started_shell_with == 'rpc_guest':
         lifeboat = guest.kill()
     else:
         lifeboat = {}
-    __main__.guest = RPCGuest(sys.argv[1], lifeboat=lifeboat)
-    __main__.mm = smmboss.MM.with_guest(__main__.guest)
+    _guest = RPCGuest(sys.argv[1], lifeboat=lifeboat)
+    _mm = smmboss.MM.with_guest(_guest)
+    shell.inject_symbols(_mm.world._symbols_to_inject())
 
 if __name__ == '__main__':
     shell.main('rpc_guest')

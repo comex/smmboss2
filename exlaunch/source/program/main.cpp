@@ -669,8 +669,20 @@ static void frame_start_collision_actions() {
 HOOK_DEFINE_TRAMPOLINE(Stub_huge_frame_func) {
     static void Callback(void *self) {
         mem_monitor_do_reads();
-        while (test_rpc_flag(RPC_FLAG_PAUSE)) {
-            wait_until_set_flags_req_clears(RPC_FLAG_PAUSE);
+        if (test_rpc_flag(RPC_FLAG_PAUSE)) {
+            s_hose.write_packet([&](auto &w) {
+                w.write_tag({"pause"});
+            });
+            while (test_rpc_flag(RPC_FLAG_PAUSE)) {
+                wait_until_set_flags_req_clears(RPC_FLAG_PAUSE);
+            }
+            s_hose.write_packet([&](auto &w) {
+                w.write_tag({"unpause"});
+            });
+        }
+        if (test_and_clear_rpc_flag(RPC_FLAG_PAUSE_NEXT_FRAME)) {
+            // Set PAUSE for the next time we're called
+            g_cur_rpc_flags.fetch_or(RPC_FLAG_PAUSE, std::memory_order_relaxed);
         }
         frame_start_collision_actions();
         Orig(self);

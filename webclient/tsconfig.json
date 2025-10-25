@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "lib": [ "esnext", "dom", "dom.iterable" ],
+    "target": "esnext",
+    "module": "esnext"
+  },
+  "files": [
+    "client.ts"
+  ],
+  "outDir": "build"
+}
+

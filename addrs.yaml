@@ -46,6 +46,7 @@ edb8feede2bfa3ffd1adf65a4424361a00000000000000000000000000000000:
         metaclass_EnemyUber: 0x02a55218
         metaclass_Actor: 0x02a51030
         metaclass_EditActor: 0x02a90e78
+        metaclass_ItemBase: 0x02bca108
 
         # These are just PLT entries in the binary for these symbols.
         # The names are actually __cxa_guard_acquire and __cxa_guard_release,

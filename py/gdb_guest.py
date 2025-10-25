@@ -130,11 +130,47 @@ class MemDump:
         for addr, m in self.find(*args, **kwargs):
             print(hex(addr))
 
-def add_niceties(mm):
+def gdb_value_to_py(arg: gdb.Value):
+    ty = arg.type
+    code = ty.code
+    if ty.is_string_like:
+        return arg.string()
+    elif code == gdb.TYPE_CODE_FLT:
+        return float(arg)
+    elif ty.is_scalar:
+        # e.g. integer or pointer; try to convert to an int regardless
+        return int(arg)
+    else:
+        raise TypeError(f"don't know how to convert value of type {ty!r} to Python")
+
+class Py(gdb.Function):
+    '''Convenience function to evaluate arbitrary Python from within a GDB expression.
+
+    Usage:
+    $py("2 + 2")
+    $py("arg0 + arg1", 2, 2)
+    '''
+    def __init__(self, globls):
+        super().__init__('py')
+        self.globals = globls
+    def invoke(self, *args):
+        if len(args) < 1:
+            raise TypeError("Expected at least one argument to $py (expression to evaluate)")
+        self.globals['wtf'] = args
+        args = list(map(gdb_value_to_py, args))
+        expr, *args = args
+        if not isinstance(expr, str):
+            raise TypeError(f"Expected first argument to $py to be string, got {type(expr)} {expr!r}")
+        locls = {f'arg{i}': arg for (i, arg) in enumerate(args)}
+        return eval(expr, self.globals, locls)
+
+def add_niceties(mm, globls):
     MyBT(mm)
+    Py(globls)
     gdb.parse_and_eval(f'$slide = {mm._slide:#x}')
     gdb.parse_and_eval(f'$gslide = {mm._gslide:#x}')
     for name, val in mm.world.__dict__.items():
         if getattr(val, 'commandlike', False):
             SomeCommand(name, val, mm.guest)
 
+    globls['reg'] = reg

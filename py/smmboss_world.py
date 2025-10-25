@@ -142,8 +142,8 @@ def ptr_array(ty):
 def upsidedown_ptr_array(ty):
     class C(GuestStruct, GuestArray):
         base = prop(0, ptr_to(ptr_to(ty)))
-        count = prop(4, u32)
-        capacity = prop(8, u32)
+        count = prop(8, u32)
+        capacity = prop(0xc, u32)
         ptr_ty = ptr_to(ty)
     C.__name__ = f'upsidedown_ptr_array({ty.__name__})'
     return C
@@ -208,6 +208,7 @@ class ObjRec(GuestStruct):
     vt = prop(0, usize)
     ctor = prop(8, usize)
     idee = prop(0x10, u32)
+    f14 = prop(0x14, u32)
     spawn_rect = prop(0x18, ptr_to(SpawnRect))
     base_name = prop(0x28, FancyString)
     variation_name = prop(0x38, FancyString)
@@ -223,8 +224,22 @@ class ObjRec(GuestStruct):
     @staticmethod
     @functools.lru_cache(None)
     def by_idee(idee):
-        objrecs_by_idee = fixed_array(ptr_to(ObjRec), 0xee)(mm.addr.idee_to_objrec)
-        return objrecs_by_idee[idee]
+        return ObjRec.idee_to_objrec()[idee]
+
+    @staticmethod
+    @functools.lru_cache(None)
+    def idee_to_objrec():
+        return fixed_array(ptr_to(ObjRec), 0x1d0)(mm.addr.idee_to_objrec)
+
+    @staticmethod
+    def dump_idees_enum():
+        name_to_idees = {}
+        for i, objrec in enumerate(ObjRec.idee_to_objrec()):
+            name_to_idees.setdefault(objrec.get_name_no_idee(), []).append(i)
+        for base_name, idees in name_to_idees.items():
+            for idee in idees:
+                name = f'{base_name}_{idee:x}' if len(idees) > 1 else base_name
+                print(f'idee_{name} = 0x{idee:x},')
 
 class Relly(GuestStruct):
     # afaik this is what I used to call EditActorPlacementData, but I'm
@@ -277,6 +292,8 @@ class VtableForActorBase(GuestStruct):
         class_name = self.class_name
         if class_name == 'GameEnemyTowerManager':
             return GameEnemyTowerManager
+        elif self.is_subclass_of(mm.addr.metaclass_ItemBase):
+            return ItemBase
         elif self.is_subclass_of(mm.addr.metaclass_EnemyUber):
             return EnemyUber
         elif self.is_subclass_of(mm.addr.metaclass_Actor):
@@ -286,11 +303,61 @@ class VtableForActorBase(GuestStruct):
         else:
             return ActorBase
 
+class SeadIDisposer(GuestStruct):
+    vt = prop(0, GuestPtrPtr)
+    heap = prop(8, GuestPtrPtr)
+    disposer_prev = prop(0x10, GuestPtrPtr)
+    disposer_next = prop(0x10, GuestPtrPtr)
+
+class SomeNode(SeadIDisposer):
+    node = prop(0x20, SeadListNode, dump=False)
+    can_point_back_to_self = prop(0x30, GuestPtrPtr)
+    list = prop(0x38, ptr_to(SeadListImpl))
+
+class SomeNodeListNode(GuestStruct):
+    snl_node = prop(0, SeadListNode, dump=False)
+    somenode = prop(0x10, ptr_to(SomeNode))
+
+class SomeNodeList(GuestStruct):
+    vtable = prop(0, GuestPtrPtr)
+    list = prop(8, sead_list(SomeNodeListNode))
+
+class A28(GuestStruct):
+    vtable = prop(0, GuestPtrPtr)
+    owner = prop(8, lambda: ptr_to(ActorBase))
+    somenode_60 = prop(0x60, SomeNode)
+    somenodelist_c0 = prop(0xc0, SomeNodeList)
+    somenodelist_e8 = prop(0xe8, SomeNodeList)
+    somenode_108 = prop(0x108, SomeNode)
+
 class ActorBase(GuestStruct):
     vtable = prop(0, ptr_to(VtableForActorBase))
+    heap = prop(0x08, GuestPtrPtr)
+    unk10 = prop(0x10, GuestPtrPtr)
+    unk18 = prop(0x18, f32)
+    unk1c_some_scale = prop(0x1c, f32)
+    unk20 = prop(0x20, f32)
+    a28 = prop(0x28, ptr_to(A28))
     idbits = prop(0x30, u64)
     objrec = prop(0x38, lambda: ptr_to(ObjRec))
+    idee = prop(0x40, u32)
     world = prop(0x48, lambda: ptr_to(World)) # ?
+    unk50 = prop(0x50, u8)
+    unk51 = prop(0x51, u8)
+    doomed = prop(0x52, u8)
+    unk53 = prop(0x53, u8)
+    unk54 = prop(0x54, u32)
+    some_other_idbits = prop(0x58, u64)
+    some_node_60 = prop(0x60, SeadListNode)
+    unk78 = prop(0x78, f32)
+    unk7c = prop(0x7c, f32)
+    unk80 = prop(0x80, u64)
+    unk_actor_88 = prop(0x800, lambda: ptr_to(ActorBase))
+    unk80 = prop(0x80, u64)
+    array90 = prop(0x90, upsidedown_ptr_array(GuestPtr))
+    # TODO: finish filling out props
+    somenode160 = prop(0x160, SomeNode)
+
     def __repr__(self):
         try:
             name = self.objrec.get_name()
@@ -332,6 +399,9 @@ class EnemyUber(Actor):
     old_floor_y = prop(0x644, f32)
     scolwrap_for_enemyuber = prop(0x650, lambda: ptr_to(ScolWrap))
     callback_for_boing = prop(0xc30, GuestPtrPtr)
+
+class ItemBase(EnemyUber):
+    item_kind = prop(0xd20, u32)
 
 class GameEnemyTowerManager_Entry(GuestStruct):
     idbits = prop(0, u64)
@@ -1015,7 +1085,7 @@ def match_xy_filter(filt, yatsu, actual_f):
         return filt(actual)
     raise ValueError(filt)
 
-def find_ents(name=None, x=None, y=None):
+def find_ents(name=None, x=None, y=None, f=None):
     def filter_ent(yatsu):
         yatsu = yatsu.downcast()
         if name is not None:
@@ -1024,6 +1094,8 @@ def find_ents(name=None, x=None, y=None):
         if not match_xy_filter(x, yatsu, lambda: yatsu.loc.x):
             return None
         if not match_xy_filter(y, yatsu, lambda: yatsu.loc.y):
+            return None
+        if f is not None and not f(yatsu):
             return None
         return yatsu
     return [

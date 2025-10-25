@@ -31,7 +31,7 @@ try:
         importlib.reload(gdb_guest)
         guest = guest_access.CachingGuest(gdb_guest.GDBGuest())
         mm = smmboss.MM.with_guest(guest)
-        gdb_guest.add_niceties(mm)
+        gdb_guest.add_niceties(mm, globals())
         for (_attr, _attrval) in mm.world.__dict__.items():
             if not _attr.startswith('_'):
                 globals()[_attr] = _attrval

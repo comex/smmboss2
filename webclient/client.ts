@@ -33,17 +33,20 @@ async function doWrite(addr: bigint, data: ArrayBufferView): Promise<void> {
   }
 }
 
-abstract class Type {
+type Local<Ty extends Type<Ty>> = ReturnType<Ty['returnLocalTyDummy']>;
+abstract class Type<Self extends Type<Self>> {
   sizeof?: number;
+  abstract returnLocalTyDummy(): Local<Self>;
 }
 
-class Primitive<T> extends Type {
+abstract class Primitive<T, Self extends Primitive<T, Self>> extends Type<Self> {
+  returnLocalTyDummy(): T { throw new Error("don't call dummy"); }
   getLocal(dv: DataView, off: number): T { throw new Error('getLocal unimpl'); }
   getRemote(addr: bigint): Promise<T> { throw new Error('getRemote unimpl'); }
   setLocal(dv: DataView, off: number, val: number | T): void { throw new Error('setLocal unimpl'); }
   setRemote(addr: bigint, val: number | T): Promise<void> { throw new Error('setRemote unimpl'); }
 }
-class IntType<T> extends Primitive<T> {
+class IntType<T> extends Primitive<T, IntType<T>> {
   constructor(public name: string, public sizeof: number, dataViewName: string, {needBigWrap}: {needBigWrap?: boolean} = {}) {
     super();
     let getLocal = new Function(
@@ -95,7 +98,6 @@ class Tag8Type extends Primitive<string> {
   }
 }
 
-type CTLocal<CT extends CompoundType<CT>> = InstanceType<CT['Local']>;
 abstract class CompoundType<Self extends CompoundType<Self>> extends Type {
   abstract readonly Local: new(dv: DataView | ArrayBuffer, off: number) => CTLocal<Self>;
 }

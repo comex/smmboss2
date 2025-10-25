@@ -95,8 +95,9 @@ class Tag8Type extends Primitive<string> {
   }
 }
 
-abstract class CompoundType<LocalT extends CompoundTypeLocal> extends Type {
-  abstract readonly Local: new(dv: DataView | ArrayBuffer, off: number) => LocalT;
+type CTLocal<CT extends CompoundType<CT>> = InstanceType<CT['Local']>;
+abstract class CompoundType<Self extends CompoundType<Self>> extends Type {
+  abstract readonly Local: new(dv: DataView | ArrayBuffer, off: number) => CTLocal<Self>;
 }
 
 abstract class CompoundTypeLocal {
@@ -115,32 +116,36 @@ abstract class CompoundTypeLocal {
   abstract serialize(): any;
 }
 
-abstract class FixedArrayOfCompoundLocal<LocalET extends CompoundTypeLocal, ET extends CompoundType<LocalET>> extends CompoundTypeLocal {
-  abstract get(i: number): LocalET;
-  abstract map<R>(f: (item: LocalET, idx: number) => R): R[];
+abstract class FixedArrayLocal<ETLocal> extends CompoundTypeLocal {
+  abstract get(i: number): ETLocal;
+  abstract map<R>(f: (item: ETLocal, idx: number) => R): R[];
 }
 
-class FixedArrayOfCompound<LocalET extends CompoundTypeLocal, ET extends CompoundType<LocalET>> extends CompoundType<FixedArrayOfCompoundLocal<LocalET, ET>> {
-  readonly Local: new(dv: DataView | ArrayBuffer, off: number) => FixedArrayOfCompoundLocal<LocalET, ET>;
+class FixedArrayOfCompound<ET extends CompoundType<ET>> extends CompoundType<FixedArrayOfCompound<ET>> {
+  readonly Local: new(dv: DataView | ArrayBuffer, off: number) => FixedArrayLocal<CTLocal<ET>>;
   constructor(elmTy: ET, count_: number) {
     super();
     assert(typeof elmTy.sizeof == 'number');
     const elmTySizeof: number = elmTy.sizeof;
-    const LocalET = elmTy.Local;
-    class MyLocal extends FixedArrayOfCompoundLocal<LocalET, ET> {
-      _cache: (LocalET | undefined)[] = [];
-      get(i: number): LocalET {
+    const wtf: ET['Local'] = elmTy.Local;
+    const zx: new(dv: DataView | ArrayBuffer, off: number) => InstanceType<ET['Local']> = wtf;
+    class MyLocal extends FixedArrayLocal<CTLocal<ET>> {
+      _cache: (CTLocal<ET> | undefined)[] = [];
+      get(i: number): CTLocal<ET> {
         assert(i >= 0 && i < count_);
-        let ret: LocalET | undefined = this._cache[i];
+        let ret = this._cache[i];
         if (ret === undefined) {
-          ret = this._cache[i] = new LocalET(this.dv, this.off + i * elmTySizeof);
+          let ret2 = new elmTy.Local(this.dv, this.off + i * elmTySizeof);
+          this._cache[i] = ret2;
+          return ret2;
+        } else {
+          return ret;
         }
-        return ret;
       }
-      map<R>(f: (item: LocalET, idx: number) => R): R[] {
+      map<R>(f: (item: CTLocal<ET>, idx: number) => R): R[] {
         return Array.from(Array(count_), (_, i) => f(this.get(i), i));
       }
-      serialize(): ReturnType<LocalET['serialize']>[] {
+      serialize(): CTLocal<ET> extends CompoundTypeLocal ? ReturnType<CTLocal<ET>['serialize']>[] : object {
         return this.map((x) => (x as CompoundTypeLocal).serialize());
       }
       static count: number = count_;
@@ -148,19 +153,14 @@ class FixedArrayOfCompound<LocalET extends CompoundTypeLocal, ET extends Compoun
     this.Local = MyLocal;
   }
 }
-abstract class FixedArrayOfPrimitiveLocal<PT> extends CompoundTypeLocal {
-  abstract get(i: number): PT;
-  abstract map<R>(f: (item: PT, idx: number) => R): R[];
-}
-
-class FixedArrayOfPrimitive<PT, P extends Primitive<PT>> extends CompoundType<FixedArrayOfPrimitiveLocal<PT>> {
-  readonly Local: new(dv: DataView | ArrayBuffer, off: number) => FixedArrayOfPrimitiveLocal<PT>;
+class FixedArrayOfPrimitive<PT, P extends Primitive<PT>> extends CompoundType<FixedArrayOfPrimitive<PT, P>> {
+  readonly Local: new(dv: DataView | ArrayBuffer, off: number) => FixedArrayLocal<PT>;
   constructor(elmTy: P, count_: number) {
     super();
     assert(typeof elmTy.sizeof == 'number');
     const elmTySizeof: number = elmTy.sizeof;
     const getLocal = elmTy.getLocal;
-    class MyLocal extends FixedArrayOfPrimitiveLocal<PT> {
+    class MyLocal extends FixedArrayLocal<PT> {
       get(i: number): PT {
         assert(i >= 0 && i < count_);
         return getLocal(this.dv, this.off + i * elmTySizeof);
@@ -169,7 +169,7 @@ class FixedArrayOfPrimitive<PT, P extends Primitive<PT>> extends CompoundType<Fi
       map<R>(f: (item: PT, idx: number) => R): R[] {
         return Array.from(Array(count_), (_, i) => f(this.get(i), i));
       }
-      serialize() {
+      serialize(): PT[] {
         return this.map((x) => x);
       }
       static count: number = count_;

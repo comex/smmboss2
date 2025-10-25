@@ -33,14 +33,13 @@ async function doWrite(addr: bigint, data: ArrayBufferView): Promise<void> {
   }
 }
 
-interface TypeClass<T extends Type> {
-  // why do I have to duplicate this :(
-  new(...args: any[]): T;
+abstract class Type {
   sizeof?: number;
 }
-abstract class Type {
-  static sizeof?: number;
-}
+type Local<T extends Type> =
+  T extends Primitive<infer PT> ? PT :
+  T extends CompoundType ? InstanceType<T['Local']> :
+  never;
 
 class Primitive<T> extends Type {
   getLocal(dv: DataView, off: number): T { throw new Error('getLocal unimpl'); }
@@ -100,8 +99,8 @@ class Tag8Type extends Primitive<string> {
   }
 }
 
-class CompoundType extends Type {
-  Local: (new(dv: DataView | ArrayBuffer, off: number) => CompoundTypeLocal) | undefined = undefined;
+abstract class CompoundType extends Type {
+  abstract readonly Local: new(dv: DataView | ArrayBuffer, off: number) => CompoundTypeLocal;
 }
 
 class CompoundTypeLocal {
@@ -123,27 +122,29 @@ abstract class FixedArrayLocal<T extends Type> extends CompoundTypeLocal {
   constructor(dv: DataView | ArrayBuffer, off: number) {
     super(dv, off);
   }
+  abstract get(i: number): Local<T>;
+  abstract map<R>(f: (item: Local<T>, idx: number) => R): R[];
+  abstract serialize(): any;
 }
 
-class FixedArray<T extends Type> extends CompoundType {
-  constructor(elmTy: TypeClass<T>, count: number) {
+class FixedArray<ET extends Type> extends CompoundType {
+  readonly Local: new(dv: DataView | ArrayBuffer, off: number) => CompoundTypeLocal;
+  constructor(elmTy: ET, count: number) {
     super();
-    let elmTySizeof = elmTy.sizeof;
-    if (elmTySizeof !== undefined) {
-      assert(typeof elmTySizeof == 'number');
-      this.sizeof = elmTySizeof * count;
-    }
+    assert(typeof elmTy.sizeof == 'number');
+    const elmTySizeof = elmTy.sizeof;
     if (elmTy instanceof CompoundType) {
-      class Local extends FixedArrayLocal<T> {
-        constructor(dv, off) {
-          super(dv, off);
-          this._cache = [];
-        }
-        get(i) {
+      assert(elmTy.Local !== undefined);
+      const ELocal: new(dv: DataView | ArrayBuffer, off: number) => Local<ET> = elmTy.Local;
+      class MyLocal extends FixedArrayLocal<ET> {
+        _cache: (Local<ET> | undefined)[] = [];
+        get(i: number): Local<ET> {
           assert(i >= 0 && i < count);
-          let ret = this._cache[i];
+          let ret: Local<ET> | undefined = this._cache[i];
           if (ret === undefined) {
-            ret = this._cache[i] = new elmTy.Local(this.dv, this.off + i * elmTySizeof);
+            // XXX
+            ret = this._cache[i] =
+              new elmTy_.Local(this.dv, this.off + i * elmTySizeof) as Local<ET>;
           }
           return ret;
         }
@@ -154,27 +155,28 @@ class FixedArray<T extends Type> extends CompoundType {
           return this.map((x) => x.serialize());
         }
       }
-      Local.prototype.count = count;
-      this.Local = Local;
+      this.Local = MyLocal;
     } else {
+      assert(elmTy instanceof Primitive);
+      assert(typeof elmTySizeof == 'number');
+      const elmTySizeof_: number = elmTySizeof;
+      const count_ = count;
       let getLocal = elmTy.getLocal;
-      class Local extends FixedArrayLocal {
-        constructor(dv, off) {
-          super(dv, off);
-        }
-        get(i) {
+      type ET = ReturnType<typeof getLocal>;
+      class Local extends FixedArrayLocal<ET> {
+        get(i: number): ET {
           assert(i >= 0 && i < count);
-          return getLocal(this.dv, this.off + i * elmTySizeof);
+          return getLocal(this.dv, this.off + i * elmTySizeof_);
         }
         // could implement set
-        map(f) {
-          return Array.from(Array(this.count), (_, i) => f(this.get(i), i));
+        map<R>(f: (item: ET, idx: number) => R): R[] {
+          return Array.from(Array(count), (_, i) => f(this.get(i), i));
         }
         serialize() {
           return this.map((x) => x);
         }
+        static count: number = count_;
       }
-      Local.prototype.count = count;
       this.Local = Local;
     }
   }

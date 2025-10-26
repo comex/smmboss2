@@ -1,60 +1,60 @@
-# /// script
-# dependencies = [
-#     "PyYAML",
-# ]
-# ///
-
 import smmboss
 import guest_access
 import re
+from pymonad.maybe import Just, Nothing
 
-def all_keys(iterable_of_iterables):
+def mget(dict, key):
+    try:
+        return Just(dict[key])
+    except KeyError:
+        return Nothing
+
+def unique_inner_items(iterable_of_iterables):
     return list({key: None
                  for outer in iterable_of_iterables
                  for key in outer})
 
-class Absent:
-    pass
-ABSENT = Absent()
-
-def rotate(items_iter_or_dict, ignore_missing=False):
-    '''
-    converts
-    {'a': {'x': 1, 'y': 2}, 'b': {'x': 3, 'x': 4}}
-    to
-    {'x': {'a': 1, 'b': 3}, 'y': {'a': 2, 'b': 4}}
-    '''
-    if isinstance(items_iter_or_dict, dict):
-        items_iter = items_iter_or_dict.items()
-    else:
-        items_iter = iter(items_iter_or_dict)
-    items = list(items_iter)
+def mrotate_dict(dict):
+    '''see assert below for what this does'''
     return {
         inner_key: {
-            outer_key: inner[inner_key]
-            for (outer_key, inner) in items
-            if not ignore_missing or inner_key in inner
+            outer_key: mget(inner, inner_key)
+            for (outer_key, inner) in dict.items()
         }
-        for inner_key in all_keys((inner for (outer_key, inner) in items))
+        for inner_key in unique_inner_items(dict.values())
     }
+assert (
+    mrotate_dict(
+        {'a': {'x': 1, 'y': 2}, 'b': {'x': 3, 'y': 4}, 'c': {'x': 5}}
+    )
+    ==
+    {'x': {'a': Just(1), 'b': Just(3), 'c': Just(5)},
+     'y': {'a': Just(2), 'b': Just(4), 'c': Nothing}}
+)
 
-def only(dict_or_iterable):
-    if isinstance(dict_or_iterable, dict):
-        my_iter = dict_or_iterable.items()
-    else:
-        my_iter = enumerate(dict_or_iterable)
-    have_oval = False
-    for (key, val) in dict_or_iterable.items():
-        if not have_oval:
-            okey = key
-            oval = val
-            have_oval = True
-        else:
-            if oval != val:
-                raise ValueError(f'only: got conflict: [{okey}]=[{oval}] but [{key}]=[{val}]')
-    if not have_oval:
-        raise ValueError(f'only: got no valid values: {dict_or_iterable}')
-    return oval
+def strip_maybe_from_dict_values(dict):
+    '''
+    converts
+    {'foo': Just(1), 'bar': Nothing}
+    to
+    {'foo': 1}
+    '''
+    return {key: maybeval.value
+        for (key, maybeval) in dict.items()
+        if maybeval.is_just()}
+
+def only(iterable):
+    got_any = False
+    for item in iterable:
+        if not got_any:
+            first = item
+            ret = Just(item)
+            got_any = True
+        elif item != first:
+            ret = Nothing
+    if not got_any:
+        raise ValueError(f'only: got empty input {iterable}')
+    return ret
 
 def json_info_for_build(build_id, classes_to_export):
     mm = smmboss.MM.detached(build_id=build_id)
@@ -156,25 +156,40 @@ def git_describe():
     import subprocess
     return subprocess.check_output(['git', 'describe', '--always', '--dirty'], text=True).strip()
 
-def merge_versions(ver_to_val, path=()):
-    assert ver_to_val
-    have_ret = False
+def merge_json_dicts(ver_to_maybeval, path=()):
+    '''get the subset that is valid for all versions''' 
+
+    any_missing = Nothing in ver_to_maybeval.values()
+    ver_to_val = strip_maybe_from_dict_values(ver_to_maybeval)
+
+    match path:
+        case (('addrs', 'version') |
+              ('addrs', 'addrs', _)):
+            # version and addrs will always differ
+            return {'any_missing': any_missing}
+
     val_ty = type(next(iter(ver_to_val.values())))
+
+    ret = Nothing
+
     if issubclass(val_ty, dict):
-        rotated = rotate(ver_to_val, ignore_missing=False)
-        return {key2: merge_versions(ver_to_val2, path + (key2,)) for (key2, ver_to_val2) in rotated.items()}
-    try:
-        return only(ver_to_val)
-    except ValueError:
-        pass
-    # Okay, there is a conflict.
-    ignore_conflict = path and (
-        path[0] == 'addrs'
-    )
-    if ignore_conflict:
-        return None
-    raise Exception(f'merge_versions: unexpected conflict at path {path}: {ver_to_val}')
-    
+        rotated = mrotate_dict(ver_to_val)
+        mret = Just({key2: merge_json_dicts(ver_to_maybeval2, path + (key2,))
+            for (key2, ver_to_maybeval2) in rotated.items()})
+    else:
+        mret = only(ver_to_val.values())
+
+    if mret.is_nothing():
+        # Okay, there is a conflict.
+        raise Exception(f'merge_versions: unexpected conflict at path {path}: {ver_to_val}')
+    ret = mret.value
+    if any_missing:
+        if len(path) >= 2 and path[-2] in ('props', 'classes'):
+            ret['missing_on_some_versions'] = True
+        else:
+            raise Exception(f'merge_versions: unexpectedly had some versions missing at path {path}')
+
+    return ret
 
 def write_typescript(fp):
     def p(*args):
@@ -183,11 +198,12 @@ def write_typescript(fp):
 // autogenerated by py/export.py from rev {git_describe()}
 // do not edit
 ''')
-    jsi = json_info()
-    merged = merge_versions(jsi)
+    merged = merge_json_dicts({ver: Just(jsi) for (ver, jsi) in json_info().items()})
+    p('import { Struct, Type, u8, u16, u32, u64, s8, s16, s32, s64, f32, f64, Array, Pointer } from "types_base";')
     p('type MMAddrs = {')
-    for name in merged['addrs']:
-        p(f'  {name}?: number;')
+    for name, x in merged['addrs']['addrs'].items():
+        question = '?' if x['any_missing'] else ''
+        p(f'  {name}{question}: number;')
     p('};')
 
     def munge(name: str) -> str:
@@ -195,26 +211,34 @@ def write_typescript(fp):
 
     for cls_name, cls_info in merged['classes'].items():
         cls_name = munge(cls_name)
+        class_stuff_common = (
+            f'  static name: string = "{cls_name}";\n'
+            f'  static get(dv: DataView, off: number) {{ return new {cls_name}(dv, off); }}\n'
+        )
         match cls_info['kind']:
             case 'struct':
                 base = cls_info['base'] or 'Struct'
+                for prop_name, prop_info in cls_info['props'].items():
+                    p(f'var offsetof_{cls_name}_{prop_name}: number;')
                 p(f'export class {cls_name} extends {base} {{')
+                p(class_stuff_common)
                 for prop_name, prop_info in cls_info['props'].items():
                     prop_ty = munge(prop_info['ptr_cls'])
-                    p(f'  offsetof_{prop_name}: number;')
-                    p(f'  get {prop_name}() {{ return {prop_ty}.get(this.dv, this.off + this.offsetof_{prop_name}; }}')
+                    p(f'  get {prop_name}() {{ return {prop_ty}.get(this.dv, this.off + offsetof_{cls_name}_{prop_name}); }}')
                 p(f'}}')
             case 'primitive':
                 pass
             case 'fixed_array':
                 val_ptr_cls = munge(cls_info['val_ptr_cls'])
-                p(f'class {cls_name} extends GuestArray<{val_ptr_cls}> {{')
+                p(f'export class {cls_name} extends Array<typeof {val_ptr_cls}> {{')
+                p(class_stuff_common)
                 p(f'  static readonly Element = {val_cls};')
                 p(f'  static readonly count = {cls_info['count']};')
                 p(f'}}')
             case 'ptr':
                 val_cls = munge(cls_info['val_cls'])
-                p(f'class {cls_name} extends GuestPtr<{val_cls}> {{')
+                p(f'export class {cls_name} extends Pointer<typeof {val_cls}> {{')
+                p(class_stuff_common)
                 p(f'  static readonly Pointee = {val_cls};')
                 p(f'}}')
             case _:

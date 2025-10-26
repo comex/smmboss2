@@ -874,9 +874,14 @@ class AreaSystem(GuestStruct):
 
     flower = prop(0x178, lambda: ptr_to(Flower))
 
-    # XXX: this conditionally-defined property just for testing export.py
+    # NOTE: this conditionally-defined property is just for testing export.py
     if mm.version >= 302:
-        fake_prop = prop(0x120, u32)
+        fake_prop = prop(0x120, lambda: FakeStruct)
+
+if mm.version >= 302:
+    # also this conditionally-defined class
+    class FakeStruct(GuestStruct):
+        fake_prop2 = prop(0x120, u32)
 
 # random name, I have no idea what this is
 class Flower(GuestStruct):

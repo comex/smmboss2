@@ -1,3 +1,5 @@
+import * as mmTypes from 'build/export';
+
 var theRPCConn: RPCConn
 
 function hex(n: number): string {

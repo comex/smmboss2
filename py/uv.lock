@@ -151,6 +151,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "ipython" },
+    { name = "pymonad" },
     { name = "pyyaml" },
     { name = "unicorn" },
     { name = "websockets" },
@@ -159,6 +160,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "ipython" },
+    { name = "pymonad" },
     { name = "pyyaml" },
     { name = "unicorn" },
     { name = "websockets" },
@@ -171,6 +173,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/b0/77/a5b8c569bf593b0140bde72ea885a803b82086995367bf2037de0159d924/pygments-2.19.2.tar.gz", hash = "sha256:636cb2477cec7f8952536970bc533bc43743542f70392ae026374600add5b887", size = 4968631 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c7/21/705964c7812476f378728bdf590ca4b771ec72385c533964653c68e86bdc/pygments-2.19.2-py3-none-any.whl", hash = "sha256:86540386c03d588bb81d44bc3928634ff26449851e99741617ecb9037ee5ec0b", size = 1225217 },
+]
+
+[[package]]
+name = "pymonad"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3b/4e/68803065743007b7dc000c543f45f6e407f8a1cbc673fdab016df3ca4b44/PyMonad-2.4.0.tar.gz", hash = "sha256:6b9d98e40bf2e0f1cc1900309365f9ba4997f3432a1d6e71f80f41ace2890204", size = 22870 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8d/42/461af4ed7ea252b46c53b59f965d5f1eda971eef4d0c12f8320286578bf3/PyMonad-2.4.0-py3-none-any.whl", hash = "sha256:e78d9bf3b0712b165d4f43c29b0c1b23ed3ff11dbae1a6d61402cda7f0827d1a", size = 29141 },
 ]
 
 [[package]]

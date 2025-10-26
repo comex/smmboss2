@@ -1,7 +1,8 @@
+import re
+import json
+from pymonad.maybe import Just, Nothing
 import smmboss
 import guest_access
-import re
-from pymonad.maybe import Just, Nothing
 
 def mget(dict, key):
     try:
@@ -229,7 +230,6 @@ def write_typescript(fp):
                 if cls_info['base']:
                     emit_class(cls_info['base'])
                     munged_base = munge(cls_info['base'])
-                p(f'let sizeof_{munged_cls}: bigint | undefined = undefined;')
                 for prop_name, prop_info in cls_info['props'].items():
                     p(f'let offsetof_{munged_cls}_{prop_name}: bigint | undefined = undefined;')
                 p(f'export class {munged_cls} extends {munged_base} {{')
@@ -237,9 +237,9 @@ def write_typescript(fp):
                 if not cls_info['sizeof']['any_present']:
                     pass
                 elif cls_info['sizeof']['any_missing']:
-                    #p(f'  static sizeof(): bigint? {{ return sizeof_{munged_cls}; }}')
+                    p(f'  static sizeof: bigint? = undefined;')
                 else:
-                    p(f'  static sizeof(): bigint {{ return sizeof_{munged_cls} as bigint; }}')
+                    p(f'  static sizeof: bigint = undefined as any;')
                 p(f'  static get(dv: DataView, off: bigint) {{ return new {munged_cls}(dv, off); }}')
                 p(f'  get type(): typeof {munged_cls} {{ return {munged_cls}; }}')
                 for prop_name, prop_info in cls_info['props'].items():
@@ -268,14 +268,14 @@ def write_typescript(fp):
     for cls_name in merged['classes']:
         emit_class(cls_name)
 
-    p('export const setOffsets: { [ver: number]: () => void } = {')
+    p('export const setOffsets: { [build_id: string]: () => void } = {')
     for ver, jsi in ver_to_jsi.items():
-        p(f'  [{ver}]: () => {{')
+        p(f'  [{json.dumps(ver)}]: () => {{')
         for cls_name, cls_info in jsi['classes'].items():
             munged_cls = munge(cls_name)
             if cls_info['kind'] == 'struct':
                 if cls_info['sizeof'] is not None:
-                    p(f'    sizeof_{munged_cls} = {cls_info["sizeof"]}n;')
+                    p(f'    {munged_cls}.sizeof = {cls_info["sizeof"]}n;')
                 for prop_name, prop_info in cls_info['props'].items():
                     p(f'    offsetof_{munged_cls}_{prop_name} = {prop_info["offset"]}n;')
         p(f'  }},')

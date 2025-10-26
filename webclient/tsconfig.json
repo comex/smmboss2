@@ -9,7 +9,7 @@
   "files": [
     "client.ts",
     "types_base.ts",
-    "build/export.ts"
+    "build/mm_types.ts"
   ],
 }
 

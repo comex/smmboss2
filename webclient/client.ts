@@ -1,4 +1,4 @@
-import * as mmTypes from 'build/export';
+import * as mmTypes from 'build/mm_types';
 import { assert } from 'types_base';
 
 var theRPCConn: RPCConn
@@ -74,295 +74,22 @@ class IntType<T> extends Primitive<T> {
 }
 
 
-let utf8Decoder = new TextDecoder();
-class CStringType extends Primitive<string> {
-  // ??
-}
+const utf8Decoder = new TextDecoder();
 
-class Tag8Type extends Primitive<string> {
-  sizeof = 8;
-  getLocal(dv: DataView, off: number): string {
-    let bytes = [];
-    for (let i = 0; i < 8; i++) {
-      bytes.push(dv.getUint8(off + i));
-    }
-    while (bytes.length > 0 && bytes[bytes.length - 1] == 0) {
-      bytes.pop();
-    }
-    return String.fromCharCode(...bytes);
+declare module 'build/mm_types' {
+  interface Rect {
+    get width(): number;
+    get height(): number;
   }
 }
-
-type LocalCtor<L> = new(dv: DataView | ArrayBuffer, off: number) => L;
-
-abstract class CompoundType<L> extends Type<L> {
-  abstract readonly Local: LocalCtor<L>;
-}
-
-abstract class CompoundTypeLocal {
-  dv: DataView;
-  _ptr?: bigint;
-  constructor(dv: DataView | ArrayBuffer, public off: number) {
-    this.dv = (dv instanceof DataView) ? dv : new DataView(dv);
-  }
-  readPtrFromWithin<T>(ptr: bigint, ty: Primitive<T>): T {
-    // this assumes someone wrote the _ptr field on this.
-    assert(this._ptr !== undefined);
-    let offset = ptr - this._ptr;
-    assert(offset >= 0n && offset < 0x100000n);
-    return ty.getLocal(this.dv, this.off + Number(offset));
-  }
-  abstract serialize(): any;
-}
-
-abstract class FixedArrayLocal<ETLocal> extends CompoundTypeLocal {
-  abstract get(i: number): ETLocal;
-  abstract map<R>(f: (item: ETLocal, idx: number) => R): R[];
-}
-
-class FixedArray<EL, ET extends Type<EL>> extends CompoundType<FixedArrayLocal<EL>> {
-  // @ts-expect-error (we don't assign)
-  Local: LocalCtor<FixedArrayLocal<EL>>;
-  constructor(elmTy: ET, count: number) {
-    super();
-    // Hack for TypeScript: if constructing FixedArray directly, pick one of
-    // the subclasses depending on arguments.
-    if (this.constructor === FixedArray) {
-      if (elmTy instanceof CompoundType) {
-        // @ts-expect-error (we are assuming `EL extends CompoundTypeLocal`)
-        return new FixedArrayOfCompound<EL, ET>(elmTy, count);
-      } else if (elmTy instanceof Primitive) {
-        // @ts-expect-error (we're not assuming anything here but tsc is stupid)
-        return new FixedArrayOfPrimitive<EL, ET>(elmTy, count);
-      } else {
-        throw new Error('invalid type');
-      }
-    }
-  }
-}
-class FixedArrayOfCompound<EL extends CompoundTypeLocal, ET extends CompoundType<EL>> extends FixedArray<EL, ET> {
-  constructor(elmTy: ET, count_: number) {
-    super(elmTy, count_);
-    assert(typeof elmTy.sizeof == 'number');
-    const elmTySizeof: number = elmTy.sizeof;
-    class MyLocal extends FixedArrayLocal<EL> {
-      _cache: (EL | undefined)[] = [];
-      get(i: number): EL {
-        assert(i >= 0 && i < count_);
-        let ret = this._cache[i];
-        if (ret === undefined) {
-          let ret2 = new elmTy.Local(this.dv, this.off + i * elmTySizeof);
-          this._cache[i] = ret2;
-          return ret2;
-        } else {
-          return ret;
-        }
-      }
-      map<R>(f: (item: EL, idx: number) => R): R[] {
-        return Array.from(Array(count_), (_, i) => f(this.get(i), i));
-      }
-      serialize(): ReturnType<EL['serialize']>[] {
-        return this.map((x) => x.serialize());
-      }
-      static count: number = count_;
-    }
-    this.Local = MyLocal;
-  }
-}
-class FixedArrayOfPrimitive<PT, P extends Primitive<PT>> extends FixedArray<PT, P> {
-  constructor(elmTy: P, count_: number) {
-    super(elmTy, count_);
-    assert(typeof elmTy.sizeof == 'number');
-    const elmTySizeof: number = elmTy.sizeof;
-    const getLocal = elmTy.getLocal;
-    class MyLocal extends FixedArrayLocal<PT> {
-      get(i: number): PT {
-        assert(i >= 0 && i < count_);
-        return getLocal(this.dv, this.off + i * elmTySizeof);
-      }
-      // could implement set
-      map<R>(f: (item: PT, idx: number) => R): R[] {
-        return Array.from(Array(count_), (_, i) => f(this.get(i), i));
-      }
-      serialize(): PT[] {
-        return this.map((x) => x);
-      }
-      static count: number = count_;
-    }
-    this.Local = MyLocal;
-  }
-}
-
-abstract class StructLocal extends CompoundTypeLocal {
-  // @ts-expect-error (we don't assign)
-  readonly struct: Struct<any>;
-  constructor(dv: DataView | ArrayBuffer, off: number) {
-    super(dv, off);
-    // @ts-expect-error (we don't assign)
-    let struct = this.struct;
-    if (struct.sizeof !== undefined) {
-      assert(this.dv.byteLength >= off + struct.sizeof);
-    }
-  }
-  serialize(): any { // TODO: improve type
-    let ret: any = {};
-    for (let {fieldName} of this.struct.fields) {
-      let val = (this as any)[fieldName];
-      if (val.serialize !== undefined) {
-        val = val.serialize();
-      }
-      ret[fieldName] = val;
-    }
-    return ret;
-  }
-
-}
-
-type Field = {fieldName: string, off: number, ty: Type<any>};
-type ExtraLocalMethods = <XL extends StructLocal>(
-  orig: new(dv: DataView | ArrayBuffer, off: number) => object) =>
-  new(dv: DataView | ArrayBuffer, off: number) => InstanceType<typeof orig>;
-
-class Struct<SL extends StructLocal> extends CompoundType<SL> {
-  _Local?: LocalCtor<SL>;
-  _fields?: Field[];
-  saneName: string;
-  constructor(public name: string, public info: any,
-              public extraLocalMethods: ExtraLocalMethods,
-              public mmTypes: MMTypes) {
-    super();
-    this.sizeof = info.sizeof;
-    this.saneName = this.name.replaceAll(/[\(\),]/g, '_');
-  }
-
-  // lazy to avoid issues with recursion
-  get fields(): Field[] {
-    if (this._fields !== undefined) {
-      return this._fields;
-    }
-    this._fields = [];
-    let props: [string: {offset: number, ptr_cls: string}] = this.info.props;
-    for (let [fieldName, {offset, ptr_cls}] of Object.entries(props)) {
-      this._fields.push({fieldName, off: offset, ty: this.mmTypes.loadType(ptr_cls)});
-    }
-    return this._fields;
-  }
-
-  get Local(): LocalCtor<SL> {
-    if (this._Local !== undefined) {
-      return this._Local;
-    }
-    let superclass = this.info.base ? this.mmTypes.loadType(this.info.base).Local : StructLocal;
-    let argNames = ['superclass'];
-    let argVals = [superclass];
-    let code = `
-      class ${this.saneName}_Local extends superclass {
-        constructor(dv, off = 0) {
-          super(dv, off);
-    `
-    for (let {fieldName, off, ty} of this.fields) {
-      if (ty instanceof CompoundType) {
-        code += `
-          this._${fieldName} = undefined;
-        `;
-      }
-    }
-    code += `
-        }
-    `;
-    for (let {fieldName, off, ty} of this.fields) {
-      if (ty instanceof Primitive) {
-        argNames.push(`getLocal_${fieldName}`, `setLocal_${fieldName}`);
-        argVals.push(ty.getLocal, ty.setLocal);
-        code += `
-          get ${fieldName}() { return getLocal_${fieldName}(this.dv, this.off + ${off}); }
-          set ${fieldName}(val) { return setLocal_${fieldName}(this.dv, this.off + ${off}, val); }
-        `
-      } else {
-        assert(ty instanceof CompoundType);
-        argNames.push(`ty_${fieldName}_Local`);
-        argVals.push(ty.Local);
-        // todo: cache
-        code += `
-          get ${fieldName}() {
-            if (this._${fieldName} === undefined) {
-              this._${fieldName} = new ty_${fieldName}_Local(this.dv, this.off + ${off});
-            }
-            return this._${fieldName};
-          }
-        `
-      }
-    }
-    code += `
-      }
-      return ${this.saneName}_Local;
-    `;
-    let cls = new Function(...argNames, code)(...argVals);
-    cls.prototype.struct = this;
-    for (let {fieldName, off, ty} of this.fields) {
-      cls.prototype[`offsetof_${fieldName}`] = off;
-    }
-    if (this.extraLocalMethods) {
-      // inject a subclass
-      cls = this.extraLocalMethods(cls);
-    }
-    this._Local = cls;
-    return cls;
-  }
-  /*
-  makeRemoteClass() {
-    // TODO: redo this to be more useful
-    let argNames = [];
-    let argVals = [];
-    let code = `
-      class ${this.name}_Remote {
-        constructor(addr) {
-          this.addr = addr;
-        }
-    `;
-    for (let [fieldName, off, ty] of this.fields) {
-      if (ty instanceof Primitive) {
-        argNames.push(`getRemote_${fieldName}`, `setRemote_${fieldName}`);
-        argVals.push(ty.getRemote, ty.setRemote);
-        let setterName = 'set' + fieldName[0].toUpperCase() + fieldName.slice(1);
-        code += `
-          ${fieldName}() { return getRemote_${fieldName}(this.addr + ${off}n); }
-          ${setterName}(val) { return setRemote_${fieldName}(this.addr + ${off}n, val); }
-        `
-      } else {
-        assert(ty instanceof CompoundType);
-        argNames.push(`ty_${fieldName}`);
-        argVals.push(ty);
-        code += `
-          ${fieldName}() { return new ty_${fieldName}(this.addr + ${off}n); }
-        `
-      }
-    }
-    code += `
-      }
-      return ${this.name}_Remote;
-    `;
-    return new Function(...argNames, code)(...argVals);
-  }
-  */
-
-  getLocal(dv: DataView, off: number): SL {
-    return new this.Local(dv, off);
-  }
-}
-
-let ty_ = {
-  tag8: new Tag8Type,
-  CString: new CStringType,
-};
-let ty = {
-  ...ty_,
-  GuestCString: ty_.CString,
-  GuestPtr: ty_.u64,
-};
+Object.defineProperty(mmTypes.Rect, 'width', {
+  get(): number { return this.max.x - this.min.x; }
+});
+Object.defineProperty(mmTypes.Rect, 'height', {
+  get(): number { return this.max.y - this.min.y; }
+});
 
 class MMTypes {
-  static extraLocalMethodsFor: { [name: string]: ExtraLocalMethods } = {};
   export: any;
   [name: string]: any; // TODO
 
@@ -408,14 +135,6 @@ class MMTypes {
   }
 
 }
-MMTypes.extraLocalMethodsFor.Rect = (base) => class extends base {
-  width() {
-    return this.max.x - this.min.x;
-  }
-  height() {
-    return this.max.y - this.min.y;
-  }
-};
 
 class Reader {
   constructor(dv, off = 0) {

@@ -1,11 +1,11 @@
 WEBCLIENT ?= .
 WBUILD := $(abspath $(WEBCLIENT)/build)
-$(WBUILD)/ran_tsc: $(glob $(WEBCLIENT)/*.ts) $(WBUILD)/export.ts
+$(WBUILD)/ran_tsc: $(glob $(WEBCLIENT)/*.ts) $(WBUILD)/mm_types.ts
 	tsc -p $(WEBCLIENT)/tsconfig.json && touch $@
-$(WBUILD)/export.ts:
+$(WBUILD)/mm_types.ts:
 	mkdir -p $(WBUILD)
-	cd $(WEBCLIENT)/../py && uv run export.py typescript $@ $(WBUILD)/export.ts.d
--include $(WBUILD)/export.ts.d
+	cd $(WEBCLIENT)/../py && uv run export.py typescript $@ $(WBUILD)/mm_types.ts.d
+-include $(WBUILD)/mm_types.ts.d
 .PHONY: tsc-watch
 tsc-watch:
 	tsc -p $(WEBCLIENT)/tsconfig.json -w

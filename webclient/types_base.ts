@@ -152,3 +152,17 @@ export class GuestCString extends Instance {
   get type() : typeof GuestCString { return GuestCString; }
   static get(dv: DataView, off: bigint) { return new GuestCString(dv, off); }
 }
+
+export class Tag8 {
+  static readonly sizeof = 8n;
+  get(dv: DataView, off: number): string {
+    let bytes = [];
+    for (let i = 0; i < 8; i++) {
+      bytes.push(dv.getUint8(off + i));
+    }
+    while (bytes.length > 0 && bytes[bytes.length - 1] == 0) {
+      bytes.pop();
+    }
+    return String.fromCharCode(...bytes);
+  }
+}

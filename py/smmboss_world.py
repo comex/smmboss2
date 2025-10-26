@@ -881,7 +881,10 @@ class AreaSystem(GuestStruct):
 if mm.version >= 302:
     # also this conditionally-defined class
     class FakeStruct(GuestStruct):
-        fake_prop2 = prop(0x120, u32)
+        fake_prop2 = prop(0x120, lambda: FakeStruct2)
+# also this
+class FakeStruct2(GuestStruct):
+    sizeof = mm.version
 
 # random name, I have no idea what this is
 class Flower(GuestStruct):

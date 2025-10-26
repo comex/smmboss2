@@ -230,17 +230,12 @@ def write_typescript(fp):
                 pass
             case 'fixed_array':
                 val_ptr_cls = munge(cls_info['val_ptr_cls'])
-                p(f'export class {cls_name} extends Array<typeof {val_ptr_cls}> {{')
-                p(class_stuff_common)
-                p(f'  static readonly Element = {val_cls};')
-                p(f'  static readonly count = {cls_info['count']};')
-                p(f'}}')
+                p(f'export type {cls_name} = ArrayInstance<{val_ptr_cls}>;')
+                p(f'export const {cls_name} = new Array("{cls_name}", {cls_info["count"]}, {val_ptr_cls});')
             case 'ptr':
                 val_cls = munge(cls_info['val_cls'])
-                p(f'export class {cls_name} extends Pointer<typeof {val_cls}> {{')
-                p(class_stuff_common)
-                p(f'  static readonly Pointee = {val_cls};')
-                p(f'}}')
+                p(f'export type {cls_name} = PointerInstance<{val_ptr_cls}>;')
+                p(f'export const {cls_name} = new Pointer("{cls_name}", {cls_info["count"]}, {val_cls});')
             case _:
                 raise ValueError(kind)
 

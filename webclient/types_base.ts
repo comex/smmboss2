@@ -1,12 +1,12 @@
 export abstract class Struct {
   constructor(public dv: DataView, public off: number) {}
 }
-export interface Type {
+export interface Type<T> {
   name: string;
   sizeof?: bigint;
-  get(dv: DataView, off: number): unknown;
+  get(dv: DataView, off: number): T;
 }
-class NumericType<T> implements Type {
+class NumericType<T> implements Type<T> {
 
   constructor(public name: string, public sizeof: bigint, dataViewName: string, needBigintConversion: boolean) {
     let code;
@@ -22,13 +22,21 @@ class NumericType<T> implements Type {
   }
 }
 
-abstract interface ArrayConstructor {
-  
+export class Array<ItemI, ItemT extends Type<ItemI>> implements Type<ArrayInstance<ItemI, ItemT>> {
+  readonly Instance: (dv: DataView, off: number) => ArrayInstance<ItemI, ItemT>;
+  constructor(public name: string, public count: number, public itemTy: ItemT) {
+    let arrayThis = this;
+    this.Instance = class {
+      new 
+
+    };
+  }
+  get(dv: DataView, off: number): ArrayInstance<ItemI, ItemT> {
+    return new ArrayInstance
+  }
 }
-export abstract class Array<T extends Type> {
-  
-}
-export abstract class Pointer<T extends Type> {
+export interface ArrayInstance<ItemI, ItemT extends Type<ItemI>> {
+  constructor: Array<ItemI, ItemT>;
 }
 
 export const u8 =  new NumericType<bigint>('u8',  1n, 'Uint8', true);

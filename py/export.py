@@ -8,17 +8,16 @@ import smmboss
 import guest_access
 import re
 
-def all_keys(iterable_of_iterables, ignore):
+def all_keys(iterable_of_iterables):
     return list({key: None
                  for outer in iterable_of_iterables
-                 if outer is not ignore
                  for key in outer})
 
 class Absent:
     pass
 ABSENT = Absent()
 
-def rotate(items_iter_or_dict, default=ABSENT):
+def rotate(items_iter_or_dict, ignore_missing=False):
     '''
     converts
     {'a': {'x': 1, 'y': 2}, 'b': {'x': 3, 'x': 4}}
@@ -32,24 +31,21 @@ def rotate(items_iter_or_dict, default=ABSENT):
     items = list(items_iter)
     return {
         inner_key: {
-            outer_key: (#inner[inner_key] if default is _no_default else
-                        default if inner is ABSENT else
-                        inner.get(inner_key, default))
+            outer_key: inner[inner_key]
             for (outer_key, inner) in items
+            if not ignore_missing or inner_key in inner
         }
-        for inner_key in all_keys((inner for (outer_key, inner) in items), ignore=default)
+        for inner_key in all_keys((inner for (outer_key, inner) in items))
     }
 
-def only(dict_or_iterable, ignore=ABSENT):
+def only(dict_or_iterable):
     if isinstance(dict_or_iterable, dict):
         my_iter = dict_or_iterable.items()
     else:
         my_iter = enumerate(dict_or_iterable)
     have_oval = False
     for (key, val) in dict_or_iterable.items():
-        if val is ignore:
-            pass
-        elif not have_oval:
+        if not have_oval:
             okey = key
             oval = val
             have_oval = True
@@ -69,14 +65,14 @@ def json_info_for_build(build_id, classes_to_export):
         if cls.__name__ in cls_infos:
             return
         cls_infos[cls.__name__] = None
+        sizeof = getattr(cls, 'sizeof_star', None)
+        if isinstance(sizeof, property):
+            sizeof = None
         if issubclass(cls, world.GuestStruct):
             base = cls._base_guest_struct()
             if base is not None:
                 add_info_for(base)
 
-            sizeof = getattr(cls, 'sizeof_star', None)
-            if isinstance(sizeof, property):
-                sizeof = None
             cls_info = {
                 'kind': 'struct',
                 'sizeof': sizeof,
@@ -109,7 +105,7 @@ def json_info_for_build(build_id, classes_to_export):
               cls is world.GuestCString):
             cls_info = {
                 'kind': 'primitive',
-                'size': cls.sizeof_star,
+                'sizeof': sizeof,
                 'is_float': isinstance(cls, world.GuestPrimPtr) and cls.code in 'fd',
                 'is_integer': isinstance(cls, world.GuestPrimPtr) and cls.code not in 'fd',
             }
@@ -163,59 +159,22 @@ def git_describe():
 def merge_versions(ver_to_val, path=()):
     assert ver_to_val
     have_ret = False
-    for ver, val in ver_to_val.items():
-        if isinstance(val, dict):
-            if have_ret:
-                
     val_ty = type(next(iter(ver_to_val.values())))
     if issubclass(val_ty, dict):
-        ret = {}r
-        for 
+        rotated = rotate(ver_to_val, ignore_missing=False)
+        return {key2: merge_versions(ver_to_val2, path + (key2,)) for (key2, ver_to_val2) in rotated.items()}
+    try:
+        return only(ver_to_val)
+    except ValueError:
+        pass
+    # Okay, there is a conflict.
+    ignore_conflict = path and (
+        path[0] == 'addrs'
+    )
+    if ignore_conflict:
+        return None
+    raise Exception(f'merge_versions: unexpected conflict at path {path}: {ver_to_val}')
     
-def merge_json_info(version_to_json_info):
-    # Return a variant of the json_info dict merging together type info from
-    # all the versions.  This function assumes that all variation between
-    # versions consists of (1) offsets/sizes being different and
-    # (2) types/fields being missing.  For now that assumption is never
-    # violated, but if there are ever types that have completely different
-    # structures between versions, this would have to skip them or add special
-    # cases.
-    json_info = rotate(version_to_json_info)
-    out = {
-        'classes': {},
-        # list of the *names* of addrs, even if the addrs themselves differ
-        'addr_names': list(rotate(json_info['addrs'])),
-    }
-    for cls_name, ver_to_cls_info in rotate(json_info['classes']).items():
-        cls_info = rotate(ver_to_cls_info)
-        kind = only(cls_info['kind'])
-        out_info = {'kind': kind}
-        out['classes'][cls_name] = out_info
-        match kind:
-            case 'struct':
-                out_info['base'] = only(cls_info['base'])
-                out_props = {}
-                out_info['props'] = out_props
-                for prop_name, ver_to_prop_info in rotate(cls_info['props']).items():
-                    prop_info = rotate(ver_to_prop_info)
-                    out_props[prop_name] = {'ptr_cls': only(prop_info['ptr_cls'])}
-            case 'ptr':
-                out_info['val_cls'] = only(cls_info['val_cls'])
-            case 'fixed_array':
-                out_info['count'] = only(cls_info['count'])
-                out_info['val_ptr_cls'] = only(cls_info['val_ptr_cls'])
-            case 'primitive':
-                out_info['size'] = only(cls_info['size'])
-                out_info['is_float'] = only(cls_info['is_float'])
-                out_info['is_integer'] = only(cls_info['is_integer'])
-            case _:
-                raise ValueError(kind)
-    return out
-
-def primitive_to_typescript_tys(name, info):
-    if info['is_float']:
-        return ('number', 'number')
-    elif info['size'] 
 
 def write_typescript(fp):
     def p(*args):
@@ -225,9 +184,9 @@ def write_typescript(fp):
 // do not edit
 ''')
     jsi = json_info()
-    merged = merge_json_info(jsi)
+    merged = merge_versions(jsi)
     p('type MMAddrs = {')
-    for name in merged['addr_names']:
+    for name in merged['addrs']:
         p(f'  {name}?: number;')
     p('};')
 
@@ -239,14 +198,11 @@ def write_typescript(fp):
         match cls_info['kind']:
             case 'struct':
                 base = cls_info['base'] or 'Struct'
-                p(f'class {cls_name} extends {base} {{')
+                p(f'export class {cls_name} extends {base} {{')
                 for prop_name, prop_info in cls_info['props'].items():
-                    prop_ty_raw = prop_info['ptr_cls']
-                    prop_ty = munge(prop_ty_raw)
-                    if merged['classes'][prop_ty_raw]['kind'] == 'primitive':
-                        pass
-
-                    p(f'  get {prop_name}(): {prop_ty} {{ }}')
+                    prop_ty = munge(prop_info['ptr_cls'])
+                    p(f'  offsetof_{prop_name}: number;')
+                    p(f'  get {prop_name}() {{ return {prop_ty}.get(this.dv, this.off + this.offsetof_{prop_name}; }}')
                 p(f'}}')
             case 'primitive':
                 pass

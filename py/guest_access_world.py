@@ -341,6 +341,7 @@ class GuestStruct(GuestPtr):
         return ret
 
 class GuestCString(GuestPtr):
+    @property
     def sizeof_star(self):
         raise Exception('did you really mean to get sizeof(cstring)?')
     def get(self):

@@ -1,14 +1,10 @@
 import * as mmTypes from 'build/export';
+import { assert } from 'types_base';
 
 var theRPCConn: RPCConn
 
 function hex(n: number): string {
   return '0x'+n.toString(16);
-}
-function assert(x: boolean): asserts x {
-  if (!(x)) {
-    throw new Error('assertion failed');
-  }
 }
 function yieldMe(): Promise<void> {
   let { promise, resolve, reject } = Promise.withResolvers<void>();
@@ -356,16 +352,6 @@ class Struct<SL extends StructLocal> extends CompoundType<SL> {
 }
 
 let ty_ = {
-  u8:  new IntType<number>('u8',  1, 'Uint8'),
-  u16: new IntType<number>('u16', 2, 'Uint16'),
-  u32: new IntType<number>('u32', 4, 'Uint32'),
-  u64: new IntType<bigint>('u64', 8, 'BigUint64', {needBigWrap: true}),
-  s8 : new IntType<number>('s8',  1, 'Int8'),
-  s16: new IntType<number>('s16', 2, 'Int16'),
-  s32: new IntType<number>('s32', 4, 'Int32'),
-  s64: new IntType<bigint>('s64', 8, 'BigInt64', {needBigWrap: true}),
-  f32: new IntType<number>('f32', 4, 'Float32'),
-  f64: new IntType<number>('f64', 8, 'Float64'),
   tag8: new Tag8Type,
   CString: new CStringType,
 };

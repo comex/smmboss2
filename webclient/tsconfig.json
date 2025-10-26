@@ -3,11 +3,13 @@
     "strict": true,
     "lib": [ "esnext", "dom", "dom.iterable" ],
     "target": "esnext",
-    "module": "esnext"
+    "module": "esnext",
+    "outDir": "build"
   },
   "files": [
-    "client.ts"
+    "client.ts",
+    "types_base.ts",
+    "build/export.ts"
   ],
-  "outDir": "build"
 }
 

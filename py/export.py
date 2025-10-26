@@ -199,45 +199,60 @@ def write_typescript(fp):
 // do not edit
 ''')
     merged = merge_json_dicts({ver: Just(jsi) for (ver, jsi) in json_info().items()})
-    p('import { Struct, Type, u8, u16, u32, u64, s8, s16, s32, s64, f32, f64, Array, Pointer } from "types_base";')
+    p('import {')
+    p('  Struct, Type, u8, u16, u32, u64, s8, s16,')
+    p('  s32, s64, f32, f64, Array, Pointer,')
+    p('  createArrayType, createPointerType, GuestPtr,')
+    p('  Angle, GuestCString,')
+    p('} from "types_base";')
     p('type MMAddrs = {')
     for name, x in merged['addrs']['addrs'].items():
         question = '?' if x['any_missing'] else ''
-        p(f'  {name}{question}: number;')
+        p(f'  {name}{question}: bigint;')
     p('};')
 
     def munge(name: str) -> str:
         return re.sub(r'[\(\),]', '_', re.sub(r'\s', '', name))
 
-    for cls_name, cls_info in merged['classes'].items():
-        cls_name = munge(cls_name)
-        class_stuff_common = (
-            f'  static name: string = "{cls_name}";\n'
-            f'  static get(dv: DataView, off: number) {{ return new {cls_name}(dv, off); }}\n'
-        )
+    did_classes = set()
+    def emit_class(cls_name):
+        cls_info = merged['classes'][cls_name]
+        if cls_name in did_classes:
+            return
+        did_classes.add(cls_name)
+        munged_name = munge(cls_name)
         match cls_info['kind']:
             case 'struct':
-                base = cls_info['base'] or 'Struct'
+                munged_base = 'Struct'
+                if cls_info['base']:
+                    emit_class(cls_info['base'])
+                    munged_base = munge(cls_info['base'])
                 for prop_name, prop_info in cls_info['props'].items():
-                    p(f'var offsetof_{cls_name}_{prop_name}: number;')
-                p(f'export class {cls_name} extends {base} {{')
-                p(class_stuff_common)
+                    p(f'var offsetof_{munged_name}_{prop_name}: bigint;')
+                p(f'export class {munged_name} extends {munged_base} {{')
+                p(f'  static name: string = "{munged_name}";')
+                p(f'  static get(dv: DataView, off: bigint) {{ return new {munged_name}(dv, off); }}')
+                p(f'  get type(): typeof {munged_name} {{ return {munged_name}; }}')
                 for prop_name, prop_info in cls_info['props'].items():
                     prop_ty = munge(prop_info['ptr_cls'])
-                    p(f'  get {prop_name}() {{ return {prop_ty}.get(this.dv, this.off + offsetof_{cls_name}_{prop_name}); }}')
+                    p(f'  get {prop_name}() {{ return {prop_ty}.get(this.dv, this.off + offsetof_{munged_name}_{prop_name}); }}')
                 p(f'}}')
             case 'primitive':
                 pass
             case 'fixed_array':
-                val_ptr_cls = munge(cls_info['val_ptr_cls'])
-                p(f'export type {cls_name} = ArrayInstance<{val_ptr_cls}>;')
-                p(f'export const {cls_name} = new Array("{cls_name}", {cls_info["count"]}, {val_ptr_cls});')
+                emit_class(cls_info['val_ptr_cls'])
+                munged_item = munge(cls_info['val_ptr_cls'])
+                p(f'export type {munged_name} = Array<{munged_item}>;')
+                p(f'export const {munged_name} = createArrayType("{munged_name}", {cls_info["count"]}n, {munged_item});')
             case 'ptr':
-                val_cls = munge(cls_info['val_cls'])
-                p(f'export type {cls_name} = PointerInstance<{val_ptr_cls}>;')
-                p(f'export const {cls_name} = new Pointer("{cls_name}", {cls_info["count"]}, {val_cls});')
+                emit_class(cls_info['val_cls'])
+                munged_pointee = munge(cls_info['val_cls'])
+                p(f'export type {munged_name} = Pointer<{munged_pointee}>;')
+                p(f'export const {munged_name} = createPointerType("{munged_name}", {munged_pointee});')
             case _:
-                raise ValueError(kind)
+                raise ValueError(cls_info)
+    for cls_name in merged['classes']:
+        emit_class(cls_name)
 
 def write_cpp_header(fp):
     def p(*args):

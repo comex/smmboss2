@@ -1,13 +1,22 @@
-export abstract class Struct {
-  constructor(public dv: DataView, public off: number) {}
+export interface DataViewWithAddr extends DataView {
+  addr: bigint;
+}
+
+export function assert(x: boolean): asserts x {
+  if (!(x)) {
+    throw new Error('assertion failed');
+  }
+}
+export abstract class Instance {
+  abstract type: unknown;
+  constructor(public dv: DataView, public off: bigint) {}
 }
 export interface Type<T> {
   name: string;
   sizeof?: bigint;
-  get(dv: DataView, off: number): T;
+  get(dv: DataView, off: bigint): T;
 }
 class NumericType<T> implements Type<T> {
-
   constructor(public name: string, public sizeof: bigint, dataViewName: string, needBigintConversion: boolean) {
     let code;
     if (needBigintConversion) {
@@ -17,35 +26,129 @@ class NumericType<T> implements Type<T> {
     }
     this.get = new Function('dv', 'off', code) as any;
   }
-  get(dv: DataView, off: number): T {
+  get(dv: DataView, off: bigint): T {
       throw new Error('should be replaced by dynamic function');
   }
 }
 
-export class Array<ItemI, ItemT extends Type<ItemI>> implements Type<ArrayInstance<ItemI, ItemT>> {
-  readonly Instance: (dv: DataView, off: number) => ArrayInstance<ItemI, ItemT>;
-  constructor(public name: string, public count: number, public itemTy: ItemT) {
-    let arrayThis = this;
-    this.Instance = class {
-      new 
 
+export interface ArrayType<ItemI, ItemTy extends Type<ItemI>> extends Type<IArray<ItemI, ItemTy>> {
+  itemType: ItemTy;
+}
+export interface IArray<ItemI, ItemTy extends Type<ItemI>> extends Instance {
+  at(n: number | bigint): ItemI;
+}
+export type Array<ItemTy> = ItemTy extends Type<infer ItemI> ? IArray<ItemI, ItemTy> : unknown;
+
+export function createArrayType<ItemI, ItemTy extends Type<ItemI>>(name_: string, count_: bigint, itemTy_: ItemTy): ArrayType<ItemI, ItemTy> {
+    assert(itemTy_.sizeof !== undefined);
+    const sizeOfItem = itemTy_.sizeof;
+    class A extends Instance {
+      get type(): typeof A { return A; }
+      static readonly name: string = name_;
+      static readonly itemType: ItemTy = itemTy_;
+      static readonly count: bigint = count_;
+      static readonly sizeof: bigint = sizeOfItem * count_;
+      static get(dv: DataView, off: bigint): IArray<ItemI, ItemTy> {
+        return new A(dv, off);
+      }
+      at(n: number | bigint): ItemI {
+        n = BigInt(n);
+        if (n < 0 || n >= this.type.count) {
+          throw new Error(`out-of-bounds array index: ${n}, count = ${this.type.count}`);
+        }
+        return itemTy_.get(this.dv, this.off + sizeOfItem * n);
+      }
     };
-  }
-  get(dv: DataView, off: number): ArrayInstance<ItemI, ItemT> {
-    return new ArrayInstance
-  }
-}
-export interface ArrayInstance<ItemI, ItemT extends Type<ItemI>> {
-  constructor: Array<ItemI, ItemT>;
+    return A;
 }
 
-export const u8 =  new NumericType<bigint>('u8',  1n, 'Uint8', true);
-export const u16 = new NumericType<bigint>('u16', 2n, 'Uint16', true);
-export const u32 = new NumericType<bigint>('u32', 4n, 'Uint32', true);
-export const u64 = new NumericType<bigint>('u64', 8n, 'BigUint64', false);
-export const s8  = new NumericType<bigint>('s8',  1n, 'Int8', true);
-export const s16 = new NumericType<bigint>('s16', 2n, 'Int16', true);
-export const s32 = new NumericType<bigint>('s32', 4n, 'Int32', true);
-export const s64 = new NumericType<bigint>('s64', 8n, 'BigInt64', false);
+export interface PointerType<PointeeI, PointeeTy extends Type<PointeeI>> extends Type<IPointer<PointeeI, PointeeTy>> {
+  pointeeType: PointeeTy;
+}
+export interface IPointer<PointeeI, PointeeTy extends Type<PointeeI>> {
+  type: PointerType<PointeeI, PointeeTy>;
+  readonly raw: bigint;
+  readonly contents: PointeeI | null;
+}
+export type Pointer<PointeeTy> = PointeeTy extends Type<infer PointeeI> ? IPointer<PointeeI, PointeeTy> : unknown;
+export function createPointerType<PointeeI, PointeeTy extends Type<PointeeI>>(name_: string, pointeeTy_: PointeeTy): PointerType<PointeeI, PointeeTy> {
+    class P {
+      get type(): typeof P { return P; }
+      static readonly name: string = name_;
+      static readonly pointeeType: PointeeTy = pointeeTy_;
+      static readonly sizeof: bigint = 8n;
+      static get(dv: DataView, off: bigint): IPointer<PointeeI, PointeeTy> {
+        return new P(dv, off);
+      }
+      constructor(public dv: DataView, public off: bigint) {}
+      get raw(): bigint {
+        return u64.get(this.dv, this.off);
+      }
+      get contents(): PointeeI | null {
+        const dv = this.dv as DataViewWithAddr;
+        const addr = this.raw;
+        if (addr === 0n) {
+          return null;
+        }
+        if (dv.addr === undefined) {
+          throw new Error("can't dereference pointer with DataView with no addr property");
+        }
+        let newOff = addr - dv.addr;
+        if (newOff < 0 || newOff > dv.byteLength) {
+          throw new Error(`out-of-bounds target addr 0x${addr.toString(16)}`);
+        }
+        return pointeeTy_.get(dv, newOff);
+      }
+    };
+    return P;
+}
+
+export abstract class Struct extends Instance {
+}
+
+export type u8  = bigint;
+export type u16 = bigint;
+export type u32 = bigint;
+export type u64 = bigint;
+export type s8  = bigint;
+export type s16 = bigint;
+export type s32 = bigint;
+export type s64 = bigint;
+export type f32 = number;
+export type f64 = number;
+
+export const u8 =  new NumericType<u8 >('u8',  1n, 'Uint8', true);
+export const u16 = new NumericType<u16>('u16', 2n, 'Uint16', true);
+export const u32 = new NumericType<u32>('u32', 4n, 'Uint32', true);
+export const u64 = new NumericType<u64>('u64', 8n, 'BigUint64', false);
+export const s8  = new NumericType<s8>('s8',  1n, 'Int8', true);
+export const s16 = new NumericType<s16>('s16', 2n, 'Int16', true);
+export const s32 = new NumericType<s32>('s32', 4n, 'Int32', true);
+export const s64 = new NumericType<s64>('s64', 8n, 'BigInt64', false);
 export const f32 = new NumericType<number>('f32', 4n, 'Float32', false);
 export const f64 = new NumericType<number>('f64', 8n, 'Float64', false);
+
+export class Void extends Instance {
+  get type() : typeof Void { return Void; }
+  static readonly name: string = 'Void';
+  static get(dv: DataView, off: bigint): Void {
+    return new Void(dv, off);
+  }
+}
+
+export const GuestPtr = createPointerType('GuestPtr', Void);
+export type GuestPtr = Pointer<Void>;
+
+export class Angle extends Struct {
+  static name: string = "Angle";
+  static sizeof: bigint = 4n;
+  static get(dv: DataView, off: bigint) { return new Angle(dv, off); }
+  get type(): typeof Angle { return Angle; }
+}
+
+export class GuestCString extends Instance {
+  static name: string = "GuestCString";
+  get type() : typeof GuestCString { return GuestCString; }
+  static get(dv: DataView, off: bigint) { return new GuestCString(dv, off); }
+}

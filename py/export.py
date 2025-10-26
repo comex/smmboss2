@@ -8,14 +8,17 @@ import smmboss
 import guest_access
 import re
 
-def all_keys(iterable_of_iterables):
+def all_keys(iterable_of_iterables, ignore):
     return list({key: None
                  for outer in iterable_of_iterables
-                 if outer is not None
+                 if outer is not ignore
                  for key in outer})
 
-_no_default = object()
-def rotate(items_iter_or_dict, default=_no_default):
+class Absent:
+    pass
+ABSENT = Absent()
+
+def rotate(items_iter_or_dict, default=ABSENT):
     '''
     converts
     {'a': {'x': 1, 'y': 2}, 'b': {'x': 3, 'x': 4}}
@@ -29,32 +32,32 @@ def rotate(items_iter_or_dict, default=_no_default):
     items = list(items_iter)
     return {
         inner_key: {
-            outer_key: (inner[inner_key] if default is _no_default else
-                        default if inner is None else
+            outer_key: (#inner[inner_key] if default is _no_default else
+                        default if inner is ABSENT else
                         inner.get(inner_key, default))
             for (outer_key, inner) in items
         }
-        for inner_key in all_keys(inner for (outer_key, inner) in items)
+        for inner_key in all_keys((inner for (outer_key, inner) in items), ignore=default)
     }
 
-def only(dict_or_iterable):
-    if not dict_or_iterable:
-        return ValueError(f'only: got empty: {dict_or_iterable}')
+def only(dict_or_iterable, ignore=ABSENT):
     if isinstance(dict_or_iterable, dict):
-        for i, (key, val) in enumerate(dict_or_iterable.items()):
-            if i == 0:
-                okey = key
-                oval = val
-            else:
-                if oval != val:
-                    raise ValueError(f'only: got conflict: [{okey}]=[{oval}] but [{key}]=[{val}]')
+        my_iter = dict_or_iterable.items()
     else:
-        for i, val in enumerate(dict_or_iterable.items()):
-            if i == 0:
-                oval = val
-            else:
-                if oval != val:
-                    raise ValueError(f'only: got conflict: [0]=[{oval}] but [{i}]=[{val}]')
+        my_iter = enumerate(dict_or_iterable)
+    have_oval = False
+    for (key, val) in dict_or_iterable.items():
+        if val is ignore:
+            pass
+        elif not have_oval:
+            okey = key
+            oval = val
+            have_oval = True
+        else:
+            if oval != val:
+                raise ValueError(f'only: got conflict: [{okey}]=[{oval}] but [{key}]=[{val}]')
+    if not have_oval:
+        raise ValueError(f'only: got no valid values: {dict_or_iterable}')
     return oval
 
 def json_info_for_build(build_id, classes_to_export):
@@ -104,7 +107,12 @@ def json_info_for_build(build_id, classes_to_export):
         elif ((issubclass(cls, world.GuestPrimPtr) and hasattr(cls, 'code')) or
               cls is world.GuestPtr or
               cls is world.GuestCString):
-            cls_info = {'kind': 'primitive'}
+            cls_info = {
+                'kind': 'primitive',
+                'size': cls.sizeof_star,
+                'is_float': isinstance(cls, world.GuestPrimPtr) and cls.code in 'fd',
+                'is_integer': isinstance(cls, world.GuestPrimPtr) and cls.code not in 'fd',
+            }
         else:
             raise Exception(f"? {cls}")
         cls_infos[cls.__name__] = cls_info
@@ -152,6 +160,63 @@ def git_describe():
     import subprocess
     return subprocess.check_output(['git', 'describe', '--always', '--dirty'], text=True).strip()
 
+def merge_versions(ver_to_val, path=()):
+    assert ver_to_val
+    have_ret = False
+    for ver, val in ver_to_val.items():
+        if isinstance(val, dict):
+            if have_ret:
+                
+    val_ty = type(next(iter(ver_to_val.values())))
+    if issubclass(val_ty, dict):
+        ret = {}r
+        for 
+    
+def merge_json_info(version_to_json_info):
+    # Return a variant of the json_info dict merging together type info from
+    # all the versions.  This function assumes that all variation between
+    # versions consists of (1) offsets/sizes being different and
+    # (2) types/fields being missing.  For now that assumption is never
+    # violated, but if there are ever types that have completely different
+    # structures between versions, this would have to skip them or add special
+    # cases.
+    json_info = rotate(version_to_json_info)
+    out = {
+        'classes': {},
+        # list of the *names* of addrs, even if the addrs themselves differ
+        'addr_names': list(rotate(json_info['addrs'])),
+    }
+    for cls_name, ver_to_cls_info in rotate(json_info['classes']).items():
+        cls_info = rotate(ver_to_cls_info)
+        kind = only(cls_info['kind'])
+        out_info = {'kind': kind}
+        out['classes'][cls_name] = out_info
+        match kind:
+            case 'struct':
+                out_info['base'] = only(cls_info['base'])
+                out_props = {}
+                out_info['props'] = out_props
+                for prop_name, ver_to_prop_info in rotate(cls_info['props']).items():
+                    prop_info = rotate(ver_to_prop_info)
+                    out_props[prop_name] = {'ptr_cls': only(prop_info['ptr_cls'])}
+            case 'ptr':
+                out_info['val_cls'] = only(cls_info['val_cls'])
+            case 'fixed_array':
+                out_info['count'] = only(cls_info['count'])
+                out_info['val_ptr_cls'] = only(cls_info['val_ptr_cls'])
+            case 'primitive':
+                out_info['size'] = only(cls_info['size'])
+                out_info['is_float'] = only(cls_info['is_float'])
+                out_info['is_integer'] = only(cls_info['is_integer'])
+            case _:
+                raise ValueError(kind)
+    return out
+
+def primitive_to_typescript_tys(name, info):
+    if info['is_float']:
+        return ('number', 'number')
+    elif info['size'] 
+
 def write_typescript(fp):
     def p(*args):
         print(*args, file=fp)
@@ -160,43 +225,42 @@ def write_typescript(fp):
 // do not edit
 ''')
     jsi = json_info()
-    jsir = rotate(jsi)
-    addrs = rotate(jsir['addrs'], default=None)
+    merged = merge_json_info(jsi)
     p('type MMAddrs = {')
-    for name in addrs:
+    for name in merged['addr_names']:
         p(f'  {name}?: number;')
     p('};')
 
     def munge(name: str) -> str:
         return re.sub(r'[\(\),]', '_', re.sub(r'\s', '', name))
 
-    for cls_name, ver_to_cls_info in rotate(jsir['classes'], default=None).items():
+    for cls_name, cls_info in merged['classes'].items():
         cls_name = munge(cls_name)
-        cls_info = rotate(ver_to_cls_info, default=None)
-        kind = only(cls_info['kind'])
-        match kind:
+        match cls_info['kind']:
             case 'struct':
-                base = only(cls_info['base']) or 'Struct'
-                p(f'class {cls_name}Remote extends {base}Remote {{')
-                for prop_name, ver_to_prop_info in rotate(cls_info['props'], default=None).items():
-                    ver_to_prop_info = {ver: pi for (ver, pi) in ver_to_prop_info.items() if pi is not None}
-                    p(ver_to_prop_info)
+                base = cls_info['base'] or 'Struct'
+                p(f'class {cls_name} extends {base} {{')
+                for prop_name, prop_info in cls_info['props'].items():
+                    prop_ty_raw = prop_info['ptr_cls']
+                    prop_ty = munge(prop_ty_raw)
+                    if merged['classes'][prop_ty_raw]['kind'] == 'primitive':
+                        pass
+
+                    p(f'  get {prop_name}(): {prop_ty} {{ }}')
                 p(f'}}')
             case 'primitive':
                 pass
             case 'fixed_array':
-                val_ptr_cls = munge(only(cls_info['val_ptr_cls']))
-                for posture in ['Remote', 'Local']:
-                    p(f'class {cls_name}{posture} extends GuestArray{posture}<{val_ptr_cls}{posture}> {{')
-                    p(f'    static readonly Element = {val_cls}Remote;')
-                    p(f'    static readonly count = {only(cls_info['count'])};')
-                    p(f'}}')
+                val_ptr_cls = munge(cls_info['val_ptr_cls'])
+                p(f'class {cls_name} extends GuestArray<{val_ptr_cls}> {{')
+                p(f'  static readonly Element = {val_cls};')
+                p(f'  static readonly count = {cls_info['count']};')
+                p(f'}}')
             case 'ptr':
-                val_cls = munge(only(cls_info['val_cls']))
-                for posture in ['Remote', 'Local']:
-                    p(f'class {cls_name}{posture} extends GuestPtr{posture}<{val_cls}{posture}> {{')
-                    p(f'    static readonly Pointee = {val_cls}{posture};')
-                    p(f'}}')
+                val_cls = munge(cls_info['val_cls'])
+                p(f'class {cls_name} extends GuestPtr<{val_cls}> {{')
+                p(f'  static readonly Pointee = {val_cls};')
+                p(f'}}')
             case _:
                 raise ValueError(kind)
 

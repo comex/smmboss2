@@ -1,10 +1,30 @@
 import * as mmTypes from 'build/mm_types';
-import { assert } from 'types_base';
+import { assert, Type, u64, u8 } from 'types_base';
 
 var theRPCConn: RPCConn
 
 function hex(n: number): string {
   return '0x'+n.toString(16);
+}
+/*
+function notNull<T>(val: T | null): T {
+  if (val === null) {
+    throw new Error('unexpectedly null');
+  }
+  return val;
+}
+function notUndefined<T>(val: T | undefined): T {
+  if (val === undefined) {
+    throw new Error('unexpectedly undefined');
+  }
+  return val;
+}
+*/
+function downcast(ty: any, val: unknown): InstanceType<typeof ty> {
+  if (!(val instanceof ty)) {
+    throw new Error('unexpectedly undefined');
+  }
+  return val;
 }
 function yieldMe(): Promise<void> {
   let { promise, resolve, reject } = Promise.withResolvers<void>();
@@ -31,48 +51,6 @@ async function doWrite(addr: bigint, data: ArrayBufferView): Promise<void> {
   }
 }
 
-abstract class Type<Local> {
-  sizeof?: number;
-}
-
-abstract class Primitive<T> extends Type<T> {
-  getLocal(dv: DataView, off: number): T { throw new Error('getLocal unimpl'); }
-  getRemote(addr: bigint): Promise<T> { throw new Error('getRemote unimpl'); }
-  setLocal(dv: DataView, off: number, val: number | T): void { throw new Error('setLocal unimpl'); }
-  setRemote(addr: bigint, val: number | T): Promise<void> { throw new Error('setRemote unimpl'); }
-}
-class IntType<T> extends Primitive<T> {
-  constructor(public name: string, public sizeof: number, dataViewName: string, {needBigWrap}: {needBigWrap?: boolean} = {}) {
-    super();
-    let getLocal = new Function(
-      'dv', 'off',
-      `return dv.get${dataViewName}(off, true);`
-    );
-    let xval = needBigWrap ? 'BigInt(val)' : 'val';
-    let setLocal = new Function(
-      'dv', 'off', 'val',
-      `return dv.set${dataViewName}(off, ${xval}, true);`
-    );
-
-    let size = parseInt(name.slice(1)) / 8;
-    // TODO: this kinda sucks, would be better to have a way to aggregate what's needed.  probably we don't even want this at all.  too slow and not synchronized. 
-    let getRemote = async (addr: bigint) => {
-      let dv = await doRead(addr, size);
-      return getLocal(dv, 0);
-    };
-    let setRemote = (addr: bigint, val: number | T): Promise<void> => {
-      let dv = new DataView(new ArrayBuffer(size));
-      setLocal(dv, 0, val);
-      return doWrite(addr, dv);
-    };
-
-    this.getLocal = getLocal as any;
-    this.getRemote = getRemote;
-    this.setLocal = setLocal as any;
-    this.setRemote = setRemote;
-  }
-}
-
 
 const utf8Decoder = new TextDecoder();
 
@@ -89,55 +67,11 @@ Object.defineProperty(mmTypes.Rect, 'height', {
   get(): number { return this.max.y - this.min.y; }
 });
 
-class MMTypes {
-  export: any;
-  [name: string]: any; // TODO
-
-  constructor(helloInfo: any, exportJson: any) {
-    Object.assign(this, ty);
-
-    let buildId = toHex(helloInfo[1].buildId) + '00000000000000000000000000000000';
-    assert(buildId in exportJson);
-    this.export = exportJson[buildId];
-    this.classes = this.export.classes;
-    for (let name in this.classes) {
-      this.loadType(name);
-    }
-  }
-
-  loadType(name: string): Type<any> {
-    if (this[name] !== undefined) {
-      return this[name];
-    }
-    let info = this.classes[name];
-    if (info === undefined) {
-      throw new Error(`struct ${name} not defined in json`);
-    }
-    let ty;
-    switch (info.kind) {
-    case 'primitive':
-      // should be predefined
-      throw new Error(`unknown primitive '${name}'`);
-    case 'fixed_array':
-      ty = new FixedArray(this.loadType(info.val_ptr_cls), info.count);
-      break;
-    case 'struct':
-      ty = new Struct(name, info, MMTypes.extraLocalMethodsFor[name], this);
-      break;
-    case 'ptr':
-      ty = this.GuestPtr; // todo: typing
-      break;
-    default:
-      throw new Error(`unknown kind '${info.kind}'`);
-    }
-    this[name] = ty;
-    return ty;
-  }
-
-}
-
 class Reader {
-  constructor(dv, off = 0) {
+  dv: DataView
+  off: bigint
+  size: bigint
+  constructor(dv: DataView | Uint8Array | ArrayBuffer, off: bigint = 0n) {
     if (dv instanceof ArrayBuffer) {
       dv = new DataView(dv);
     }
@@ -147,9 +81,9 @@ class Reader {
     assert(dv instanceof DataView);
     this.dv = dv;
     this.off = off;
-    this.size = this.dv.byteLength;
+    this.size = BigInt(this.dv.byteLength);
   }
-  readOff(size) {
+  readOff(size: bigint): bigint {
     let off = this.off;
     if (size > this.size - off) {
       throw new Error(`Reader overread - wanted ${size} only had ${this.size - off}/${this.size}`);
@@ -157,135 +91,176 @@ class Reader {
     this.off = off + size;
     return off;
   }
-  read(ty, size = null) {
-    if (size === null) {
+  read<T>(ty: Type<T>, size: bigint | undefined = undefined) {
+    if (size === undefined) {
       size = ty.sizeof;
     }
     assert(typeof size == 'number');
     let off = this.readOff(size);
-    return ty.getLocal(this.dv, off);
+    return ty.get(this.dv, off);
   }
-  readArrayUnbounded(callback) {
+  readArrayUnbounded<T>(callback: () => T): T[] {
     let out = [];
     while (this.off < this.size) {
       out.push(callback());
     }
     return out;
   }
-  readArray(count, callback) {
+  readArray<T>(count: bigint, callback: () => T): T[] {
     let out = [];
-    for (let i = 0; i < count; i++) {
+    for (let i = 0n; i < count; i++) {
       out.push(callback());
     }
     return out;
   }
-  expectEnd() {
+  expectEnd(): void {
     if (this.size != this.off) {
       throw new Error(`Reader underread by ${this.size - this.off}`);
     }
   }
-  static with(dv, off, callback) {
+  static with<T>(dv: DataView | Uint8Array | ArrayBuffer, off: bigint = 0n,
+                 callback: (_: Reader) => T): T {
     let self = new Reader(dv, off);
     let ret = callback(self);
     self.expectEnd();
     return ret;
   }
-  remaining() {
+  remaining(): bigint {
     return this.size - this.off;
   }
 }
 
 // These could be structs but using Reader avoids a circular dependency
-function readExlUtilRange(r) {
-  return {start: r.read(ty.u64), size: r.read(ty.u64)}
+function readExlUtilRange(r: Reader) {
+  return {start: r.read(u64), size: r.read(u64)}
 }
-function readHelloModInfo(r) {
+function readHelloModInfo(r: Reader) {
   let ret = r.readArrayUnbounded(() => ({
     total: readExlUtilRange(r),
     text: readExlUtilRange(r),
     rodata: readExlUtilRange(r),
     data: readExlUtilRange(r),
-    buildId: r.readArray(16, () => r.read(ty.u8)),
+    buildId: r.readArray(16n, () => r.read(u8)),
+    rawData: r.dv.buffer,
   }));
-  ret.rawData = r.dv.buffer;
   return ret;
 }
+type HelloModInfo = ReturnType<typeof readHelloModInfo>;
 
-function toHex(array) {
+function toHex(array: bigint[]): String {
   return array.map(num => num.toString(16).padStart(2, '0')).join('');
 }
 
-class SignalLink {
-  static create(source, target, update) {
+interface SomeSignalLink {
+  kill(): void;
+}
+interface SignalLinkOut<in SourceT> {
+  update(isException: boolean, valueOrException: SourceT | Error, link: SomeSignalLink | undefined): void;
+  kill(): void;
+}
+class SignalLink<SourceT> implements SignalLinkOut<SourceT> {
+  constructor(
+    public readonly source: SignalRO<SourceT>,
+    public readonly target: SomeSignal | null,
+    public readonly update: (isException: boolean, valueOrException: SourceT | Error, link: SomeSignalLink | undefined) => void
+  ) {}
+  static create<SourceU>(
+    source: SignalRO<SourceU>,
+    target: SomeSignal | null,
+    update: (isException: boolean, valueOrException: SourceU | Error, link: SomeSignalLink | undefined) => void
+  ): SignalLink<SourceU> | null {
     if (target !== null && target.hasException) {
       return null;
     }
     if (source.hasException) {
-      update(true, source.valueOrException, null);
+      update(true, source.valueOrException as SourceU, undefined);
       return null;
     }
-    let link = new SignalLink;
-    link.source = source;
-    link.target = target;
-    link.update = update;
+    let link = new SignalLink<SourceU>(source, target, update);
     if (target !== null) {
-      target.linksIn.add(link);
+      target.addLinkIn(link);
     }
-    source.linksOut.add(link);
+    source.addLinkOut(link);
     if (source.hasValue) {
-      update(false, source.valueOrException, link);
+      update(false, source.valueOrException as Error, link);
     }
     return link;
   }
-  kill() {
-    this.source.linksOut.delete(this);
+  kill(): void {
+    this.source.removeLinkOut(this);
     if (this.target !== null) {
-      this.target.linksIn.delete(this);
+      this.target.removeLinkIn(this);
     }
   }
 }
 
-class Signal {
-  constructor(initialValue = undefined, hasInitialValue = true) {
+interface SomeSignal {
+  hasValue: boolean;
+  hasException: boolean;
+}
+interface SignalRO<out T> {
+  get cur(): T;
+  get maybeCur(): T | undefined;
+  [Symbol.asyncIterator]<U extends T>(): SignalAsyncIterator<U, any>; // XXX
+  then<TResult1, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): Promise<TResult1 | TResult2>;
+  map<U>(f: (_: T) => U): SignalRO<U>;
+  bind<U>(f: (_: T) => SignalRO<U>): SignalRO<U>;
+  hasValueSig(): Signal<boolean>;
+  addLinkOut(link: SignalLinkOut<T>): void;
+  removeLinkOut(link: SignalLinkOut<T>): void;
+  addLinkIn(link: Kill): void;
+  removeLinkIn(link: Kill): void;
+  readonly hasValue: boolean;
+  readonly hasException: boolean;
+  readonly valueOrException: T | Error | undefined;
+
+}
+class Signal<T> implements SignalRO<T> {
+  linksIn: Set<Kill>;
+  linksOut: Set<SignalLinkOut<T>>;
+  hasValue: boolean;
+  hasException: boolean;
+  valueOrException: T | Error | undefined;
+  constructor(initialValue: T | undefined = undefined, hasInitialValue: boolean = true) {
     this.linksIn = new Set;
     this.linksOut = new Set;
     this.hasValue = hasInitialValue;
     this.hasException = false;
     this.valueOrException = initialValue;
   }
-  static of(valueOrSig) {
+  static of<U>(valueOrSig: SignalRO<U> | U): SignalRO<U> {
     if (valueOrSig instanceof Signal) {
       return valueOrSig;
     } else {
-      return new Signal(valueOrSig);
+      return new Signal(valueOrSig as U);
     }
   }
-  static withoutInitialValue() {
-    return new Signal(undefined, false);
+  static withoutInitialValue<U>(): Signal<U> {
+    return new Signal<U>(undefined, false);
   }
-  bump() {
+  bump(): void {
     assert(this.hasValue || this.hasException);
     for (let link of this.linksOut) {
-      link.update(this.hasException, this.valueOrException, link);
+      link.update(this.hasException, this.valueOrException as (T | Error), link);
     }
   }
-  get cur() {
+  get cur(): T {
     if (this.hasException) {
       throw this.valueOrException;
     } else if (this.hasValue) {
-      return this.valueOrException;
+      return this.valueOrException as T;
     } else {
       throw new Error('no cur');
     }
   }
-  get maybeCur() {
+  get maybeCur(): T | undefined {
     if (this.hasException) {
       throw this.valueOrException;
     } else {
-      return this.valueOrException;
+      return this.valueOrException as T;
     }
   }
-  set(value) {
+  set(value: T): void {
     if (this.hasException) {
       return;
     }
@@ -296,7 +271,7 @@ class Signal {
     this.hasValue = true;
     this.bump();
   }
-  reject(exception) {
+  reject(exception: Error): void {
     if (this.hasException) {
       return;
     }
@@ -312,55 +287,56 @@ class Signal {
     }
   }
 
-  [Symbol.asyncIterator]() {
+  [Symbol.asyncIterator]<U extends T>(): SignalAsyncIterator<U, any> { // XXX
     return new SignalAsyncIterator(this);
   }
 
-  then(t, e) {
-    let pr = Promise.withResolvers();
+  // this signature copy+pasted from TypeScript:
+  then<TResult1, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): Promise<TResult1 | TResult2> {
+    let pr = Promise.withResolvers<T>();
     let stillCreating = true;
-    let link = SignalLink.create(this, null, (hasException, valueOrException) => {
+    SignalLink.create(this, null, (hasException, valueOrException) => {
       if (stillCreating) {
         return;
       }
       if (hasException) {
         pr.reject(valueOrException);
       } else {
-        pr.resolve(valueOrException);
+        pr.resolve(valueOrException as T);
       }
     });
     stillCreating = false;
-    return pr.promise.then(t, e);
+    return pr.promise.then(onfulfilled, onrejected);
   }
 
-  map(f) {
-    let mappedSignal = new Signal;
-    let link = SignalLink.create(this, mappedSignal, (hasException, valueOrException) => {
+  map<U>(f: (_: T) => U): Signal<U> {
+    let mappedSignal = new Signal<U>;
+    SignalLink.create(this, mappedSignal, (hasException, valueOrException) => {
       if (hasException) {
-        mappedSignal.reject(valueOrException);
+        mappedSignal.reject(valueOrException as Error);
       } else {
-        mappedSignal.set(f(valueOrException));
+        mappedSignal.set(f(valueOrException as T));
       }
     });
     return mappedSignal;
   }
 
-  bind(f) {
-    let boundSignal = new Signal;
-    let forwardingLink = null;
+  bind<U>(f: (_: T) => Signal<U>): Signal<U> {
+    let boundSignal = new Signal<U>;
+    let forwardingLink: SomeSignalLink | null = null;
     SignalLink.create(this, boundSignal, (hasException, valueOrException) => {
       if (forwardingLink !== null) {
         forwardingLink.kill();
       }
       if (hasException) {
-        boundSignal.reject(valueOrException);
+        boundSignal.reject(valueOrException as Error);
       } else {
-        let forwarderSignal = Signal.of(f(valueOrException));
+        let forwarderSignal = Signal.of(f(valueOrException as T));
         forwardingLink = SignalLink.create(forwarderSignal, boundSignal, (hasException, valueOrException) => {
           if (hasException) {
-            boundSignal.reject(valueOrException);
+            boundSignal.reject(valueOrException as Error);
           } else {
-            boundSignal.set(valueOrException);
+            boundSignal.set(valueOrException as U);
           }
         });
       }
@@ -368,7 +344,7 @@ class Signal {
     return boundSignal;
   }
 
-  hasValueSig() {
+  hasValueSig(): Signal<boolean> {
     let ret = this.map((_) => true);
     if (!this.hasValue && !this.hasException) {
       ret.set(false);
@@ -376,25 +352,42 @@ class Signal {
     return ret;
   }
 
-  kill() {
-    this.reject('killed');
+  kill(): void {
+    this.reject(new Error('killed'));
+  }
+  addLinkOut(link: SignalLinkOut<T>): void {
+    this.linksOut.add(link);
+  }
+  removeLinkOut(link: SignalLinkOut<T>): void {
+    this.linksOut.delete(link);
+  }
+  addLinkIn(link: Kill): void {
+    this.linksIn.add(link);
+  }
+  removeLinkIn(link: Kill): void {
+    this.linksIn.delete(link);
   }
 }
 
-class SignalAsyncIterator {
-  constructor(signal) {
+class SignalAsyncIterator<T, TReturn> implements AsyncIterator<T, TReturn> {
+  state: number;
+  signal: SignalRO<T>;
+  curPR: PromiseWithResolvers<IteratorYieldResult<T>> | null;
+  link: SignalLink<T> | null;
+  constructor(signal: SignalRO<T>) {
     this.state = 1;
     this.signal = signal;
     this.curPR = null;
-    this.link = SignalLink.create(signal, null, (hasException, valueOrException) => {
+    this.link = SignalLink.create<T>(signal, null, (hasException, valueOrException) => {
       if (this.state == -1) {
         this.state = 0;
         let curPR = this.curPR;
         this.curPR = null;
+        assert(curPR !== null);
         if (hasException) {
           curPR.reject(valueOrException);
         } else {
-          curPR.resolve({done: false, value: valueOrException});
+          curPR.resolve({done: false, value: valueOrException as T});
         }
       } else if (this.state == 0) {
         this.state = 1;
@@ -402,81 +395,176 @@ class SignalAsyncIterator {
     });
   }
   [Symbol.asyncIterator]() { return this; }
-  next() {
+  next(): Promise<IteratorResult<T>> {
     if (this.state == 1) {
       this.state = 0;
       if (this.signal.hasException) {
         return Promise.reject(this.signal.valueOrException);
       } else if (this.signal.hasValue) {
-        return Promise.resolve({done: false, value: this.signal.valueOrException});
+        return Promise.resolve({done: false, value: this.signal.valueOrException as T});
       }
     }
     if (this.state == 0) {
       this.state = -1;
       this.curPR = Promise.withResolvers();
     }
+    assert(this.curPR !== null);
     return this.curPR.promise;
   }
-  return(value) {
-    this.link.kill();
+  async return(value: TReturn | PromiseLike<TReturn>): Promise<IteratorReturnResult<TReturn>> {
+    if (this.link !== null) {
+      this.link.kill();
+    }
     console.log('>> return', value);
-    return Promise.resolve({value, done: true});
+    return {value: await value, done: true};
   }
-  throw(e) {
-    this.link.kill();
-    return Promise.resolve({undefined, done: true});
+  throw(e?: any): Promise<IteratorResult<T, TReturn>> {
+    if (this.link !== null) {
+      this.link.kill();
+    }
+    return Promise.reject(e);
   }
 }
 
+function testSignals() {
+  let sig = new Signal<number>;
+  let moresigs: Signal<number>[] = [new Signal, new Signal];
+  let sig3 = sig.bind(i => moresigs[i]).map(x => x * 2);
+  (async () => {
+    for await (let val of sig3) {
+      console.log(val);
+    }
+  })();
+  sig.set(0);
+  moresigs[0].set(42);
+  moresigs[0].set(43);
+  sig.set(1);
+  moresigs[0].set(NaN);
+  moresigs[1].set(44);
+  console.log('*', sig3.cur);
+}
+
+
+interface Kill {
+  kill: () => void;
+}
+interface Reject {
+  reject: (reason?: any) => void;
+}
+class Lifecycle {
+  killCallbacks: (() => void)[] = [];
+  dead: boolean = false;
+  pushKill<T extends HasLifecycle | Reject /* | Kill*/>(objToKill: T): T {
+    const lifecycle = (objToKill as HasLifecycle).lifecycle;
+    let ok = false;
+    if (lifecycle !== undefined) {
+      this.killCallbacks.push(lifecycle.kill.bind(lifecycle));
+      ok = true;
+    }
+    if ((objToKill as Reject).reject !== undefined) {
+      this.killCallbacks.push(() => {
+        (objToKill as Reject).reject(`rejected by KillBox of ${this.constructor.name}`);
+      });
+      ok = true;
+    }
+    /*
+    if ((objToKill as Kill).kill !== undefined) {
+      this.killCallbacks.push(() => {
+        (objToKill as Kill).kill();
+      });
+      ok = true;
+    }
+    */
+    if (!ok) {
+      throw new Error('not sure how to clean this up');
+    }
+    return objToKill;
+
+  }
+  pushKillEventListener(target: EventTarget, event: string, callback: EventListenerOrEventListenerObject, options?: AddEventListenerOptions | boolean): void {
+    target.addEventListener(event, callback, options);
+    this.killCallbacks.push(() => {
+      target.removeEventListener(event, callback, options);
+    });
+  };
+  kill() {
+    if (this.dead) {
+      return;
+    }
+    this.dead = true;
+    for (let cb of this.killCallbacks) {
+      cb();
+    }
+    this.killCallbacks = null as any;
+  };
+  pushCatchKill(promise: Promise<any>): void {
+    promise.then(null, (exception) => {
+      if (this.dead && typeof exception === 'object' && exception.message === 'killed') {
+        // ignore
+        console.log('caught killed exception');
+        return;
+      }
+      throw exception; // devtools will catch if open
+    });
+
+  }
+}
+interface HasLifecycle {
+  readonly lifecycle: Lifecycle;
+}
 
 class Throttle {
-  constructor(name, defaultDelay = 100) {
-    this.defaultDelay = defaultDelay;
-    this.name = name;
-    this.reset();
-  }
-  reset() {
+  delay: number;
+  constructor(public name: string, public defaultDelay: number = 100) {
     this.delay = this.defaultDelay;
   }
-  then(f, r) {
+  reset(): void {
+    this.delay = this.defaultDelay;
+  }
+  then<TResult1, TResult2 = never>(onfulfilled?: ((value: void) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): Promise<TResult1 | TResult2> {
     let delay = this.delay;
     this.delay *= 2;
     addStatsLine(`Throttle "${this.name}" waiting for ${delay} ms`);
-    return sleep(delay).then(f, r);
+    return sleep(delay).then(onfulfilled, onrejected);
   }
 }
 
+interface WSWrapperDelegate {
+  onOpen(e: Event): void;
+  onMessage(e: MessageEvent<any>): void;
+  onClose(e: Event): void;
+}
 class WSWrapper {
-  constructor(url, delegate) {
-    this.wsURL = url;
-    this.delegate = delegate;
-    this.openThrottle = new Throttle('open');
-    this.state = 'idle';
-    this.ws = null;
-    this.wantOpen = false;
+  openThrottle: Throttle = new Throttle('open');
+  state: string = 'idle';
+  ws: WebSocket | null = null;
+  wantOpen: boolean = false;
+  constructor(public wsURL: string, public delegate: WSWrapperDelegate) {
   }
-  setWantOpen(wantOpen) {
+  setWantOpen(wantOpen: boolean): void {
     this.wantOpen = wantOpen;
     this.openCloseWSAsNeeded();
   }
-  kill() {
+  kill(): void {
     if (this.state == 'open') {
       addStatsLine(`closing ${this.wsURL} due to kill`);
+      assert(this.ws !== null);
       this.ws.close();
     }
     this.state = 'dead';
     this.wantOpen = false;
     this.ws = null;
   }
-  openCloseWSAsNeeded() {
+  openCloseWSAsNeeded(): void {
     if (this.state == 'idle' && this.wantOpen) {
       this.openWS();
     } else if (this.state == 'open' && !this.wantOpen) {
       addStatsLine(`closing ${this.wsURL}`);
+      assert(this.ws !== null);
       this.ws.close();
     }
   }
-  openWS() {
+  openWS(): void {
     assert(this.ws === null);
     assert(this.state == 'idle');
     addStatsLine(`connecting to ${this.wsURL}`);
@@ -519,23 +607,28 @@ class WSWrapper {
   }
 }
 
-let rpcConnClosedMessage = 'RPCConn closed';
+const rpcConnClosedMessage = 'RPCConn closed';
 
-class RPCConn {
-  constructor(baseURL) {
-    mixinKillBox(this);
-    this.wsw = this.pushKill(new WSWrapper(`${baseURL}/ws/rpc`, this));
+type GetStatsResp = {overrunBytes: bigint, sentBytes: bigint, backpressuredNsec: bigint};
+class RPCConn implements WSWrapperDelegate {
+  readonly lifecycle = new Lifecycle();
+  readonly rpcThrottle = new Throttle('rpc');
+  helloInfoPR: PromiseWithResolvers<HelloModInfo>;
+  isOpenSig: Signal<boolean>;
+  wsw: WSWrapper;
+  pendingResponsePRs: PromiseWithResolvers<ArrayBuffer | string>[] = [];
+  constructor(baseURL: string) {
+    this.wsw = this.lifecycle.pushKill(new WSWrapper(`${baseURL}/ws/rpc`, this));
     this.wsw.setWantOpen(true);
-    this.rpcThrottle = new Throttle('rpc');
-    this.helloInfoPR = this.pushKill(Promise.withResolvers());
-    this.isOpenSig = this.pushKill(new Signal(false));
+    this.helloInfoPR = this.lifecycle.pushKill(Promise.withResolvers());
+    this.isOpenSig = this.lifecycle.pushKill(new Signal(false));
   }
-  onOpen(e) {
+  onOpen() {
     this.pendingResponsePRs = [this.helloPendingResponsePR()];
     this.isOpenSig.set(true);
   }
-  helloPendingResponsePR() {
-    let pr = Promise.withResolvers();
+  helloPendingResponsePR(): PromiseWithResolvers<ArrayBuffer | string> {
+    let pr = Promise.withResolvers<ArrayBuffer | string>();
     pr.promise.then((data) => {
       if (typeof data == 'string') {
         this.helloInfoPR.reject(`early error! ${data}`);
@@ -550,21 +643,21 @@ class RPCConn {
     });
     return pr;
   }
-  onMessage(e) {
+  onMessage(e: MessageEvent<any>) {
     let pr = this.pendingResponsePRs.shift();
     if (!pr) {
       throw new Error('got unsolicited packet');
     }
     pr.resolve(e.data);
   }
-  onClose(e) {
+  onClose() {
     this.isOpenSig.set(false);
-    while (this.pendingResponsePRs.length) {
-      let pr = this.pendingResponsePRs.shift();
+    let pr;
+    while ((pr = this.pendingResponsePRs.shift()) !== undefined) {
       pr.reject(rpcConnClosedMessage);
     }
   }
-  async rawRequest(req): DataView {
+  async rawRequest(req: any): Promise<DataView> {
     outerLoop: while (1) {
       while (!this.isOpenSig.cur) {
         addStatsLine('RPC waiting for open');
@@ -572,8 +665,9 @@ class RPCConn {
       }
 
       //console.log(`sending ${req.byteLength} ${req}`);
+      assert(this.wsw.ws !== null);
       this.wsw.ws.send(req);
-      let pr = Promise.withResolvers();
+      let pr = Promise.withResolvers<ArrayBuffer | string>();
       this.pendingResponsePRs.push(pr);
       let response;
       try {
@@ -587,7 +681,7 @@ class RPCConn {
       }
 
       if (typeof response == 'string') {
-        addStatsLine(`RPC got error: '${resp}'`);
+        addStatsLine(`RPC got error: '${response}'`);
         await this.rpcThrottle;
         continue outerLoop;
       }
@@ -598,15 +692,16 @@ class RPCConn {
 
       return new DataView(response);
     }
+    throw new Error('impossible to get here but tsc is dumb');
   }
-  async reqRead(addr: bigint, len: number | bigint): DataView {
+  async reqRead(addr: bigint, len: number | bigint): Promise<DataView> {
     let dv = new DataView(new ArrayBuffer(17));
     dv.setInt8(0, 1); // RPC_REQ_READ
     dv.setBigUint64(1, addr, true);
     dv.setBigUint64(9, BigInt(len), true);
     return await this.rawRequest(dv);
   }
-  async reqWrite(addr: bigint, data: ArrayBufferView) {
+  async reqWrite(addr: bigint, data: ArrayBufferView): Promise<[bigint, bigint]> {
     assert(ArrayBuffer.isView(data));
     let headerLen = 9;
     let len = data.byteLength;
@@ -619,19 +714,19 @@ class RPCConn {
     assert(resp.byteLength == 8);
     let actual = resp.getBigUint64(0, true);
     assert(actual <= len);
-    return [actual, len];
+    return [actual, BigInt(len)];
   }
-  async reqGetStats() {
+  async reqGetStats(): Promise<GetStatsResp> {
     let u8 = Uint8Array.of(3); // RPC_REQ_GET_STATS
     let resp = await this.rawRequest(u8);
-    return Reader.with(resp, 0, (r) => ({
-      overrunBytes: r.read(ty.u64),
-      sentBytes: r.read(ty.u64),
-      backpressuredNsec: r.read(ty.u64),
+    return Reader.with(resp, 0n, (r) => ({
+      overrunBytes: r.read(u64),
+      sentBytes: r.read(u64),
+      backpressuredNsec: r.read(u64),
     }));
 
   }
-  async reqSetFlags(clear, set) {
+  async reqSetFlags(clear: bigint, set: bigint): Promise<bigint> {
     let dv = new DataView(new ArrayBuffer(17));
     dv.setInt8(0, 4); // RPC_REQ_SET_FLAGS
     dv.setBigUint64(1, clear, true);
@@ -647,16 +742,20 @@ class RPCConn {
 
 // --
 
-let svgNS = 'http://www.w3.org/2000/svg';
+const svgNS = 'http://www.w3.org/2000/svg';
 
-class DiagramThingKind {
-  constructor(diagram) {
-    this.diagram = diagram;
-    this.mmTypes = diagram.mmTypes;
-    this.group = document.createElementNS(svgNS, 'g');
+interface SVGElementWithDTCache extends SVGElement {
+  _fill?: string;
+  _stroke?: string;
+  _strokeWidth?: number;
+}
+abstract class DiagramThingKind {
+  group: SVGGElement;
+  elmsByPtr: Map<bigint, SVGElement> = new Map();
+  constructor(public diagram: Diagram) {
+    this.group = document.createElementNS(svgNS, 'g') as SVGGElement;
     this.group.setAttribute('kind', this.constructor.name);
     diagram.svg.appendChild(this.group);
-    this.elmsByPtr = new Map();
   }
   renderThings() {
     this.genericElmsCount = 0;
@@ -705,7 +804,9 @@ class DiagramThingKind {
     return elm;
   }
 
-  poly(key, points, {fill = 'none', stroke, strokeWidth}) {
+  poly(key: any, points: number[],
+       {fill = 'none', stroke, strokeWidth = 0}:
+       {fill?: string, stroke?: string, strokeWidth?: number}) {
     let dia = this.diagram;
     let stringified = '';
     for (let i = 0, len = points.length; i < len; i += 2) {
@@ -713,7 +814,7 @@ class DiagramThingKind {
       let y = dia.transformY(points[i+1]);
       stringified += ` ${x},${y}`;
     }
-    let polygon = this.getOrCreateElmFor(key, 'polygon');
+    let polygon = this.getOrCreateElmFor(key, 'polygon') as SVGElementWithDTCache;
     if (polygon._fill === fill &&
         polygon._stroke === stroke &&
         polygon._strokeWidth === strokeWidth &&
@@ -724,7 +825,7 @@ class DiagramThingKind {
     polygon.setAttribute('fill', fill);
     if (stroke !== undefined) {
       polygon.setAttribute('stroke', stroke);
-      polygon.setAttribute('stroke-width', strokeWidth);
+      polygon.setAttribute('stroke-width', ''+strokeWidth);
       polygon.setAttribute('stroke-linejoin', 'bevel');
     }
     polygon._fill = fill;
@@ -979,39 +1080,67 @@ class DiagramBGCollisionTwoPoints extends DiagramThingKind {
     );
   }
 }
+function timelineTime(): number {
+  const ret = document.timeline.currentTime;
+  assert(typeof ret === 'number');
+  return ret;
+}
 class Diagram {
-  constructor(svg, mmTypes) {
-    mixinKillBox(this);
-    this.svg = svg;
-    this.mmTypes = mmTypes;
+  readonly lifecycle = new Lifecycle();
+  lastRenderedFrame: HoseFrame | null = null;
+  zoomLevel = 1;
+  panX = 0;
+  panY = 400;
+  lastWheelTimeStamp = 0;
 
-    this.lastRenderedFrame = null;
+  zoomMomentum = 0;
+  zoomMomentumTimeoutID: number | null = null;
 
-    this.zoomLevel = 1;
-    this.panX = 0;
-    this.panY = 400;
+  zoomMomentumStartZoomLevel: number | null = null;
+  zoomMomentumStartPanX: number | null = null;
+  zoomMomentumStartPanY: number | null = null;
+  zoomMomentumStartTime: number | null = null;
+  zoomMomentumCursorRealX: number | null = null;
+  zoomMomentumCursorRealY: number | null = null;
+  zoomMomentumRAFID: number | null = null;
+  mouseDownClientX: number | null = null;
+  mouseDownClientY: number | null = null;
 
-    this.lastWheelTimeStamp = 0;
-    this.zoomMomentum = 0;
-    this.zoomMomentumTimeoutID = null;
+  readonly kinds: DiagramThingKind[];
+  readonly hitboxes = new DiagramHitboxes(this);
+  readonly normalColliders = new DiagramNormalColliders(this);
+  readonly scolColliders = new DiagramScolColliders(this);
+  readonly bgCollisionPoints = new DiagramBGCollisionPoints(this);
+  readonly bgCollisionTwoPoints = new DiagramBGCollisionTwoPoints(this);
 
+  worldID = 0;
+
+  readonly onMouseMoveBound = this.onMouseMove.bind(this);
+  readonly onMouseUpBound = this.onMouseUp.bind(this);
+
+  curFrame: HoseFrame | null = null;
+
+
+
+  constructor(public svg: SVGSVGElement) {
     this.kinds = [
-      this.hitboxes = new DiagramHitboxes(this),
-      this.normalColliders = new DiagramNormalColliders(this),
-      this.scolColliders = new DiagramScolColliders(this),
-      this.bgCollisionPoints = new DiagramBGCollisionPoints(this),
-      this.bgCollisionTwoPoints = new DiagramBGCollisionTwoPoints(this),
+      this.hitboxes,
+      this.normalColliders,
+      this.scolColliders,
+      this.bgCollisionPoints,
+      this.bgCollisionTwoPoints,
     ];
-    this.worldID = 0;
 
-    this.pushKillEventListener(this.svg, 'wheel', this.onWheel.bind(this),
-                               {passive: false});
-    this.pushKillEventListener(this.svg, 'mousedown', this.onMouseDown.bind(this));
-
-    this.onMouseMoveBound = this.onMouseMove.bind(this);
-    this.onMouseUpBound = this.onMouseUp.bind(this);
+    this.lifecycle.pushKillEventListener(this.svg, 'wheel', this.onWheel.bind(this) as EventListener,
+                                         {passive: false});
+    this.lifecycle.pushKillEventListener(this.svg, 'mousedown', this.onMouseDown.bind(this) as EventListener);
+    this.lifecycle.killCallbacks.push(() => {
+      this.svg.innerHTML = '';
+      this.lastRenderedFrame = null;
+      this.removeMouseMoveUp();
+    });
   }
-  renderFrame(frame) {
+  renderFrame(frame: HoseFrame): void {
     this.curFrame = frame;
     for (let kind of this.kinds) {
       kind.renderThings();
@@ -1019,34 +1148,30 @@ class Diagram {
     this.lastRenderedFrame = frame;
     this.curFrame = null;
   }
-  transformX(x) {
+  transformX(x: number): number {
     return this.panX + this.transformSize(x);
   }
-  transformY(y) {
+  transformY(y: number): number {
     return this.panY - this.transformSize(y);
   }
-  transformSize(size) {
+  transformSize(size: number): number {
     return size * this.zoomLevel; // todo: match camera
   }
-  untransformX(x) {
+  untransformX(x: number): number {
     return this.untransformSize(x - this.panX);
   }
-  untransformY(y) {
+  untransformY(y: number): number {
     return this.untransformSize(this.panY - y);
   }
-  untransformSize(size) {
+  untransformSize(size: number): number {
     return size / this.zoomLevel;
   }
-  kill() {
-    this.svg.innerHTML = '';
-    this.lastRenderedFrame = null;
-  }
-  guessIsTrackpad(e) {
+  guessIsTrackpad(e: WheelEvent): boolean {
     // https://stackoverflow.com/questions/10744645/detect-touchpad-vs-mouse-in-javascript
     // hack...
     return e.deltaMode == 0;
   }
-  zoomByAmountKeepingPointConstant(zoomAmount, cursorRealX, cursorRealY) {
+  zoomByAmountKeepingPointConstant(zoomAmount: number, cursorRealX: number, cursorRealY: number): void {
     let cursorVirtualX = this.untransformX(cursorRealX), cursorVirtualY = this.untransformY(cursorRealY);
     this.zoomLevel *= zoomAmount;
 
@@ -1054,7 +1179,7 @@ class Diagram {
     this.panX += cursorRealX - this.transformX(cursorVirtualX);
     this.panY += cursorRealY - this.transformY(cursorVirtualY);
   }
-  onWheel(e) {
+  onWheel(e: WheelEvent): void {
     if (this.lastRenderedFrame === null) {
       return;
     }
@@ -1079,7 +1204,7 @@ class Diagram {
       if (this.zoomMomentumTimeoutID !== null) {
         clearTimeout(this.zoomMomentumTimeoutID);
       }
-      let startTime = document.timeline.currentTime;
+      let startTime = timelineTime();
       this.zoomMomentumTimeoutID = setTimeout(() => {
         this.zoomMomentumTimeoutID = null;
         this.enableZoomMomentum(startTime, e.offsetX, e.offsetY);
@@ -1093,9 +1218,9 @@ class Diagram {
     this.renderFrame(this.lastRenderedFrame);
 
   }
-  enableZoomMomentum(startTime, cursorRealX, cursorRealY) {
+  enableZoomMomentum(startTime: number, cursorRealX: number, cursorRealY: number): void {
     this.disableZoomMomentum();
-    if (this.dead || this.lastRenderedFrame === null || Math.abs(this.zoomMomentum) < 0.001) {
+    if (this.lifecycle.dead || this.lastRenderedFrame === null || Math.abs(this.zoomMomentum) < 0.001) {
       return;
     }
     this.zoomMomentumStartZoomLevel = this.zoomLevel;
@@ -1104,12 +1229,12 @@ class Diagram {
     this.zoomMomentumStartTime = startTime;
     this.zoomMomentumCursorRealX = cursorRealX;
     this.zoomMomentumCursorRealY = cursorRealY;
-    let cb = (endTime) => {
-      if (this.dead || this.lastRenderedFrame === null) {
+    let cb = (endTime: number) => {
+      if (this.lifecycle.dead || this.lastRenderedFrame === null) {
         return;
       }
       this.zoomMomentumRAFID = null;
-      let dt = endTime - this.zoomMomentumStartTime;
+      let dt = endTime - this.zoomMomentumStartTime!;
       // integrate (v * (1 - decay)^t) from 0 to t_0...
       // -> v * ((1 - decay)^t - 1) / log(1 - decay)
       let dtScale = 0.01;
@@ -1129,24 +1254,24 @@ class Diagram {
       }
 
 
-      this.zoomLevel = this.zoomMomentumStartZoomLevel;
-      this.panX = this.zoomMomentumStartPanX;
-      this.panY = this.zoomMomentumStartPanY;
-      this.zoomByAmountKeepingPointConstant(multiplier, this.zoomMomentumCursorRealX, this.zoomMomentumCursorRealY);
+      this.zoomLevel = this.zoomMomentumStartZoomLevel!;
+      this.panX = this.zoomMomentumStartPanX!;
+      this.panY = this.zoomMomentumStartPanY!;
+      this.zoomByAmountKeepingPointConstant(multiplier, this.zoomMomentumCursorRealX!, this.zoomMomentumCursorRealY!);
 
       this.renderFrame(this.lastRenderedFrame);
 
       this.zoomMomentumRAFID = requestAnimationFrame(cb);
     };
-    cb(document.timeline.currentTime);
+    cb(timelineTime());
   }
-  disableZoomMomentum() {
+  disableZoomMomentum(): void {
     if (this.zoomMomentumRAFID !== null) {
-      cancelAnimationFrame(this.zoomMomentumRAFID);
+      cancelAnimationFrame(this.zoomMomentumRAFID!);
       this.zoomMomentumRAFID = null;
     }
   }
-  onMouseDown(e) {
+  onMouseDown(e: MouseEvent): void {
     if (this.lastRenderedFrame === null) {
       return;
     }
@@ -1157,17 +1282,17 @@ class Diagram {
     window.addEventListener('mouseup', this.onMouseUpBound);
     e.preventDefault();
   }
-  onMouseUp(e) {
+  onMouseUp(e: MouseEvent): void {
     this.onMouseMove(e);
     this.removeMouseMoveUp();
   }
-  onMouseMove(e) {
+  onMouseMove(e: MouseEvent): void {
     e.preventDefault();
     if (this.lastRenderedFrame === null) {
       return;
     }
-    this.panX += e.clientX - this.mouseDownClientX;
-    this.panY += e.clientY - this.mouseDownClientY;
+    this.panX += e.clientX - this.mouseDownClientX!;
+    this.panY += e.clientY - this.mouseDownClientY!;
 
     this.mouseDownClientX = e.clientX;
     this.mouseDownClientY = e.clientY;
@@ -1179,44 +1304,45 @@ class Diagram {
     window.removeEventListener('mousemove', this.onMouseMoveBound);
     window.removeEventListener('mouseup', this.onMouseUpBound);
   }
-
-  kill() {
-    this.removeMouseMoveUp();
-  }
 };
 
 class Scrubbable {
-  constructor(diagram, scrubberRow) {
-    mixinKillBox(this);
-    this.diagram = diagram;
-    this.scrubber = scrubberRow.querySelector('#scrubber');
+  readonly lifecycle = new Lifecycle();
+  scrubber: HTMLInputElement;
+  scrubberDisplay: HTMLDivElement;
+  frameIdx = 0;
+  framesLength = 0;
+  frames: HoseFrame[] = undefined as any;
+  constructor(public diagram: Diagram, scrubberRow: HTMLElement) {
+    this.scrubber = downcast(HTMLInputElement, scrubberRow.querySelector('#scrubber'));
 
-    this.scrubberDisplay = scrubberRow.querySelector('#scrubber-display');
+    this.scrubberDisplay = downcast(HTMLDivElement, scrubberRow.querySelector('#scrubber-display'));
 
     this.onChangeOrInput = this.onChangeOrInput.bind(this);
-    this.pushKillEventListener(this.scrubber, 'change', this.onChangeOrInput.bind(this));
-    this.pushKillEventListener(this.scrubber, 'input', this.onChangeOrInput.bind(this));
-    this.pushKillEventListener(this.scrubber, 'wheel', this.onWheel.bind(this),
-                               {passive: false});
+    this.lifecycle.pushKillEventListener(
+      this.scrubber, 'change', this.onChangeOrInput.bind(this) as EventListener);
+    this.lifecycle.pushKillEventListener(
+      this.scrubber, 'input', this.onChangeOrInput.bind(this) as EventListener);
+    this.lifecycle.pushKillEventListener(
+      this.scrubber, 'wheel', this.onWheel.bind(this) as EventListener,
+      {passive: false});
 
-    this.frameIdx = 0;
-    this.framesLength = 0;
     this.updateFrames([]);
   }
   onChangeOrInput() {
     let oldFrameIdx = this.frameIdx;
     this.frameIdx = this.frames.length <= 1 ? 0 : parseInt(this.scrubber.value);
     this.framesLength = this.frames.length;
-    this.updateRender();
+    this.updateRender(this.frameIdx);
   }
-  onWheel(e) {
+  onWheel(e: WheelEvent) {
     if (e.deltaX == 0) {
       return;
     }
     e.preventDefault();
     console.log(e);
   }
-  updateRender(oldFrameIdx) {
+  updateRender(oldFrameIdx: number) {
     let text;
     if (this.framesLength == 0) {
       text = '0/0';
@@ -1228,8 +1354,8 @@ class Scrubbable {
     }
     this.scrubberDisplay.textContent = text;
   }
-  updateFrames(frames) {
-    if (this.dead) {
+  updateFrames(frames: HoseFrame[]) {
+    if (this.lifecycle.dead) {
       return;
     }
     let oldFrameIdx = this.frameIdx;
@@ -1240,30 +1366,30 @@ class Scrubbable {
     this.framesLength = frames.length;
     if (frames.length <= 1) {
       // since min=max=value doesn't show as filled, fake it
-      this.scrubber.min = -1;
-      this.scrubber.max = 0;
-      this.scrubber.value = 0;
+      this.scrubber.min = '-1';
+      this.scrubber.max = '0';
+      this.scrubber.value = '0';
       this.scrubber.disabled = true;
     } else {
-      this.scrubber.min = 0;
-      this.scrubber.max = frames.length - 1;
-      this.scrubber.value = this.frameIdx;
+      this.scrubber.min = '0';
+      this.scrubber.max = ''+(frames.length - 1);
+      this.scrubber.value = ''+(this.frameIdx);
       this.scrubber.disabled = false;
     }
     this.updateRender(oldFrameIdx);
   }
 }
 
-function readableToArrayAsync(readable) {
+function readableToArrayAsync<R>(readable: ReadableStream<R>): Promise<R[]> {
   // This one-liner is enough in Chrome but not Safari for some reason:
   // return Array.fromAsync(readable);
 
   let reader = readable.getReader();
   let ai = {[Symbol.asyncIterator]() { return { next() { return reader.read(); }}; }};
-  return Array.fromAsync(ai);
+  return Array.fromAsync(ai) as Promise<R[]>; // XXX: is this right?
 }
 
-async function compressBufs(bufs) {
+async function compressBufs(bufs: ArrayBuffer[]): Promise<URL> {
   let compression = new CompressionStream('gzip');
   let compressedBufs = readableToArrayAsync(compression.readable);
   let writer = compression.writable.getWriter();
@@ -1283,7 +1409,7 @@ async function compressBufs(bufs) {
   return url;
 }
 
-async function decompressBuf(url) {
+async function decompressBuf(url: string): Promise<ArrayBuffer> {
   let buf = await (await fetch(url)).arrayBuffer();
   let decompression = new DecompressionStream('gzip');
   let decompressedBufs = readableToArrayAsync(decompression.readable);
@@ -1305,10 +1431,10 @@ async function decompressBuf(url) {
   return total;
 }
 
-async function stringifyWithArrayBuffers(data) {
+async function stringifyWithArrayBuffers(data: any): Promise<string> {
   let curOffset = 0;
-  let bufs = [];
-  let bufToStr = new Map;
+  let bufs: ArrayBuffer[] = [];
+  let bufToStr = new Map<ArrayBuffer, string>;
   let json = JSON.stringify(data, (key, obj) => {
     if (obj instanceof ArrayBuffer) {
       let str = bufToStr.get(obj);
@@ -1325,7 +1451,7 @@ async function stringifyWithArrayBuffers(data) {
   return json + '\n' + await compressBufs(bufs);
 }
 
-async function parseWithArrayBuffers(jsonPlus) {
+async function parseWithArrayBuffers(jsonPlus: string): Promise<any> {
   let [json, url] = jsonPlus.split('\n');
   let raw = await decompressBuf(url);
   let strToBuf = new Map;
@@ -1334,9 +1460,9 @@ async function parseWithArrayBuffers(jsonPlus) {
     if (typeof obj == 'string' && obj[0] === '\x01') {
       let ab = strToBuf.get(obj);
       if (ab === undefined) {
-        let [offset, length] = obj.substr(1).split(',');
-        offset |= 0;
-        length |= 0;
+        let [_offset, _length] = obj.substr(1).split(',');
+        let offset = parseInt(_offset);
+        let length = parseInt(_length);
         ab = new ArrayBuffer(length);
         new Uint8Array(ab).set(new Uint8Array(raw, offset, length));
         strToBuf.set(obj, ab);
@@ -1611,25 +1737,27 @@ class HoseParser {
   }
 }
 
-class HoseConn {
-  constructor(baseURL, hoseParserPromise) {
+class HoseConn implements WSWrapperDelegate {
+  wsw: WSWrapper;
+  readonly lifecycle = new Lifecycle();
+  constructor(baseURL: string, public hoseParserPromise: Promise<HoseParser>) {
     this.wsw = new WSWrapper(`${baseURL}/ws/hose`, this);
     this.wsw.setWantOpen(true);
     this.hoseParserPromise = hoseParserPromise;
+    this.lifecycle.killCallbacks.push(() => {
+      this.wsw.kill();
+    });
   }
-  onOpen(e) {
+  onOpen() {
   }
-  async onMessage(e, wsw) {
+  async onMessage(e: MessageEvent<any>) {
     (await this.hoseParserPromise).parse(e.data);
   }
-  onClose(e) {
-  }
-  kill() {
-    this.wsw.kill();
+  onClose() {
   }
 }
 
-g_exportJsonPromise = (async () => {
+var g_exportJsonPromise = (async () => {
   return await (await fetch('../exlaunch/build/export.json')).json();
 })();
 
@@ -1647,8 +1775,14 @@ class ButtonWrapper
 */
 
 class BaseConns {
-  constructor(hash) {
-    mixinKillBox(this);
+  readonly lifecycle = new Lifecycle();
+  readonly hoseParserPromise: Promise<HoseParser>;
+  readonly mmTypesPromise: Promise<string>; // XXX
+  readonly stillAlivePR: PromiseWithResolvers<never>;
+  diagram?: Diagram;
+  scrubbable?: Scrubbable;
+  _hoseParser?: HoseParser;
+  constructor(hash: string) {
     location.hash = hash;
     this.hoseParserPromise = this.doHoseParser();
     this.mmTypesPromise = this.doMMTypes();
@@ -1656,19 +1790,19 @@ class BaseConns {
     this.loadingSig = this.pushKill(new Signal(true));
   }
 
-  async doHoseParser() {
+  async doHoseParser(): Promise<HoseParser> {
     await yieldMe();
     let mmTypes = await this.mmTypesPromise;
-    let diagram = this.pushKill(new Diagram(document.getElementById('diagram'), mmTypes));
+    let diagram = this.lifecycle.pushKill(new Diagram(document.getElementById('diagram'), mmTypes));
     this.diagram = diagram; // mostly for debugging
-    let scrubbable = this.pushKill(new Scrubbable(diagram, document.getElementById('scrubber-row')));
+    let scrubbable = this.lifecycle.pushKill(new Scrubbable(diagram, document.getElementById('scrubber-row')));
     this.scrubbable = scrubbable; // ditto
     let parser = new HoseParser(mmTypes, scrubbable);
     this._hoseParser = parser; // ditto
     return parser;
   }
 
-  async doMMTypes() {
+  async doMMTypes(): Promise<string> {
     await yieldMe();
     let [helloInfo, exportJson] = await Promise.any([
       Promise.all([this.helloInfoPromise, g_exportJsonPromise]),
@@ -1693,10 +1827,10 @@ class BaseConns {
   }
 }
 
-function addStatsLine(text) {
+function addStatsLine(text: string) {
   let div = document.createElement('div');
   div.textContent = text;
-  let parent = document.getElementById('stats');
+  let parent = downcast(HTMLElement, document.getElementById('stats'));
   parent.insertBefore(div, parent.firstChild);
   while (parent.childElementCount > 10) {
     parent.removeChild(parent.lastChild);
@@ -1704,10 +1838,8 @@ function addStatsLine(text) {
 }
 
 class LiveConns extends BaseConns {
-  constructor(baseURL) {
+  constructor(public baseURL: string) {
     super('live');
-    mixinKillBox(this);
-    this.baseURL = baseURL;
 
     this.rpc = this.pushKill(new RPCConn(baseURL));
     this.helloInfoPromise = this.rpc.helloInfoPR.promise;
@@ -1821,78 +1953,15 @@ function jsMemCallback() {
 setInterval(jsMemCallback, 2000);
 jsMemCallback();
 
-function testSignals() {
-  let sig = new Signal;
-  let moresigs = [new Signal, new Signal];
-  let sig3 = sig.bind(i => moresigs[i]).map(x => x * 2);
-  (async () => {
-    for await (let val of sig3) {
-      console.log(val);
-    }
-  })();
-  sig.set(0);
-  moresigs[0].set(42);
-  moresigs[0].set(43);
-  sig.set(1);
-  moresigs[0].set('ignore me');
-  moresigs[1].set(44);
-  console.log('*', sig3.cur);
-}
-
-function mixinKillBox(obj) {
-  obj._killCallbacks = [];
-  obj.dead = false;
-  let superKill = obj.kill;
-  obj.pushKill = function(objToKill) {
-    if (objToKill.kill !== undefined) {
-      this._killCallbacks.push(objToKill.kill.bind(objToKill));
-    } else if (objToKill.reject !== undefined) {
-      this._killCallbacks.push(() => {
-        objToKill.reject(`rejected by KillBox of ${this.constructor.name}`);
-      });
-    } else {
-      throw new Error('not sure how to clean this up');
-    }
-    return objToKill;
-  };
-  obj.pushCatchKill = function(promise) {
-    promise.then(null, (exception) => {
-      if (this.dead && exception == 'killed') {
-        // ignore
-        console.log('caught killed exception'); 
-        return;
-      }
-      throw exception; // devtools will catch if open
-    });
-  };
-  obj.pushKillEventListener = function(target, event, callback, options) {
-    target.addEventListener(event, callback, options);
-    this._killCallbacks.push(() => {
-      target.removeEventListener(event, callback, options);
-    });
-  };
-  obj.kill = function() {
-    if (this.dead) {
-      return;
-    }
-    this.dead = true;
-    if (superKill !== undefined) {
-      superKill.call(this);
-    }
-    for (let cb of this._killCallbacks) {
-      cb();
-    }
-    this._killCallbacks = null;
-  };
-}
 class ButtonWrapper {
-  constructor(id, {enabled}) {
-    mixinKillBox(this);
-    this.elm = document.getElementById(id);
-    assert(this.elm && this.elm.tagName == 'BUTTON');
+  readonly lifecycle = new Lifecycle();
+  elm: HTMLButtonElement;
+  clicks: Signal<number>;
+  constructor(id: string, {enabled}: {enabled: Signal<boolean> | boolean | undefined}) {
+    this.elm = downcast(HTMLButtonElement, document.getElementById(id));
     this.clicks = this.pushKill(Signal.withoutInitialValue());
-    this.pushKillEventListener(this.elm, 'click', this.onClick.bind(this));
-    this.pushKill(Signal.of(enabled).map(e => {
+    this.lifecycle.pushKillEventListener(this.elm, 'click', this.onClick.bind(this));
+    this.lifecycle.pushKill(Signal.of<boolean | undefined>(enabled).map(e => {
       this.elm.disabled = !e;
     }));
   }
@@ -1902,32 +1971,33 @@ class ButtonWrapper {
 }
 
 class UI {
-  constructor(connsSig) {
-    mixinKillBox(this);
+  readonly lifecycle = new Lifecycle();
+  constructor(connsSig: SignalRO<BaseConns>) {
     this.notLoadingSig = connsSig.bind(conns =>
       !conns ? true : conns.loadingSig.map(loading => !loading));
+    const lc = this.lifecycle;
 
-    this.pushKill(this.pushKill(new ButtonWrapper('load-button', {
+    lc.pushKill(lc.pushKill(new ButtonWrapper('load-button', {
       enabled: new Signal(true),//this.notLoadingSig,
     })).clicks.map(() => {
       connsSig.maybeCur?.kill();
       connsSig.set(new LoadedConns(localStorage.zw));
     }));
 
-    this.pushKill(this.pushKill(new ButtonWrapper('live-button', {
+    lc.pushKill(lc.pushKill(new ButtonWrapper('live-button', {
       enabled: true,
     })).clicks.map(async () => {
       g_connsSig.maybeCur?.kill();
       g_connsSig.set(new LiveConns('ws://neb-solidus:8000'));
     }));
 
-    this.pushKill(this.pushKill(new ButtonWrapper('disconnect-button', {
+    lc.pushKill(lc.pushKill(new ButtonWrapper('disconnect-button', {
       enabled: true,
     })).clicks.map(async () => {
       g_connsSig.maybeCur?.kill();
     }));
 
-    this.pushKill(this.pushKill(new ButtonWrapper('save-button', {
+    lc.pushKill(lc.pushKill(new ButtonWrapper('save-button', {
       enabled: this.notLoadingSig,
     })).clicks.map(async () => {
       addStatsLine('saving...');

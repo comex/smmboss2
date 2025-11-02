@@ -204,7 +204,7 @@ export class Signal<T> implements SignalRO<T> {
     return boundSignal;
   }
 
-  static multimap<Obj>(obj: Obj):
+  static combine<Obj>(obj: Obj):
     Signal<{ [Key in keyof Obj]: Obj[Key] extends Signal<infer T> ? T : Obj[Key] }>
   {
     const retSignal = new Signal();
@@ -431,10 +431,10 @@ function testSignalMap(): void {
   testCheck(signal.linksOut.size === 0);
 }
 
-function testSignalMultimap(): void {
+function testSignalCombine(): void {
   const signalA = new Signal<string>;
   const signalB = new Signal<string>;
-  const mappedSig = Signal.multimap({a: signalA, b: signalB, c: 123});
+  const mappedSig = Signal.combine({a: signalA, b: signalB, c: 123});
   testCheck(!mappedSig.hasValue);
   signalA.set('a');
   testCheck(!mappedSig.hasValue);
@@ -477,7 +477,7 @@ async function testSignalAsyncIterate(): Promise<void> {
 export async function testSignals() {
   testSignalBind();
   testSignalMap();
-  testSignalMultimap();
+  testSignalCombine();
   await testSignalAsyncIterate();
   /*
   let sig = new Signal<number>;

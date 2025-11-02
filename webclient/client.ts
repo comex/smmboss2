@@ -1522,7 +1522,6 @@ function addStatsLine(text: string) {
   }
 }
 
-type FlagCheckboxes = { [name: string]: boolean };
 class LiveConns extends BaseConns {
   helloInfoPromise: Promise<HelloModInfo>;
   rpc: RPCConn;
@@ -1579,20 +1578,29 @@ class LiveConns extends BaseConns {
   }
 
   async doCheckboxes() {
-    const checkboxValues: Signal<FlagCheckboxes> = Signal.withoutInitialValue();
-    const checkboxValuesVal: FlagCheckboxes = {};
     const checkboxes = Array.of(document.querySelectorAll('#controls input[type=checkbox]'))
       .map(input => downcast(HTMLInputElement, input));
+    const checkboxSigs: { [name: string]: Signal<boolean> } = {};
     for (const input of checkboxes) {
       const id = input.id;
-      input.checked = checkboxValuesVal[id] = localStorage[id] === '1';
+      input.checked = localStorage[id] === '1';
+      const sig = new Signal(input.checked);
       input.onchange = (e: Event) => {
-        checkboxValuesVal[id] = input.checked;
         localStorage[id] = input.checked ? '1' : '0';
-        checkboxValues.set({...checkboxValuesVal});
+        sig.set(input.checked);
       }
-      checkboxValues.set({...checkboxValuesVal});
+      checkboxSigs[id] = sig;
     }
+    const checkboxSig = this.lifecycle.pushKill(Signal.combine(checkboxSigs));
+    this.lifecycle.pushKill(this.lifecycle.pushKill(Signal.combine({
+      checkboxVals: checkboxSig,
+      isOpen: this.rpc.isOpenSig,
+    })).map(res => {
+      if (res.isOpen) {
+
+      }
+
+    }));
     while (1) {
       console.log('wtf');
       await Promise.any([

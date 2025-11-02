@@ -2,14 +2,40 @@ export interface DataViewWithAddr extends DataView {
   addr: bigint;
 }
 
+export function hex(n: number | bigint): string {
+  return '0x'+n.toString(16);
+}
 export function assert(x: boolean): asserts x {
   if (!(x)) {
     throw new Error('assertion failed');
   }
 }
 export abstract class Instance {
-  abstract type: unknown;
+  abstract type: Type<unknown>;
+  _address?: bigint;
   constructor(public dv: DataView, public off: bigint) {}
+  readPtrFromWithin<T>(childAddress: bigint, childType: Type<T>): T {
+    const parentAddress = this._address, parentSizeof = this.sizeof;
+    if (parentAddress === undefined) {
+      throw new Error('readPtrFromWithin requires _address to be set manually');
+    }
+    if (parentSizeof === undefined) {
+      throw new Error('readPtrFromWithin requires the parent type (or value) to have sizeof');
+    }
+    const parentEndAddress = parentAddress + parentSizeof;
+    const childSizeof = childType.sizeof;
+    if (childSizeof === undefined) {
+      throw new Error('readPtrFromWithin requires the child type to have sizeof');
+    }
+    const childEndAddress = childAddress + childSizeof;
+    if (childAddress < parentAddress || childEndAddress > parentEndAddress) {
+      throw new Error(`readPtrFromWithin out of bounds: parent at {${hex(parentAddress)}..${hex(parentEndAddress)}}, child at {${hex(childAddress)}, ${hex(childEndAddress)}}`);
+    }
+    return childType.get(this.dv, this.off + childAddress - parentAddress);
+  }
+  get sizeof(): bigint | undefined {
+    return (this.type as any).sizeof;
+  }
 }
 export interface Type<T> {
   name: string;

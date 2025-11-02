@@ -1,20 +1,17 @@
 import * as mmTypes from 'build/mm_types';
-import { assert, Type, u64, u8, Tag8 } from 'types_base';
+import { assert, hex, Type, u8, u32, u64, s8, Tag8, Pointer } from 'types_base';
 import { Signal, Lifecycle } from 'reactive';
 
 var theRPCConn: RPCConn
 
-function hex(n: number): string {
-  return '0x'+n.toString(16);
-}
-/*
 function notNull<T>(val: T | null): T {
   if (val === null) {
     throw new Error('unexpectedly null');
   }
   return val;
 }
-function notUndefined<T>(val: T | undefined): T {
+/*
+function unwrap<T>(val: T | undefined): T {
   if (val === undefined) {
     throw new Error('unexpectedly undefined');
   }
@@ -60,6 +57,15 @@ declare module 'build/mm_types' {
     get width(): number;
     get height(): number;
   }
+  interface Hitbox {
+    // This is not part of the actual struct but is appended by `report_hitbox`
+    // and then stored by `parseHitbox`.
+    worldID: bigint;
+  }
+  interface Scol {
+    // Ditto.
+    _ptr?: bigint;
+  }
 }
 Object.defineProperty(mmTypes.Rect, 'width', {
   get(): number { return this.max.x - this.min.x; }
@@ -69,9 +75,9 @@ Object.defineProperty(mmTypes.Rect, 'height', {
 });
 
 class Reader {
-  dv: DataView
-  off: bigint
-  size: bigint
+  dv: DataView;
+  off: bigint;
+  size: bigint;
   constructor(dv: DataView | Uint8Array | ArrayBuffer, off: bigint = 0n) {
     if (dv instanceof ArrayBuffer) {
       dv = new DataView(dv);
@@ -92,11 +98,11 @@ class Reader {
     this.off = off + size;
     return off;
   }
-  read<T>(ty: Type<T>, size: bigint | undefined = undefined) {
+  read<T>(ty: Type<T>, size?: bigint) {
     if (size === undefined) {
       size = ty.sizeof;
     }
-    assert(typeof size == 'number');
+    assert(typeof size == 'bigint');
     let off = this.readOff(size);
     return ty.get(this.dv, off);
   }
@@ -384,63 +390,88 @@ class RPCConn implements WSWrapperDelegate {
 
 const svgNS = 'http://www.w3.org/2000/svg';
 
-interface SVGElementWithDTCache extends SVGElement {
+interface ElementDTCache {
+  ptr: bigint;
+  createdFrameNum: number;
+  deleteMe(): void;
+}
+interface SVGElementWithDTCache extends SVGElement, ElementDTCache {}
+
+interface SVGPolygonWithDTCache extends SVGPolygonElement, ElementDTCache {
   _fill?: string;
   _stroke?: string;
   _strokeWidth?: number;
 }
-abstract class DiagramThingKind {
+interface SVGLineWithDTCache extends SVGLineElement, ElementDTCache {
+  _tx1?: number;
+  _tx2?: number;
+  _ty1?: number;
+  _ty2?: number;
+  _stroke?: string;
+  _strokeWidth?: number;
+}
+//interface SVGCircleWithDTCache extends SVGCircleElement, ElementDTCache
+
+
+abstract class DiagramThingKind<out Thing> {
   group: SVGGElement;
-  elmsByPtr: Map<bigint, SVGElement> = new Map();
+  elmsByPtr: Map<bigint, SVGElementWithDTCache> = new Map();
+  genericElmsCount?: number;
+  seen?: Set<SVGElementWithDTCache>;
   constructor(public diagram: Diagram) {
     this.group = document.createElementNS(svgNS, 'g') as SVGGElement;
     this.group.setAttribute('kind', this.constructor.name);
     diagram.svg.appendChild(this.group);
   }
-  renderThings() {
+  abstract getThingsFromFrame(): Iterable<Thing>;
+  abstract getWorldID(thing: Thing): bigint;
+  abstract renderThing(thing: Thing): void;
+  renderThings(): void {
     this.genericElmsCount = 0;
-    let seen = new Set();
+    let seen = new Set<SVGElementWithDTCache>();
     this.seen = seen;
     for (let thing of this.getThingsFromFrame()) {
       let worldID = this.getWorldID(thing);
-      assert(typeof worldID == 'number');
+      assert(typeof worldID == 'bigint');
       if (worldID !== this.diagram.worldID) {
         continue;
       }
       this.renderThing(thing);
     }
-    for (let elm of Array.from(this.group.children)) {
+    for (const _elm of Array.from(this.group.children)) {
+      const elm = _elm as SVGElementWithDTCache;
       if (!this.seen.has(elm)) {
         //console.log(`${this.diagram.curFrame.number}/${this.diagram.curFrame.worldID} removing stale ${elm} at ${elm.ptr} from ${elm.createdFrameNum}`);
         elm.deleteMe();
       }
     }
-    this.seen = null;
+    delete this.seen;
     //console.log(`now have ${this.group.childElementCount} children`);
   }
-  getOrCreateElmFor(ptr, wantedTag) {
-    let elm = this.elmsByPtr.get(ptr);
+  getOrCreateElmFor(ptr: bigint, wantedTag: string): SVGElementWithDTCache {
+    let elm: SVGElementWithDTCache | undefined = this.elmsByPtr.get(ptr);
     //console.log(elm);
     if (elm && elm.tagName != wantedTag) {
       elm.deleteMe();
-      elm = null;
+      elm = undefined;
     }
-    if (!elm) {
-      elm = document.createElementNS(svgNS, wantedTag);
+    if (elm === undefined) {
+      const elm_ = document.createElementNS(svgNS, wantedTag) as SVGElementWithDTCache;
+      elm = elm_;
       assert(elm.tagName == wantedTag);
       //console.log(`creating ${wantedTag}`);
       elm.ptr = ptr;
       elm.setAttribute('ptr', hex(ptr)); // ** remove this if perf is an issue
-      elm.createdFrameNum = this.diagram.curFrame.number;
+      elm.createdFrameNum = this.diagram.curFrame!.number;
       elm.deleteMe = () => {
         //console.log(`** deleteMe for ${wantedTag} ptr=${ptr}`);
-        elm.parentNode.removeChild(elm);
+        elm_.parentNode!.removeChild(elm_);
         this.elmsByPtr.delete(ptr);
       };
       this.group.appendChild(elm);
       this.elmsByPtr.set(ptr, elm);
     }
-    this.seen.add(elm);
+    this.seen!.add(elm);
     return elm;
   }
 
@@ -454,7 +485,7 @@ abstract class DiagramThingKind {
       let y = dia.transformY(points[i+1]);
       stringified += ` ${x},${y}`;
     }
-    let polygon = this.getOrCreateElmFor(key, 'polygon') as SVGElementWithDTCache;
+    let polygon = this.getOrCreateElmFor(key, 'polygon') as SVGPolygonWithDTCache;
     if (polygon._fill === fill &&
         polygon._stroke === stroke &&
         polygon._strokeWidth === strokeWidth &&
@@ -473,82 +504,85 @@ abstract class DiagramThingKind {
     polygon._strokeWidth = strokeWidth;
   }
 
-  line(key, x1, y1, x2, y2, {stroke, strokeWidth}) {
+  line(key: any, x1: number, y1: number, x2: number, y2: number,
+       {stroke, strokeWidth}: {stroke: string, strokeWidth: number}) {
     let dia = this.diagram;
-    let line = this.getOrCreateElmFor(key, 'line');
+    let line = this.getOrCreateElmFor(key, 'line') as SVGLineWithDTCache;
     let tx1 = dia.transformX(x1);
     let tx2 = dia.transformX(x2);
     let ty1 = dia.transformY(y1);
     let ty2 = dia.transformY(y2);
-    if (line.tx1 === tx1 &&
-        line.tx2 === tx2 &&
-        line.ty1 === ty1 &&
-        line.ty2 === ty2 &&
-        line.stroke === stroke &&
-        line.strokeWidth === strokeWidth) {
+    if (line._tx1 === tx1 &&
+        line._tx2 === tx2 &&
+        line._ty1 === ty1 &&
+        line._ty2 === ty2 &&
+        line._stroke === stroke &&
+        line._strokeWidth === strokeWidth) {
       return;
     }
-    line.setAttribute('x1', tx1);
-    line.setAttribute('y1', ty1);
-    line.setAttribute('x2', tx2);
-    line.setAttribute('y2', ty2);
+    line.setAttribute('x1', tx1 as any);
+    line.setAttribute('y1', ty1 as any);
+    line.setAttribute('x2', tx2 as any);
+    line.setAttribute('y2', ty2 as any);
     line.setAttribute('stroke', stroke);
-    line.setAttribute('stroke-width', strokeWidth);
+    line.setAttribute('stroke-width', strokeWidth as any);
 
-    line.tx1 = tx1;
-    line.tx2 = tx2;
-    line.ty1 = ty1;
-    line.ty2 = ty2;
-    line.stroke = stroke;
-    line.strokeWidth = strokeWidth;
+    line._tx1 = tx1;
+    line._tx2 = tx2;
+    line._ty1 = ty1;
+    line._ty2 = ty2;
+    line._stroke = stroke;
+    line._strokeWidth = strokeWidth;
   }
 
-  circle(key, cx, cy, r, {fill, stroke, strokeWidth}) {
+  circle(key: any, cx: number, cy: number, r: number,
+         {fill, stroke, strokeWidth}: {fill: string, stroke: string, strokeWidth: number}) {
     let dia = this.diagram;
     let circle = this.getOrCreateElmFor(key, 'circle');
-    circle.setAttribute('cx', dia.transformX(cx));
-    circle.setAttribute('cy', dia.transformY(cy));
-    circle.setAttribute('r', dia.transformSize(r));
+    circle.setAttribute('cx', dia.transformX(cx) as any);
+    circle.setAttribute('cy', dia.transformY(cy) as any);
+    circle.setAttribute('r', dia.transformSize(r) as any);
     if (fill !== undefined) {
       circle.setAttribute('fill', fill);
     }
     if (stroke !== undefined) {
       circle.setAttribute('stroke', stroke);
-      circle.setAttribute('stroke-width', strokeWidth ?? 1);
+      circle.setAttribute('stroke-width', (strokeWidth ?? 1) as any);
     }
-
   }
-  rect(key, x, y, width, height, {fill, stroke, strokeWidth}) {
+
+  rect(key: any, x: number, y: number, width: number, height: number,
+       {fill, stroke, strokeWidth}: {fill: string, stroke: string, strokeWidth: number}) {
     let dia = this.diagram;
     let rect = this.getOrCreateElmFor(key, 'rect');
-    rect.setAttribute('x', dia.transformX(x));
-    rect.setAttribute('y', dia.transformY(y));
-    rect.setAttribute('width', dia.transformSize(width));
-    rect.setAttribute('height', dia.transformSize(height));
+    rect.setAttribute('x', dia.transformX(x) as any);
+    rect.setAttribute('y', dia.transformY(y) as any);
+    rect.setAttribute('width', dia.transformSize(width) as any);
+    rect.setAttribute('height', dia.transformSize(height) as any);
     if (fill !== undefined) {
       rect.setAttribute('fill', fill);
     }
     if (stroke !== undefined) {
       rect.setAttribute('stroke', stroke);
-      rect.setAttribute('stroke-width', strokeWidth ?? 1);
+      rect.setAttribute('stroke-width', (strokeWidth ?? 1) as any);
     }
   }
 }
 
-class DiagramHitboxes extends DiagramThingKind {
+class DiagramHitboxes extends DiagramThingKind<[bigint, mmTypes.Hitbox]> {
   getThingsFromFrame() {
-    return this.diagram.curFrame.hitboxes.entries();
+    return this.diagram.curFrame!.hitboxes.entries();
   }
-  getWorldID([ptr, hitbox]) {
+  getWorldID([ptr, hitbox]: [bigint, mmTypes.Hitbox]): bigint {
     return hitbox.worldID;
   }
-  renderThing([ptr, hitbox]) {
+  renderThing([ptr, hitbox]: [bigint, mmTypes.Hitbox]): void {
     let params = hitbox.params;
-    let isCircle = params.isCircle;
+    let isCircle = params.is_circle;
     let x = hitbox.rect.min.x;
     let y = hitbox.rect.min.y;
-    let w = hitbox.rect.width();
-    let h = hitbox.rect.height();
+    let w = hitbox.rect.width;
+    let h = hitbox.rect.height;
 
     let dia = this.diagram;
     if (w < 0) {
@@ -572,14 +606,14 @@ class DiagramHitboxes extends DiagramThingKind {
   }
 }
 
-class DiagramNormalColliders extends DiagramThingKind {
-  getThingsFromFrame() {
-    return this.diagram.curFrame.normalColliders;
+class DiagramNormalColliders extends DiagramThingKind<NormalCollider> {
+  getThingsFromFrame(): Iterable<NormalCollider> {
+    return this.diagram.curFrame!.normalColliders;
   }
-  getWorldID(col) {
+  getWorldID(col: NormalCollider): bigint {
     return col.worldID;
   }
-  renderThing(col) {
+  renderThing(col: NormalCollider): void {
     if (col.segmentsCur.length == 0) {
       return;
     }
@@ -606,7 +640,7 @@ class DiagramNormalColliders extends DiagramThingKind {
       this.myStroke
     );
   }
-  renderAsLines(col) {
+  renderAsLines(col: NormalCollider) :void {
     let extX = col.extPosCur.x;
     let extY = col.extPosCur.y;
     let dia = this.diagram;
@@ -629,26 +663,27 @@ class DiagramNormalColliders extends DiagramThingKind {
   };
 }
 
-class DiagramScolColliders extends DiagramThingKind {
-  getThingsFromFrame() {
-    return this.diagram.curFrame.scolColliders;
+class DiagramScolColliders extends DiagramThingKind<ScolCollider> {
+  getThingsFromFrame(): Iterable<ScolCollider> {
+    return this.diagram.curFrame!.scolColliders;
   }
-  getWorldID(data) {
+  getWorldID(data: ScolCollider): bigint {
     return data.worldID;
   }
-  renderThing(data) {
+  renderThing(data: ScolCollider): void {
     let dia = this.diagram;
     let scol = data.scol;
     if (1) {
       for (let i = 0; i < 4; i++) {
         let fakePtr = data.ptr + BigInt(i);
-        let xxyPtr = scol.xxy_ptrs_cur.get(i);
+        let z: Pointer<mmTypes.XXY> = 42;
+        let xxyPtr = scol.xxy_ptrs_cur.at(i);
         if (xxyPtr == 0n) {
           // TODO (2025-09-28): not sure what null here means, might be I
           // forgot something, but I'm getting it
           continue;
         }
-        let xxy = scol.readPtrFromWithin(xxyPtr , this.mmTypes.XXY);
+        let xxy = scol.readPtrFromWithin(xxyPtr, mmTypes.XXY);
 
         this.line(
           fakePtr,
@@ -727,40 +762,38 @@ function timelineTime(): number {
 }
 class Diagram {
   readonly lifecycle = new Lifecycle();
-  lastRenderedFrame: HoseFrame | null = null;
+  lastRenderedFrame?: HoseFrame;
   zoomLevel = 1;
   panX = 0;
   panY = 400;
   lastWheelTimeStamp = 0;
 
   zoomMomentum = 0;
-  zoomMomentumTimeoutID: number | null = null;
+  zoomMomentumTimeoutID?: number;
 
-  zoomMomentumStartZoomLevel: number | null = null;
-  zoomMomentumStartPanX: number | null = null;
-  zoomMomentumStartPanY: number | null = null;
-  zoomMomentumStartTime: number | null = null;
-  zoomMomentumCursorRealX: number | null = null;
-  zoomMomentumCursorRealY: number | null = null;
-  zoomMomentumRAFID: number | null = null;
-  mouseDownClientX: number | null = null;
-  mouseDownClientY: number | null = null;
+  zoomMomentumStartZoomLevel?: number;
+  zoomMomentumStartPanX?: number;
+  zoomMomentumStartPanY?: number;
+  zoomMomentumStartTime?: number;
+  zoomMomentumCursorRealX?: number;
+  zoomMomentumCursorRealY?: number;
+  zoomMomentumRAFID?: number;
+  mouseDownClientX?: number;
+  mouseDownClientY?: number;
 
-  readonly kinds: DiagramThingKind[];
+  readonly kinds: DiagramThingKind<unknown>[];
   readonly hitboxes = new DiagramHitboxes(this);
   readonly normalColliders = new DiagramNormalColliders(this);
   readonly scolColliders = new DiagramScolColliders(this);
   readonly bgCollisionPoints = new DiagramBGCollisionPoints(this);
   readonly bgCollisionTwoPoints = new DiagramBGCollisionTwoPoints(this);
 
-  worldID = 0;
+  worldID = 0n;
 
   readonly onMouseMoveBound = this.onMouseMove.bind(this);
   readonly onMouseUpBound = this.onMouseUp.bind(this);
 
-  curFrame: HoseFrame | null = null;
-
-
+  curFrame?: HoseFrame;
 
   constructor(public svg: SVGSVGElement) {
     this.kinds = [
@@ -776,7 +809,7 @@ class Diagram {
     this.lifecycle.pushKillEventListener(this.svg, 'mousedown', this.onMouseDown.bind(this) as EventListener);
     this.lifecycle.killCallbacks.push(() => {
       this.svg.innerHTML = '';
-      this.lastRenderedFrame = null;
+      delete this.lastRenderedFrame;
       this.removeMouseMoveUp();
     });
   }
@@ -786,7 +819,7 @@ class Diagram {
       kind.renderThings();
     }
     this.lastRenderedFrame = frame;
-    this.curFrame = null;
+    delete this.curFrame;
   }
   transformX(x: number): number {
     return this.panX + this.transformSize(x);
@@ -1114,19 +1147,64 @@ async function parseWithArrayBuffers(jsonPlus: string): Promise<any> {
 }
 
 
-class NormalCollider {
-}
+type NormalCollider = {
+  ptr: bigint,
+  col: mmTypes.Collider,
+  extPosCur: mmTypes.Point2D,
+  extPosOld: mmTypes.Point2D,
+  firstSeenFrameNumber: number,
+  segmentsCur: mmTypes.ColliderSegment[] = [],
+  segmentsOld: mmTypes.ColliderSegment[] = [],
+  rawData: ArrayBuffer,
+  worldID: bigint,
+};
+
+type ScolCollider = {
+  ptr: bigint,
+  scol: mmTypes.Scol,
+  extPosCur: mmTypes.Point2D,
+  extPosOld: mmTypes.Point2D,
+  worldID: bigint,
+  rawData: ArrayBuffer,
+};
+
+type HitboxCollisionEvent = {
+  hb1?: mmTypes.Hitbox,
+  hb2?: mmTypes.Hitbox,
+  ret: bigint,
+  worldID: bigint,
+};
+
+type BgCollisionPointEvent = {
+  worldID: bigint,
+  xy: mmTypes.Point2D,
+  enable1: bigint,
+  enable2: bigint,
+  ret: bigint,
+  bic: mmTypes.CollisionBIC,
+};
+
+type BgCollisionTwoPointEvent = {
+  worldID: bigint,
+  xy1: mmTypes.Point2D,
+  xy2: mmTypes.Point2D,
+  shapemask: bigint,
+  enable1: bigint,
+  enable2: bigint,
+  ret: bigint,
+  cp?: mmTypes.CollisionPoint,
+  bic?: mmTypes.CollisionBIC,
+};
 
 class HoseFrame {
   readonly hitboxes = new Map<bigint, mmTypes.Hitbox>();
   relevantHoseMessages: ArrayBuffer[] = [];
   normalColliders: NormalCollider[] = [];
-  scolColliders: string[] = [];
-  constructor(public number: number) {
-    this.bgCollisionPointEvents = [];
-    this.bgCollisionTwoPointEvents = [];
-    this.hitboxCollisionEvents = [];
-  }
+  scolColliders: ScolCollider[] = [];
+  hitboxCollisionEvents: HitboxCollisionEvent[] = [];
+  bgCollisionPointEvents: BgCollisionPointEvent[] = [];
+  bgCollisionTwoPointEvents: BgCollisionTwoPointEvent[] = [];
+  constructor(public number: number) {}
   toString() {
     return `frame[${this.number}]`;
   }
@@ -1187,7 +1265,7 @@ class HoseParser {
     this.tagStats[tag][0] += r.size; // total length
     this.tagStats[tag][1]++; // message count
 
-    let bufferToSave = null;
+    let bufferToSave: ArrayBuffer | undefined = undefined;
 
     switch (tag) {
     case 'collisi':
@@ -1232,11 +1310,10 @@ class HoseParser {
     }
     r.expectEnd();
 
-    if (bufferToSave === null) {
+    if (bufferToSave === undefined) {
       // either not scol, or parseScolCollider returned null
       bufferToSave = buffer;
     }
-    assert(bufferToSave instanceof ArrayBuffer);
     this.curFrame.relevantHoseMessages.push(bufferToSave);
 
     //console.log(`hose message ${new BigUint64Array(e.data)}`);
@@ -1258,116 +1335,115 @@ class HoseParser {
     this.curFrame = new HoseFrame(oldFrame.number + 1);
   }
 
-  parseDoMany(r) {
-    let areaSys = r.read(ty.u64);
-    let worldID = r.read(ty.u64);
-    if (worldID == 0) {
+  parseDoMany(r: Reader): void {
+    let areaSys = r.read(u64);
+    let worldID = r.read(u64);
+    if (worldID == 0n) {
       this.finalizeFrame();
     };
   }
-  parseCollision(r) {
-    let hb1 = r.read(ty.u64);
-    let hb2 = r.read(ty.u64);
-    let ret = r.read(ty.u64);
-    let data = {
+  parseCollision(r: Reader): void {
+    let hb1 = r.read(u64);
+    let hb2 = r.read(u64);
+    let ret = r.read(u64);
+    let data: HitboxCollisionEvent = {
       hb1: this.curFrame.hitboxes.get(hb1),
       hb2: this.curFrame.hitboxes.get(hb2),
       ret: ret,
-    }
-    if (hb1) {
+      worldID: -1n,
+    };
+    if (hb1 && data.hb1 !== undefined) {
       data.worldID = data.hb1.worldID;
-    } else if (hb2) {
+    } else if (hb2 && data.hb2 !== undefined) {
       data.worldID = data.hb2.worldID;
-    } else {
-      data.worldID = -1;
     }
     this.curFrame.hitboxCollisionEvents.push(data);
   }
-  parseHitbox(r) {
-    let ptr = r.read(ty.u64);
-    let hb = r.read(this.mmTypes.Hitbox, r.remaining() - 1);
+  parseHitbox(r: Reader): void {
+    let ptr = r.read(u64);
+    let hb = r.read(mmTypes.Hitbox, r.remaining() - 1);
     hb.worldID = r.read(ty.s8);
     this.curFrame.hitboxes.set(ptr, hb);
   }
-  parseNormalCollider(r) {
-    let data = new NormalCollider;
-    Object.assign(data, {
-      ptr: r.read(ty.u64),
-      col: r.read(this.mmTypes.Collider, 0x3e0),
-      extPosCur: r.read(this.mmTypes.Point2D),
-      extPosOld: r.read(this.mmTypes.Point2D),
+  parseNormalCollider(r: Reader): void {
+    let data: NormalCollider = {
+      ptr: r.read(u64),
+      col: r.read(mmTypes.Collider, 0x3E0n),
+      extPosCur: r.read(mmTypes.Point2D),
+      extPosOld: r.read(mmTypes.Point2D),
       firstSeenFrameNumber: this.curFrame.number,
       segmentsCur: [],
       segmentsOld: [],
-      rawData: r.dv.buffer,
-    });
+      rawData: downcast(ArrayBuffer, r.dv.buffer),
+      worldID: -1n, // to be overwritten
+    };
     for (let i = 0, count = data.col.segments_cur.count; i < count; i++) {
-      data.segmentsCur.push(r.read(this.mmTypes.ColliderSegment));
+      data.segmentsCur.push(r.read(mmTypes.ColliderSegment));
     }
     for (let i = 0, count = data.col.segments_old.count; i < count; i++) {
-      data.segmentsOld.push(r.read(this.mmTypes.ColliderSegment));
+      data.segmentsOld.push(r.read(mmTypes.ColliderSegment));
     }
-    data.worldID = r.read(ty.s8);
+    data.worldID = r.read(s8);
     this.normalColliderMap.set(data.ptr, data);
     this.curFrame.normalColliders.push(data);
   }
-  parseNormalColliderGone(r) {
-    let ptr = r.read(ty.u64);
+  parseNormalColliderGone(r: Reader): void {
+    let ptr = r.read(u64);
     this.normalColliderMap.delete(ptr);
   }
-  parseScolCollider(r) {
-    let data = {
-      ptr: r.read(ty.u64),
-      scol: r.read(this.mmTypes.Scol, 0x103c),
-      extPosCur: r.read(this.mmTypes.Point2D),
-      extPosOld: r.read(this.mmTypes.Point2D),
-      worldID: r.read(ty.s8),
-      originalMessage: r.dv.buffer,
+  parseScolCollider(r: Reader): void {
+    let data: ScolCollider = {
+      ptr: r.read(u64),
+      scol: r.read(mmTypes.Scol, 0x103Cn),
+      extPosCur: r.read(mmTypes.Point2D),
+      extPosOld: r.read(mmTypes.Point2D),
+      worldID: r.read(s8),
+      rawData: downcast(ArrayBuffer, r.dv.buffer),
     };
-    data.scol._ptr = data.ptr;
+    data.scol._address = data.ptr;
     this.scolColliderMap.set(data.ptr, data);
     this.curFrame.scolColliders.push(data);
   }
-  parseHashedScolCollider(r) {
-    let ptr = r.read(ty.u64);
+  parseHashedScolCollider(r: Reader): ArrayBuffer | undefined {
+    let ptr = r.read(u64);
     let data = this.scolColliderMap.get(ptr);
     if (data !== undefined) {
       this.curFrame.scolColliders.push(data);
       // return the message that needs to be saved if we save to file
-      return data.originalMessage;
+      return data.rawData;
     } else {
       // this could happen right when connecting
       addStatsLine(`!! missing scol for ${ptr}`);
-      return null;
+      return undefined;
     }
   }
-  parseBGCollisionTwoPoint(r) {
-    let data = {
-      worldID: r.read(ty.u8),
-      xy1: r.read(this.mmTypes.Point2D),
-      xy2: r.read(this.mmTypes.Point2D),
-      shapemask: r.read(ty.u32),
-      enable1: r.read(ty.u8),
-      enable2: r.read(ty.u8),
-      ret: r.read(ty.u8),
-      cp: r.read(ty.u8) ? r.read(this.mmTypes.CollisionPoint) : null,
+  parseBGCollisionTwoPoint(r: Reader): void {
+    let data: BgCollisionTwoPointEvent = {
+      worldID: r.read(u8),
+      xy1: r.read(mmTypes.Point2D),
+      xy2: r.read(mmTypes.Point2D),
+      shapemask: r.read(u32),
+      enable1: r.read(u8),
+      enable2: r.read(u8),
+      ret: r.read(u8),
+      cp: r.read(u8) ? r.read(mmTypes.CollisionPoint) : undefined,
     };
     data.bic = data.cp?.bic;
     this.curFrame.bgCollisionTwoPointEvents.push(data);
   }
-  parseBGCollisionPoint(r) {
-    let data = {
-      worldID: r.read(ty.u8),
-      xy: r.read(this.mmTypes.Point2D),
-      enable1: r.read(ty.u8),
-      enable2: r.read(ty.u8),
-      ret: r.read(ty.u8),
-      bic: r.read(this.mmTypes.CollisionBIC),
+  parseBGCollisionPoint(r: Reader): void {
+    let data: BgCollisionPointEvent = {
+      worldID: r.read(u8),
+      xy: r.read(mmTypes.Point2D),
+      enable1: r.read(u8),
+      enable2: r.read(u8),
+      ret: r.read(u8),
+      bic: r.read(mmTypes.CollisionBIC),
     };
     this.curFrame.bgCollisionPointEvents.push(data);
   }
-  parseOverrun(r) {
-    document.getElementById('overrun').innerHTML = 'got overrun!';
+  parseOverrun(r: Reader): void {
+    document.getElementById('overrun')!.innerHTML = 'got overrun!';
   }
 }
 

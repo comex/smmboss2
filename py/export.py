@@ -244,8 +244,12 @@ def write_typescript(fp):
                 p(f'  get type(): typeof {munged_cls} {{ return {munged_cls}; }}')
                 for prop_name, prop_info in cls_info['props'].items():
                     prop_ty = munge(prop_info['ptr_cls'])
+                    # prop_cls_info = merged['classes'][prop_info['ptr_cls']]
+                    # if prop_cls_info['kind'] == 'primitive':
+                    #     prop_ts_type
+                    # else:
                     offsetof_var = f'offsetof_{munged_cls}_{prop_name}'
-                    p(f'  get {prop_name}() {{')
+                    p(f'  get {prop_name}(): {prop_ty} {{')
                     if prop_info.get('any_missing') or cls_info.get('any_missing'):
                         p(f'    if ({offsetof_var} === undefined) {{ return undefined; }}')
                     p(f'    return {prop_ty}.get(this.dv, this.off + ({offsetof_var} as bigint));')

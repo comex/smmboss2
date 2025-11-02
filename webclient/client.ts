@@ -1,8 +1,12 @@
 import * as mmTypes from 'build/mm_types';
-import { assert, hex, Type, u8, u32, u64, s8, Tag8, Pointer } from 'types_base';
+import { assert, hex, Type, u8, u32, u64, s8, Tag8, Pointer, DataViewWithAddr } from 'types_base';
 import { Signal, Lifecycle } from 'reactive';
 
 var theRPCConn: RPCConn
+
+function hexbuf(array: bigint[]): string {
+  return array.map(num => num.toString(16).padStart(2, '0')).join('');
+}
 
 function notNull<T>(val: T | null): T {
   if (val === null) {
@@ -98,13 +102,20 @@ class Reader {
     this.off = off + size;
     return off;
   }
-  read<T>(ty: Type<T>, size?: bigint) {
+  read<T>(ty: Type<T>, size?: bigint, addr?: bigint) {
     if (size === undefined) {
       size = ty.sizeof;
     }
     assert(typeof size == 'bigint');
     let off = this.readOff(size);
-    return ty.get(this.dv, off);
+    let dv = this.dv;
+    if (addr !== undefined) {
+      const subDV = new DataView(dv.buffer, Number(off), Number(size));
+      (subDV as DataViewWithAddr).addr = addr;
+      dv = subDV;
+      off = 0n;
+    }
+    return ty.get(dv, off);
   }
   readArrayUnbounded<T>(callback: () => T): T[] {
     let out = [];
@@ -138,24 +149,22 @@ class Reader {
 }
 
 // These could be structs but using Reader avoids a circular dependency
-function readExlUtilRange(r: Reader) {
+type ExlUtilRange = {start: bigint, size: bigint};
+function readExlUtilRange(r: Reader): ExlUtilRange {
   return {start: r.read(u64), size: r.read(u64)}
 }
-function readHelloModInfo(r: Reader) {
-  let ret = r.readArrayUnbounded(() => ({
+
+type HelloModInfo = Array<{total: ExlUtilRange, text: ExlUtilRange, rodata: ExlUtilRange, data: ExlUtilRange, buildId: string}> & {rawData: ArrayBuffer};
+function readHelloModInfo(r: Reader): HelloModInfo {
+  return Object.assign(r.readArrayUnbounded(() => ({
     total: readExlUtilRange(r),
     text: readExlUtilRange(r),
     rodata: readExlUtilRange(r),
     data: readExlUtilRange(r),
-    buildId: r.readArray(16n, () => r.read(u8)),
-    rawData: r.dv.buffer,
-  }));
-  return ret;
-}
-type HelloModInfo = ReturnType<typeof readHelloModInfo>;
-
-function toHex(array: bigint[]): String {
-  return array.map(num => num.toString(16).padStart(2, '0')).join('');
+    buildId: hexbuf(r.readArray(16n, () => r.read(u8))),
+  })), {
+    rawData: downcast(ArrayBuffer, r.dv.buffer),
+  });
 }
 
 class Throttle {
@@ -536,7 +545,7 @@ abstract class DiagramThingKind<out Thing> {
   }
 
   circle(key: any, cx: number, cy: number, r: number,
-         {fill, stroke, strokeWidth}: {fill: string, stroke: string, strokeWidth: number}) {
+         {fill, stroke, strokeWidth}: {fill: string, stroke?: string, strokeWidth?: number}) {
     let dia = this.diagram;
     let circle = this.getOrCreateElmFor(key, 'circle');
     circle.setAttribute('cx', dia.transformX(cx) as any);
@@ -676,13 +685,12 @@ class DiagramScolColliders extends DiagramThingKind<ScolCollider> {
     if (1) {
       for (let i = 0; i < 4; i++) {
         let fakePtr = data.ptr + BigInt(i);
-        let xxyPtr = scol.xxy_ptrs_cur.at(i);
-        if (xxyPtr == 0n) {
+        let xxy = scol.xxy_ptrs_cur.at(i).pointee;
+        if (xxy === null) {
           // TODO (2025-09-28): not sure what null here means, might be I
           // forgot something, but I'm getting it
           continue;
         }
-        let xxy = scol.readPtrFromWithin(xxyPtr, mmTypes.XXY);
 
         this.line(
           fakePtr,
@@ -700,9 +708,9 @@ class DiagramScolColliders extends DiagramThingKind<ScolCollider> {
       }
     }
     for (let i = 0; i < 4; i++) {
-      let resultListIdx = scol.result_list_idxs_cur.get(i);
-      let resultList = scol.result_lists_cur.get(i);
-      let result = resultList.get(resultListIdx);
+      let resultListIdx = scol.result_list_idxs_cur.at(i);
+      let resultList = scol.result_lists_cur.at(i);
+      let result = resultList.at(resultListIdx);
       if (result.valid) {
         //console.log(result.angle);
 
@@ -712,14 +720,15 @@ class DiagramScolColliders extends DiagramThingKind<ScolCollider> {
   }
 }
 
-class DiagramBGCollisionPoints extends DiagramThingKind {
+class DiagramBGCollisionPoints extends DiagramThingKind<BgCollisionPointEvent> {
   getThingsFromFrame() {
-    return this.diagram.curFrame.bgCollisionPointEvents;
+    return this.diagram.curFrame!.bgCollisionPointEvents;
   }
-  getWorldID(data) {
+  getWorldID(data: BgCollisionPointEvent): bigint {
     return data.worldID;
   }
-  renderThing(data) {
+  renderThing(data: BgCollisionPointEvent): void {
+    assert(this.genericElmsCount !== undefined);
     this.circle(
       this.genericElmsCount++,
       data.xy.x,
@@ -732,15 +741,16 @@ class DiagramBGCollisionPoints extends DiagramThingKind {
   }
 }
 
-class DiagramBGCollisionTwoPoints extends DiagramThingKind {
+class DiagramBGCollisionTwoPoints extends DiagramThingKind<BgCollisionTwoPointEvent> {
   getThingsFromFrame() {
-    return this.diagram.curFrame.bgCollisionTwoPointEvents;
+    return this.diagram.curFrame!.bgCollisionTwoPointEvents;
   }
-  getWorldID(data) {
+  getWorldID(data: BgCollisionTwoPointEvent): bigint {
     return data.worldID;
   }
-  renderThing(data) {
-    let hit = data.ret;
+  renderThing(data: BgCollisionTwoPointEvent): void {
+    assert(this.genericElmsCount !== undefined);
+    const hit = data.ret;
     this.line(
       this.genericElmsCount++,
       data.xy1.x,
@@ -852,7 +862,7 @@ class Diagram {
     this.panY += cursorRealY - this.transformY(cursorVirtualY);
   }
   onWheel(e: WheelEvent): void {
-    if (this.lastRenderedFrame === null) {
+    if (this.lastRenderedFrame === undefined) {
       return;
     }
     e.preventDefault();
@@ -873,12 +883,12 @@ class Diagram {
       } else {
         this.zoomMomentum = 0;
       }
-      if (this.zoomMomentumTimeoutID !== null) {
+      if (this.zoomMomentumTimeoutID !== undefined) {
         clearTimeout(this.zoomMomentumTimeoutID);
       }
       let startTime = timelineTime();
       this.zoomMomentumTimeoutID = setTimeout(() => {
-        this.zoomMomentumTimeoutID = null;
+        this.zoomMomentumTimeoutID = undefined;
         this.enableZoomMomentum(startTime, e.offsetX, e.offsetY);
       }, 15);
     } else {
@@ -892,7 +902,7 @@ class Diagram {
   }
   enableZoomMomentum(startTime: number, cursorRealX: number, cursorRealY: number): void {
     this.disableZoomMomentum();
-    if (this.lifecycle.dead || this.lastRenderedFrame === null || Math.abs(this.zoomMomentum) < 0.001) {
+    if (this.lifecycle.dead || this.lastRenderedFrame === undefined || Math.abs(this.zoomMomentum) < 0.001) {
       return;
     }
     this.zoomMomentumStartZoomLevel = this.zoomLevel;
@@ -902,10 +912,10 @@ class Diagram {
     this.zoomMomentumCursorRealX = cursorRealX;
     this.zoomMomentumCursorRealY = cursorRealY;
     let cb = (endTime: number) => {
-      if (this.lifecycle.dead || this.lastRenderedFrame === null) {
+      if (this.lifecycle.dead || this.lastRenderedFrame === undefined) {
         return;
       }
-      this.zoomMomentumRAFID = null;
+      this.zoomMomentumRAFID = undefined;
       let dt = endTime - this.zoomMomentumStartTime!;
       // integrate (v * (1 - decay)^t) from 0 to t_0...
       // -> v * ((1 - decay)^t - 1) / log(1 - decay)
@@ -921,7 +931,7 @@ class Diagram {
       //console.log(`dt=${dt * dtScale} / avgSpeed=${avgSpeed} momentum=${this.zoomMomentum} mm=${momentumMultiplier}`);
       if (dt * dtScale >= 5) {
         // done
-        this.zoomMomentumRAFID = null;
+        this.zoomMomentumRAFID = undefined;
         return;
       }
 
@@ -938,13 +948,13 @@ class Diagram {
     cb(timelineTime());
   }
   disableZoomMomentum(): void {
-    if (this.zoomMomentumRAFID !== null) {
+    if (this.zoomMomentumRAFID !== undefined) {
       cancelAnimationFrame(this.zoomMomentumRAFID!);
-      this.zoomMomentumRAFID = null;
+      this.zoomMomentumRAFID = undefined;
     }
   }
   onMouseDown(e: MouseEvent): void {
-    if (this.lastRenderedFrame === null) {
+    if (this.lastRenderedFrame === undefined) {
       return;
     }
     this.disableZoomMomentum();
@@ -960,7 +970,7 @@ class Diagram {
   }
   onMouseMove(e: MouseEvent): void {
     e.preventDefault();
-    if (this.lastRenderedFrame === null) {
+    if (this.lastRenderedFrame === undefined) {
       return;
     }
     this.panX += e.clientX - this.mouseDownClientX!;
@@ -1061,7 +1071,7 @@ function readableToArrayAsync<R>(readable: ReadableStream<R>): Promise<R[]> {
   return Array.fromAsync(ai) as Promise<R[]>; // XXX: is this right?
 }
 
-async function compressBufs(bufs: ArrayBuffer[]): Promise<URL> {
+async function compressBufs(bufs: ArrayBuffer[]): Promise<string> {
   let compression = new CompressionStream('gzip');
   let compressedBufs = readableToArrayAsync(compression.readable);
   let writer = compression.writable.getWriter();
@@ -1071,9 +1081,9 @@ async function compressBufs(bufs: ArrayBuffer[]): Promise<URL> {
   await writer.close();
   let cb = await compressedBufs;
   let file = new Blob(cb);
-  let url = await new Promise((resolve, reject) => {
+  let url = await new Promise<string>((resolve, reject) => {
     const reader = Object.assign(new FileReader(), {
-      onload: () => resolve(reader.result),
+      onload: () => resolve(downcast(String, reader.result)),
       onerror: () => reject(reader.error),
     });
     reader.readAsDataURL(file);
@@ -1152,8 +1162,8 @@ type NormalCollider = {
   extPosCur: mmTypes.Point2D,
   extPosOld: mmTypes.Point2D,
   firstSeenFrameNumber: number,
-  segmentsCur: mmTypes.ColliderSegment[] = [],
-  segmentsOld: mmTypes.ColliderSegment[] = [],
+  segmentsCur: mmTypes.ColliderSegment[],
+  segmentsOld: mmTypes.ColliderSegment[],
   rawData: ArrayBuffer,
   worldID: bigint,
 };
@@ -1225,7 +1235,7 @@ class HoseFrame {
     }
   }
 
-  static loadInto(frameInfo, hoseParser) {
+  static loadInto(frameInfo: HoseFrame, hoseParser: HoseParser): void {
     for (let [i, buffer] of frameInfo.relevantHoseMessages.entries()) {
       let tag = hoseParser.parse(buffer);
       if (i == 0) {
@@ -1235,7 +1245,7 @@ class HoseFrame {
     }
   }
 
-  static async loadFramesInto(frames, hoseParser) {
+  static async loadFramesInto(frames: HoseFrame[], hoseParser: HoseParser) {
     for (let [i, frame] of frames.entries()) {
       hoseParser.dontUpdateDiagram = i != frames.length - 1;
       HoseFrame.loadInto(frame, hoseParser);
@@ -1252,8 +1262,7 @@ class HoseParser {
   scolColliderMap: Map<bigint, ScolCollider> = new Map();
   tagStats: { [tag: string]: [bigint, number] } = {};
   dontUpdateDiagram = false;
-  constructor(mmTypes, public scrubbable: Scrubbable) {
-    this.mmTypes = mmTypes;
+  constructor(public scrubbable: Scrubbable) {
   }
   parse(buffer: ArrayBuffer) {
     assert(buffer instanceof ArrayBuffer);
@@ -1360,8 +1369,8 @@ class HoseParser {
   }
   parseHitbox(r: Reader): void {
     let ptr = r.read(u64);
-    let hb = r.read(mmTypes.Hitbox, r.remaining() - 1);
-    hb.worldID = r.read(ty.s8);
+    let hb = r.read(mmTypes.Hitbox, r.remaining() - 1n);
+    hb.worldID = r.read(s8);
     this.curFrame.hitboxes.set(ptr, hb);
   }
   parseNormalCollider(r: Reader): void {
@@ -1391,15 +1400,15 @@ class HoseParser {
     this.normalColliderMap.delete(ptr);
   }
   parseScolCollider(r: Reader): void {
+    const ptr = r.read(u64);
     let data: ScolCollider = {
-      ptr: r.read(u64),
-      scol: r.read(mmTypes.Scol, 0x103Cn),
+      ptr,
+      scol: r.read(mmTypes.Scol, 0x103Cn, ptr), // uses DataViewWithAddr
       extPosCur: r.read(mmTypes.Point2D),
       extPosOld: r.read(mmTypes.Point2D),
       worldID: r.read(s8),
       rawData: downcast(ArrayBuffer, r.dv.buffer),
     };
-    data.scol._address = data.ptr;
     this.scolColliderMap.set(data.ptr, data);
     this.curFrame.scolColliders.push(data);
   }
@@ -1480,7 +1489,7 @@ abstract class BaseConns {
   abstract readonly helloInfoPromise: Promise<HelloModInfo>;
   readonly lifecycle = new Lifecycle();
   readonly hoseParserPromise: Promise<HoseParser>;
-  readonly mmTypesPromise: Promise<string>; // XXX
+  readonly mmTypesPromise: Promise<void>;
   readonly stillAlivePR: PromiseWithResolvers<never>;
   diagram?: Diagram;
   scrubbable?: Scrubbable;
@@ -1496,23 +1505,29 @@ abstract class BaseConns {
 
   async doHoseParser(): Promise<HoseParser> {
     await yieldMe();
-    let mmTypes = await this.mmTypesPromise;
-    let diagram = this.lifecycle.pushKill(new Diagram(document.getElementById('diagram'), mmTypes));
+    await this.mmTypesPromise;
+    let diagram = this.lifecycle.pushKill(new Diagram(downcast(SVGSVGElement, document.getElementById('diagram'))));
     this.diagram = diagram; // mostly for debugging
-    let scrubbable = this.lifecycle.pushKill(new Scrubbable(diagram, document.getElementById('scrubber-row')));
+    let scrubbable = this.lifecycle.pushKill(new Scrubbable(diagram, downcast(HTMLElement, document.getElementById('scrubber-row'))));
     this.scrubbable = scrubbable; // ditto
-    let parser = new HoseParser(mmTypes, scrubbable);
+    let parser = new HoseParser(scrubbable);
     this._hoseParser = parser; // ditto
     return parser;
   }
 
-  async doMMTypes(): Promise<string> {
+  async doMMTypes(): Promise<void> {
     await yieldMe();
-    let helloInfo = await Promise.any([
+    const helloInfo = await Promise.any([
       this.helloInfoPromise,
       this.stillAlivePR.promise,
     ]);
-    return new MMTypes(helloInfo, exportJson);
+    const buildId = helloInfo[0].buildId;
+    console.log(`buildId: ${buildId}`);
+    const setOffsets = mmTypes.setOffsets[buildId];
+    if (!setOffsets) {
+      throw new Error(`Unknown main buildId ${buildId}`);
+    }
+    return;
   }
 
   async saveRaw(nframes: number) {
@@ -1541,6 +1556,7 @@ function addStatsLine(text: string) {
   }
 }
 
+type FlagCheckboxes = { [name: string]: boolean };
 class LiveConns extends BaseConns {
   helloInfoPromise: Promise<HelloModInfo>;
   rpc: RPCConn;
@@ -1597,17 +1613,20 @@ class LiveConns extends BaseConns {
   }
 
   async doCheckboxes() {
-    let checkedPR = Promise.withResolvers();
-    for (let input_ of document.querySelectorAll('#controls input[type=checkbox]')) {
-      const input = downcast(HTMLInputElement, input_);
-      const checked = Signal.withoutInitialValue<boolean>();
-      input.checked = localStorage[input.id] === '1';
+    const checkboxValues: Signal<FlagCheckboxes> = Signal.withoutInitialValue();
+    const checkboxValuesVal: FlagCheckboxes = {};
+    const checkboxes = Array.of(document.querySelectorAll('#controls input[type=checkbox]'))
+      .map(input => downcast(HTMLInputElement, input));
+    checkboxes.forEach(input => {
+      const id = input.id;
+      input.checked = checkboxValuesVal[id] = localStorage[id] === '1';
       input.onchange = (e: Event) => {
-        localStorage[input.id] = input.checked ? '1' : '0';
-        checked.set(input.checked);
-        //checkedPR.resolve();
+        checkboxValuesVal[id] = input.checked;
+        localStorage[id] = input.checked ? '1' : '0';
+        checkboxValues.set({...checkboxValuesVal});
       }
-    }
+      checkboxValues.set({...checkboxValuesVal});
+    });
     while (1) {
       console.log('wtf');
       await Promise.any([

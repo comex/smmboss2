@@ -12,27 +12,7 @@ export function assert(x: boolean): asserts x {
 }
 export abstract class Instance {
   abstract type: Type<unknown>;
-  _address?: bigint;
   constructor(public dv: DataView, public off: bigint) {}
-  readPtrFromWithin<T>(childAddress: bigint, childType: Type<T>): T {
-    const parentAddress = this._address, parentSizeof = this.sizeof;
-    if (parentAddress === undefined) {
-      throw new Error('readPtrFromWithin requires _address to be set manually');
-    }
-    if (parentSizeof === undefined) {
-      throw new Error('readPtrFromWithin requires the parent type (or value) to have sizeof');
-    }
-    const parentEndAddress = parentAddress + parentSizeof;
-    const childSizeof = childType.sizeof;
-    if (childSizeof === undefined) {
-      throw new Error('readPtrFromWithin requires the child type to have sizeof');
-    }
-    const childEndAddress = childAddress + childSizeof;
-    if (childAddress < parentAddress || childEndAddress > parentEndAddress) {
-      throw new Error(`readPtrFromWithin out of bounds: parent at {${hex(parentAddress)}..${hex(parentEndAddress)}}, child at {${hex(childAddress)}, ${hex(childEndAddress)}}`);
-    }
-    return childType.get(this.dv, this.off + childAddress - parentAddress);
-  }
   get sizeof(): bigint | undefined {
     return (this.type as any).sizeof;
   }
@@ -97,7 +77,7 @@ export interface PointerType<PointeeI> extends Type<Pointer<PointeeI>> {
 export interface Pointer<PointeeI> {
   type: PointerType<PointeeI>;
   readonly raw: bigint;
-  //readonly contents: PointeeI | null;
+  readonly pointee: PointeeI | null;
 }
 export function createPointerType<PointeeI, PointeeTy extends Type<PointeeI>>(name_: string, pointeeTy_: PointeeTy): PointerType<PointeeI> {
     class P {
@@ -112,9 +92,7 @@ export function createPointerType<PointeeI, PointeeTy extends Type<PointeeI>>(na
       get raw(): bigint {
         return u64.get(this.dv, this.off);
       }
-      /*
-      // XXX: no.  one DataView can have multiple .  need something else here.
-      get contents(): PointeeI | null {
+      get pointee(): PointeeI | null {
         const dv = this.dv as DataViewWithAddr;
         const addr = this.raw;
         if (addr === 0n) {
@@ -129,7 +107,6 @@ export function createPointerType<PointeeI, PointeeTy extends Type<PointeeI>>(na
         }
         return pointeeTy_.get(dv, newOff);
       }
-      */
     };
     return P;
 }

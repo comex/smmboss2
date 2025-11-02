@@ -1,5 +1,74 @@
 import { assert, yieldMe } from './base.js';
 
+const refCountedFinalizationRegistry = new FinalizationRegistry<RefCount>((refCount) => {
+  if (refCount.value) {
+    throw new Error('RefCounted destroyed without being disposed');
+  }
+});
+
+export function dispose(obj: Disposable) {
+  obj[Symbol.dispose]();
+}
+
+interface Rejectable {
+  reject(_: Error): unknown;
+}
+
+class DisposedError extends Error {
+  constructor() {
+    super('DisposedError');
+  }
+}
+const DISPOSED_ERROR = new DisposedError;
+
+class RefCount {
+  value: number = 1;
+}
+export class RefCounted {
+  readonly refCount: RefCount;
+  readonly disposeStack: DisposableStack = new DisposableStack();
+  isDead(): boolean {
+    return this.refCount.value == 0;
+  }
+  use<T extends Disposable>(val: T): T {
+    return this.disposeStack.use(val);
+  }
+  useRejectable<T extends Rejectable>(val: T): T {
+    this.disposeStack.defer(() => val.reject(DISPOSED_ERROR));
+    return val;
+  }
+  useEventListener(target: EventTarget, event: string, callback: EventListenerOrEventListenerObject, options?: AddEventListenerOptions | boolean): void {
+    target.addEventListener(event, callback, options);
+    this.disposeStack.defer(() => {
+      target.removeEventListener(event, callback, options);
+    });
+  };
+  constructor() {
+    this.refCount = new RefCount;
+    refCountedFinalizationRegistry.register(this, this.refCount);
+  }
+  _destructor(): void {}
+  [Symbol.dispose](): void {
+    this.unref();
+  }
+  unref(): void {
+    const newValue = --this.refCount.value;
+    if (newValue == 0) {
+      this._destructor();
+      this.disposeStack.dispose();
+    } else if (newValue < 0) {
+      throw new Error('excess dispose on RefCounted');
+    }
+  }
+  ref() {
+    const oldValue = this.refCount.value++;
+    if (oldValue === 0) {
+      throw new Error('resurrecting RefCounted');
+    }
+    return this;
+  }
+}
+
 interface SomeSignalLink {
   kill(): void;
 }
@@ -14,8 +83,8 @@ class SignalLink<SourceT> implements SignalLinkOut<SourceT> {
     public readonly update: (isException: boolean, valueOrException: SourceT | Error, link: SomeSignalLink | undefined) => void
   ) {}
   static create<SourceU>(
-    source: SignalRO<SourceU>,
-    target: SomeSignal | null,
+    source: SignalRO<SourceU>, // strong
+    target: SomeSignal | null, // weak
     update: (isException: boolean, valueOrException: SourceU | Error, link: SomeSignalLink | undefined) => void
   ): SignalLink<SourceU> | null {
     if (target !== null && target.hasException) {
@@ -25,7 +94,7 @@ class SignalLink<SourceT> implements SignalLinkOut<SourceT> {
       update(true, source.valueOrException as SourceU, undefined);
       return null;
     }
-    let link = new SignalLink<SourceU>(source, target, update);
+    let link = new SignalLink<SourceU>(source.ref(), target, update);
     if (target !== null) {
       target.addLinkIn(link);
     }
@@ -37,6 +106,7 @@ class SignalLink<SourceT> implements SignalLinkOut<SourceT> {
   }
   kill(): void {
     this.source.removeLinkOut(this);
+    this.source.unref();
     if (this.target !== null) {
       this.target.removeLinkIn(this);
     }
@@ -48,7 +118,7 @@ interface SomeSignal {
   addLinkIn(link: Kill): void;
   removeLinkIn(link: Kill): void;
 }
-export interface SignalRO<out T> {
+export interface SignalRO<out T> extends RefCounted {
   get cur(): T;
   get maybeCur(): T | undefined;
   [Symbol.asyncIterator](): AsyncIterator<T, any>;
@@ -69,13 +139,14 @@ type SignalVal<T> = T extends Signal<infer U> ? U : never;
 class _NoInitialValueDontUse {}
 const NO_INITIAL_VALUE_DONT_USE = new _NoInitialValueDontUse
 
-export class Signal<T> implements SignalRO<T> {
-  linksIn: Set<Kill>;
+export class Signal<T> extends RefCounted implements SignalRO<T> {
+  linksIn: Set<SomeSignalLink>;
   linksOut: Set<SignalLinkOut<T>>;
   hasValue: boolean;
   hasException: boolean;
   valueOrException: T | Error | undefined;
   constructor(initialValue: T | _NoInitialValueDontUse = NO_INITIAL_VALUE_DONT_USE) {
+    super();
     this.linksIn = new Set;
     this.linksOut = new Set;
     this.hasException = false;
@@ -250,8 +321,10 @@ export class Signal<T> implements SignalRO<T> {
     return ret;
   }
 
-  kill(): void {
-    this.reject(new Error('killed'));
+  _destructor(): void {
+    if (!this.hasException) {
+      this.reject(DISPOSED_ERROR);
+    }
   }
   addLinkOut(link: SignalLinkOut<T>): void {
     this.linksOut.add(link);
@@ -259,10 +332,10 @@ export class Signal<T> implements SignalRO<T> {
   removeLinkOut(link: SignalLinkOut<T>): void {
     this.linksOut.delete(link);
   }
-  addLinkIn(link: Kill): void {
+  addLinkIn(link: SomeSignalLink): void {
     this.linksIn.add(link);
   }
-  removeLinkIn(link: Kill): void {
+  removeLinkIn(link: SomeSignalLink): void {
     this.linksIn.delete(link);
   }
 }
@@ -329,6 +402,7 @@ export interface Kill {
 export interface Reject {
   reject: (reason?: any) => void;
 }
+/*
 export class Lifecycle {
   killCallbacks: (() => void)[] = [];
   dead: boolean = false;
@@ -342,20 +416,14 @@ export class Lifecycle {
       this.killCallbacks.push(lifecycle.kill.bind(lifecycle));
     } else if (isReject) {
       this.killCallbacks.push(() => {
-        (objToKill as Reject).reject(`rejected by KillBox of ${this.constructor.name}`);
+        (objToKill as Reject).reject('rejected by Lifecycle');
       });
     } else {
       throw new Error('not sure how to clean this up');
     }
     return objToKill;
   }
-  pushKillEventListener(target: EventTarget, event: string, callback: EventListenerOrEventListenerObject, options?: AddEventListenerOptions | boolean): void {
-    target.addEventListener(event, callback, options);
-    this.killCallbacks.push(() => {
-      target.removeEventListener(event, callback, options);
-    });
-  };
-  kill() {
+  kill(): void {
     if (this.dead) {
       return;
     }
@@ -380,6 +448,7 @@ export class Lifecycle {
 interface HasLifecycle {
   readonly lifecycle: Lifecycle;
 }
+*/
 
 function testCheck(cond: boolean): void {
   let junk: string;
@@ -397,37 +466,43 @@ function testSignalBind(): void {
   const sigList: any[] = [new Signal(10), new Signal, 1000];
   testCheck(sigList[1].hasValue === false);
   const indexSig = new Signal(2);
-  const indexedSig = indexSig.bind(i => sigList[i]);
-  testCheck(indexedSig.cur === 1000);
-  indexSig.set(1);
-  testCheck(indexedSig.cur === 1000);
-  sigList[1].set(123);
-  testCheck(indexedSig.cur === 123);
-  // We don't reevaluate the function 'just because', so we have a stale value:
-  sigList[1] = new Signal(124);
-  testCheck(indexedSig.cur === 123);
-  // But we do eventually reevaluate:
-  indexSig.set(0);
-  indexSig.set(1);
-  testCheck(indexedSig.cur === 124);
-  // Make sure stale updates don't change the value:
-  indexSig.set(0);
-  testCheck(indexedSig.cur === 10);
-  sigList[1].set(125);
-  testCheck(indexedSig.cur === 10);
+  let indexedSigRefCount;
+  {
+    using indexedSig = indexSig.bind(i => sigList[i]);
+    indexedSigRefCount = indexedSig.refCount;
+    testCheck(indexedSigRefCount.value == 1);
+    testCheck(indexedSig.cur === 1000);
+    indexSig.set(1);
+    testCheck(indexedSig.cur === 1000);
+    sigList[1].set(123);
+    testCheck(indexedSig.cur === 123);
+    // We don't reevaluate the function 'just because', so we have a stale value:
+    sigList[1] = new Signal(124);
+    testCheck(indexedSig.cur === 123);
+    // But we do eventually reevaluate:
+    indexSig.set(0);
+    indexSig.set(1);
+    testCheck(indexedSig.cur === 124);
+    // Make sure stale updates don't change the value:
+    indexSig.set(0);
+    testCheck(indexedSig.cur === 10);
+    sigList[1].set(125);
+    testCheck(indexedSig.cur === 10);
+  }
   // Make sure kill cleans up after itself:
-  indexedSig.kill();
+  testCheck(indexedSigRefCount.value == 0);
   testCheck(sigList[0].linksOut.size === 0);
 }
 
 function testSignalMap(): void {
   const signal = new Signal<number>;
-  const mappedSig = signal.map(x => 2 * x);
-  testCheck(!mappedSig.hasValue);
-  signal.set(10);
-  testCheck(mappedSig.cur == 20);
+  {
+    using mappedSig = signal.map(x => 2 * x);
+    testCheck(!mappedSig.hasValue);
+    signal.set(10);
+    testCheck(mappedSig.cur == 20);
+  }
   // Make sure kill cleans up after itself:
-  mappedSig.kill();
   testCheck(signal.linksOut.size === 0);
 }
 
@@ -479,22 +554,5 @@ export async function testSignals() {
   testSignalMap();
   testSignalCombine();
   await testSignalAsyncIterate();
-  /*
-  let sig = new Signal<number>;
-  let moresigs: Signal<number>[] = [new Signal, new Signal];
-  let sig3 = sig.bind(i => moresigs[i]).map(x => x * 2);
-  (async () => {
-    for await (let val of sig3) {
-      console.log(val);
-    }
-  })();
-  sig.set(0);
-  moresigs[0].set(42);
-  moresigs[0].set(43);
-  sig.set(1);
-  moresigs[0].set(NaN);
-  moresigs[1].set(44);
-  console.log('*', sig3.cur);
-  */
 }
 

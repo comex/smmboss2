@@ -1,7 +1,7 @@
 import * as mmTypes from './build/mm_types.js';
 import { yieldMe, hexbuf, downcast, sleep, assert, hex } from './base.js';
 import { Type, u8, u32, u64, s8, Tag8, Pointer, DataViewWithAddr } from './types_base.js';
-import { Signal, Lifecycle } from './reactive.js';
+import { Signal, RefCounted } from './reactive.js';
 
 var theRPCConn: RPCConn
 
@@ -154,23 +154,23 @@ interface WSWrapperDelegate {
   onMessage(e: MessageEvent<any>): void;
   onClose(e: Event): void;
 }
-class WSWrapper {
+class WSWrapper extends RefCounted {
   openThrottle: Throttle = new Throttle('open');
   state: string = 'idle';
   ws: WebSocket | null = null;
   wantOpen: boolean = false;
-  readonly lifecycle = new Lifecycle();
   constructor(public wsURL: string, public delegate: WSWrapperDelegate) {
-    this.lifecycle.killCallbacks.push(() => {
-      if (this.state == 'open') {
-        addStatsLine(`closing ${this.wsURL} due to kill`);
-        assert(this.ws !== null);
-        this.ws.close();
-      }
-      this.state = 'dead';
-      this.wantOpen = false;
-      this.ws = null;
-    });
+    super();
+  }
+  _destructor() {
+    if (this.state == 'open') {
+      addStatsLine(`closing ${this.wsURL} due to kill`);
+      assert(this.ws !== null);
+      this.ws.close();
+    }
+    this.state = 'dead';
+    this.wantOpen = false;
+    this.ws = null;
   }
   setWantOpen(wantOpen: boolean): void {
     this.wantOpen = wantOpen;
@@ -231,18 +231,18 @@ class WSWrapper {
 const rpcConnClosedMessage = 'RPCConn closed';
 
 type GetStatsResp = {overrunBytes: bigint, sentBytes: bigint, backpressuredNsec: bigint};
-class RPCConn implements WSWrapperDelegate {
-  readonly lifecycle = new Lifecycle();
+class RPCConn extends RefCounted implements WSWrapperDelegate {
   readonly rpcThrottle = new Throttle('rpc');
   helloInfoPR: PromiseWithResolvers<HelloModInfo>;
   isOpenSig: Signal<boolean>;
   wsw: WSWrapper;
   pendingResponsePRs: PromiseWithResolvers<ArrayBuffer | string>[] = [];
   constructor(baseURL: string) {
-    this.wsw = this.lifecycle.pushKill(new WSWrapper(`${baseURL}/ws/rpc`, this));
+    super();
+    this.wsw = this.use(new WSWrapper(`${baseURL}/ws/rpc`, this));
     this.wsw.setWantOpen(true);
-    this.helloInfoPR = this.lifecycle.pushKill(Promise.withResolvers());
-    this.isOpenSig = this.lifecycle.pushKill(new Signal(false));
+    this.helloInfoPR = this.useRejectable(Promise.withResolvers());
+    this.isOpenSig = this.use(new Signal(false));
   }
   onOpen() {
     this.pendingResponsePRs = [this.helloPendingResponsePR()];
@@ -735,8 +735,7 @@ function timelineTime(): number {
   assert(typeof ret === 'number');
   return ret;
 }
-class Diagram {
-  readonly lifecycle = new Lifecycle();
+class Diagram extends RefCounted {
   lastRenderedFrame?: HoseFrame;
   zoomLevel = 1;
   panX = 0;
@@ -771,6 +770,7 @@ class Diagram {
   curFrame?: HoseFrame;
 
   constructor(public svg: SVGSVGElement) {
+    super();
     this.kinds = [
       this.hitboxes,
       this.normalColliders,
@@ -779,14 +779,14 @@ class Diagram {
       this.bgCollisionTwoPoints,
     ];
 
-    this.lifecycle.pushKillEventListener(this.svg, 'wheel', this.onWheel.bind(this) as EventListener,
-                                         {passive: false});
-    this.lifecycle.pushKillEventListener(this.svg, 'mousedown', this.onMouseDown.bind(this) as EventListener);
-    this.lifecycle.killCallbacks.push(() => {
-      this.svg.innerHTML = '';
-      delete this.lastRenderedFrame;
-      this.removeMouseMoveUp();
-    });
+    this.useEventListener(this.svg, 'wheel', this.onWheel.bind(this) as EventListener,
+                          {passive: false});
+    this.useEventListener(this.svg, 'mousedown', this.onMouseDown.bind(this) as EventListener);
+  }
+  _destructor() {
+    this.svg.innerHTML = '';
+    delete this.lastRenderedFrame;
+    this.removeMouseMoveUp();
   }
   renderFrame(frame: HoseFrame): void {
     this.curFrame = frame;
@@ -868,7 +868,7 @@ class Diagram {
   }
   enableZoomMomentum(startTime: number, cursorRealX: number, cursorRealY: number): void {
     this.disableZoomMomentum();
-    if (this.lifecycle.dead || this.lastRenderedFrame === undefined || Math.abs(this.zoomMomentum) < 0.001) {
+    if (this.isDead() || this.lastRenderedFrame === undefined || Math.abs(this.zoomMomentum) < 0.001) {
       return;
     }
     this.zoomMomentumStartZoomLevel = this.zoomLevel;
@@ -878,7 +878,7 @@ class Diagram {
     this.zoomMomentumCursorRealX = cursorRealX;
     this.zoomMomentumCursorRealY = cursorRealY;
     let cb = (endTime: number) => {
-      if (this.lifecycle.dead || this.lastRenderedFrame === undefined) {
+      if (this.isDead() || this.lastRenderedFrame === undefined) {
         return;
       }
       this.zoomMomentumRAFID = undefined;
@@ -954,24 +954,24 @@ class Diagram {
   }
 };
 
-class Scrubbable {
-  readonly lifecycle = new Lifecycle();
+class Scrubbable extends RefCounted {
   scrubber: HTMLInputElement;
   scrubberDisplay: HTMLDivElement;
   frameIdx = 0;
   framesLength = 0;
   frames: HoseFrame[] = undefined as any;
   constructor(public diagram: Diagram, scrubberRow: HTMLElement) {
+    super();
     this.scrubber = downcast(HTMLInputElement, scrubberRow.querySelector('#scrubber'));
 
     this.scrubberDisplay = downcast(HTMLDivElement, scrubberRow.querySelector('#scrubber-display'));
 
     this.onChangeOrInput = this.onChangeOrInput.bind(this);
-    this.lifecycle.pushKillEventListener(
+    this.useEventListener(
       this.scrubber, 'change', this.onChangeOrInput.bind(this) as EventListener);
-    this.lifecycle.pushKillEventListener(
+    this.useEventListener(
       this.scrubber, 'input', this.onChangeOrInput.bind(this) as EventListener);
-    this.lifecycle.pushKillEventListener(
+    this.useEventListener(
       this.scrubber, 'wheel', this.onWheel.bind(this) as EventListener,
       {passive: false});
 
@@ -1421,11 +1421,11 @@ class HoseParser {
   }
 }
 
-class HoseConn implements WSWrapperDelegate {
+class HoseConn extends RefCounted implements WSWrapperDelegate {
   wsw: WSWrapper;
-  readonly lifecycle = new Lifecycle();
   constructor(baseURL: string, public hoseParserPromise: Promise<HoseParser>) {
-    this.wsw = this.lifecycle.pushKill(new WSWrapper(`${baseURL}/ws/hose`, this));
+    super();
+    this.wsw = this.use(new WSWrapper(`${baseURL}/ws/hose`, this));
     this.wsw.setWantOpen(true);
     this.hoseParserPromise = hoseParserPromise;
   }
@@ -1451,9 +1451,8 @@ class ButtonWrapper
 }
 */
 
-abstract class BaseConns {
+abstract class BaseConns extends RefCounted {
   abstract readonly helloInfoPromise: Promise<HelloModInfo>;
-  readonly lifecycle = new Lifecycle();
   readonly hoseParserPromise: Promise<HoseParser>;
   readonly mmTypesPromise: Promise<void>;
   readonly stillAlivePR: PromiseWithResolvers<never>;
@@ -1462,19 +1461,20 @@ abstract class BaseConns {
   _hoseParser?: HoseParser;
   loadingSig: Signal<boolean>;
   constructor(hash: string) {
+    super();
     location.hash = hash;
     this.hoseParserPromise = this.doHoseParser();
     this.mmTypesPromise = this.doMMTypes();
-    this.stillAlivePR = this.lifecycle.pushKill(Promise.withResolvers());
-    this.loadingSig = this.lifecycle.pushKill(new Signal(true));
+    this.stillAlivePR = this.useRejectable(Promise.withResolvers());
+    this.loadingSig = this.use(new Signal(true));
   }
 
   async doHoseParser(): Promise<HoseParser> {
     await yieldMe();
     await this.mmTypesPromise;
-    let diagram = this.lifecycle.pushKill(new Diagram(downcast(SVGSVGElement, document.getElementById('diagram'))));
+    let diagram = this.use(new Diagram(downcast(SVGSVGElement, document.getElementById('diagram'))));
     this.diagram = diagram; // mostly for debugging
-    let scrubbable = this.lifecycle.pushKill(new Scrubbable(diagram, downcast(HTMLElement, document.getElementById('scrubber-row'))));
+    let scrubbable = this.use(new Scrubbable(diagram, downcast(HTMLElement, document.getElementById('scrubber-row'))));
     this.scrubbable = scrubbable; // ditto
     let parser = new HoseParser(scrubbable);
     this._hoseParser = parser; // ditto
@@ -1529,21 +1529,21 @@ class LiveConns extends BaseConns {
   constructor(public baseURL: string) {
     super('live');
 
-    this.rpc = this.lifecycle.pushKill(new RPCConn(baseURL));
+    this.rpc = this.use(new RPCConn(baseURL));
     this.helloInfoPromise = this.rpc.helloInfoPR.promise;
 
-    this.hose = this.lifecycle.pushKill(new HoseConn(baseURL, this.hoseParserPromise));
+    this.hose = this.use(new HoseConn(baseURL, this.hoseParserPromise));
 
     downcast(HTMLElement, document.getElementById('controls-left')).removeAttribute('inert');
 
-    this.lifecycle.pushCatchKill(this.doStats());
-    this.lifecycle.pushCatchKill(this.doCheckboxes());
+    /*this.lifecycle.pushCatchKill*/(this.doStats());
+    /*this.lifecycle.pushCatchKill*/(this.doCheckboxes());
 
     this.loadingSig.set(false);
   }
   async doStats() {
     let lastFrameNum = 0;
-    while (!this.lifecycle.dead) {
+    while (!this.isDead()) {
       if (this.rpc.isOpenSig.maybeCur) {
         let stats = await this.rpc.reqGetStats();
         let hoseParser = await this.hoseParserPromise;

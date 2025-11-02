@@ -676,7 +676,6 @@ class DiagramScolColliders extends DiagramThingKind<ScolCollider> {
     if (1) {
       for (let i = 0; i < 4; i++) {
         let fakePtr = data.ptr + BigInt(i);
-        let z: Pointer<mmTypes.XXY> = 42;
         let xxyPtr = scol.xxy_ptrs_cur.at(i);
         if (xxyPtr == 0n) {
           // TODO (2025-09-28): not sure what null here means, might be I

@@ -58,15 +58,17 @@ class NumericType<T> implements Type<T> {
 }
 
 
-export interface ArrayType<ItemI, ItemTy extends Type<ItemI>> extends Type<IArray<ItemI, ItemTy>> {
-  itemType: ItemTy;
+export interface ArrayType<ItemI> extends Type<Array<ItemI>> {
+  itemType: Type<ItemI>;
 }
-export interface IArray<ItemI, ItemTy extends Type<ItemI>> extends Instance {
+
+export interface Array<ItemI> extends Instance {
+  type: ArrayType<ItemI>;
   at(n: number | bigint): ItemI;
 }
-export type Array<ItemTy> = ItemTy extends Type<infer ItemI> ? IArray<ItemI, ItemTy> : unknown;
 
-export function createArrayType<ItemI, ItemTy extends Type<ItemI>>(name_: string, count_: bigint, itemTy_: ItemTy): ArrayType<ItemI, ItemTy> {
+
+export function createArrayType<ItemI, ItemTy extends Type<ItemI>>(name_: string, count_: bigint, itemTy_: ItemTy): ArrayType<ItemI> {
     assert(itemTy_.sizeof !== undefined);
     const sizeOfItem = itemTy_.sizeof;
     class A extends Instance {
@@ -75,7 +77,7 @@ export function createArrayType<ItemI, ItemTy extends Type<ItemI>>(name_: string
       static readonly itemType: ItemTy = itemTy_;
       static readonly count: bigint = count_;
       static readonly sizeof: bigint = sizeOfItem * count_;
-      static get(dv: DataView, off: bigint): IArray<ItemI, ItemTy> {
+      static get(dv: DataView, off: bigint): Array<ItemI> {
         return new A(dv, off);
       }
       at(n: number | bigint): ItemI {
@@ -89,28 +91,29 @@ export function createArrayType<ItemI, ItemTy extends Type<ItemI>>(name_: string
     return A;
 }
 
-export interface PointerType<PointeeI, PointeeTy extends Type<PointeeI>> extends Type<IPointer<PointeeI, PointeeTy>> {
-  pointeeType: PointeeTy;
+export interface PointerType<PointeeI> extends Type<Pointer<PointeeI>> {
+  pointeeType: Type<PointeeI>;
 }
-export interface IPointer<PointeeI, PointeeTy extends Type<PointeeI>> {
-  type: PointerType<PointeeI, PointeeTy>;
+export interface Pointer<PointeeI> {
+  type: PointerType<PointeeI>;
   readonly raw: bigint;
-  readonly contents: PointeeI | null;
+  //readonly contents: PointeeI | null;
 }
-export type Pointer<PointeeTy> = PointeeTy extends Type<infer PointeeI> ? IPointer<PointeeI, PointeeTy> : unknown;
-export function createPointerType<PointeeI, PointeeTy extends Type<PointeeI>>(name_: string, pointeeTy_: PointeeTy): PointerType<PointeeI, PointeeTy> {
+export function createPointerType<PointeeI, PointeeTy extends Type<PointeeI>>(name_: string, pointeeTy_: PointeeTy): PointerType<PointeeI> {
     class P {
       get type(): typeof P { return P; }
       static readonly name: string = name_;
       static readonly pointeeType: PointeeTy = pointeeTy_;
       static readonly sizeof: bigint = 8n;
-      static get(dv: DataView, off: bigint): IPointer<PointeeI, PointeeTy> {
+      static get(dv: DataView, off: bigint): Pointer<PointeeI> {
         return new P(dv, off);
       }
       constructor(public dv: DataView, public off: bigint) {}
       get raw(): bigint {
         return u64.get(this.dv, this.off);
       }
+      /*
+      // XXX: no.  one DataView can have multiple .  need something else here.
       get contents(): PointeeI | null {
         const dv = this.dv as DataViewWithAddr;
         const addr = this.raw;
@@ -126,6 +129,7 @@ export function createPointerType<PointeeI, PointeeTy extends Type<PointeeI>>(na
         }
         return pointeeTy_.get(dv, newOff);
       }
+      */
     };
     return P;
 }
@@ -163,7 +167,7 @@ export class Void extends Instance {
   }
 }
 
-export const GuestPtr = createPointerType('GuestPtr', Void);
+export const GuestPtr: PointerType<Void> = createPointerType('GuestPtr', Void);
 export type GuestPtr = Pointer<Void>;
 
 export class Angle extends Struct {

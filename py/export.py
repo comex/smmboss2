@@ -204,9 +204,11 @@ def write_typescript(fp):
 ''')
     p('import {')
     p('  Struct, Type, u8, u16, u32, u64, s8, s16,')
-    p('  s32, s64, f32, f64, Array, Pointer,')
-    p('  createArrayType, createPointerType, GuestPtr,')
-    p('  Angle, GuestCString,')
+    p('  s32, s64, f32, f64, ')
+    p('  Array, Pointer,')
+    p('  ArrayType, PointerType,')
+    p('  createArrayType, createPointerType,')
+    p('  GuestPtr, Angle, GuestCString,')
     p('} from "types_base";')
     p('type MMAddrs = {')
     for name, x in merged['addrs']['addrs'].items():
@@ -261,12 +263,12 @@ def write_typescript(fp):
                 emit_class(cls_info['val_ptr_cls'])
                 munged_item = munge(cls_info['val_ptr_cls'])
                 p(f'export type {munged_cls} = Array<{munged_item}>;')
-                p(f'export const {munged_cls} = createArrayType("{munged_cls}", {cls_info["count"]}n, {munged_item});')
+                p(f'export const {munged_cls}: ArrayType<{munged_item}> = createArrayType("{munged_cls}", {cls_info["count"]}n, {munged_item});')
             case 'ptr':
                 emit_class(cls_info['val_cls'])
                 munged_pointee = munge(cls_info['val_cls'])
                 p(f'export type {munged_cls} = Pointer<{munged_pointee}>;')
-                p(f'export const {munged_cls} = createPointerType("{munged_cls}", {munged_pointee});')
+                p(f'export const {munged_cls}: PointerType<{munged_pointee}> = createPointerType("{munged_cls}", {munged_pointee});')
             case _:
                 raise ValueError(cls_info)
     for cls_name in merged['classes']:

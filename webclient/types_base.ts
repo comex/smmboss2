@@ -155,10 +155,10 @@ export class GuestCString extends Instance {
 
 export class Tag8 {
   static readonly sizeof = 8n;
-  get(dv: DataView, off: number): string {
+  static get(dv: DataView, off: bigint): string {
     let bytes = [];
-    for (let i = 0; i < 8; i++) {
-      bytes.push(dv.getUint8(off + i));
+    for (let i = 0n; i < 8n; i++) {
+      bytes.push(dv.getUint8(Number(off + i)));
     }
     while (bytes.length > 0 && bytes[bytes.length - 1] == 0) {
       bytes.pop();

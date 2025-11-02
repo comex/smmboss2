@@ -1,5 +1,6 @@
 import * as mmTypes from 'build/mm_types';
-import { assert, Type, u64, u8 } from 'types_base';
+import { assert, Type, u64, u8, Tag8 } from 'types_base';
+import { Signal, Lifecycle } from 'reactive';
 
 var theRPCConn: RPCConn
 
@@ -151,368 +152,6 @@ function toHex(array: bigint[]): String {
   return array.map(num => num.toString(16).padStart(2, '0')).join('');
 }
 
-interface SomeSignalLink {
-  kill(): void;
-}
-interface SignalLinkOut<in SourceT> {
-  update(isException: boolean, valueOrException: SourceT | Error, link: SomeSignalLink | undefined): void;
-  kill(): void;
-}
-class SignalLink<SourceT> implements SignalLinkOut<SourceT> {
-  constructor(
-    public readonly source: SignalRO<SourceT>,
-    public readonly target: SomeSignal | null,
-    public readonly update: (isException: boolean, valueOrException: SourceT | Error, link: SomeSignalLink | undefined) => void
-  ) {}
-  static create<SourceU>(
-    source: SignalRO<SourceU>,
-    target: SomeSignal | null,
-    update: (isException: boolean, valueOrException: SourceU | Error, link: SomeSignalLink | undefined) => void
-  ): SignalLink<SourceU> | null {
-    if (target !== null && target.hasException) {
-      return null;
-    }
-    if (source.hasException) {
-      update(true, source.valueOrException as SourceU, undefined);
-      return null;
-    }
-    let link = new SignalLink<SourceU>(source, target, update);
-    if (target !== null) {
-      target.addLinkIn(link);
-    }
-    source.addLinkOut(link);
-    if (source.hasValue) {
-      update(false, source.valueOrException as Error, link);
-    }
-    return link;
-  }
-  kill(): void {
-    this.source.removeLinkOut(this);
-    if (this.target !== null) {
-      this.target.removeLinkIn(this);
-    }
-  }
-}
-
-interface SomeSignal {
-  hasValue: boolean;
-  hasException: boolean;
-}
-interface SignalRO<out T> {
-  get cur(): T;
-  get maybeCur(): T | undefined;
-  [Symbol.asyncIterator]<U extends T>(): SignalAsyncIterator<U, any>; // XXX
-  then<TResult1, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): Promise<TResult1 | TResult2>;
-  map<U>(f: (_: T) => U): SignalRO<U>;
-  bind<U>(f: (_: T) => SignalRO<U>): SignalRO<U>;
-  hasValueSig(): Signal<boolean>;
-  addLinkOut(link: SignalLinkOut<T>): void;
-  removeLinkOut(link: SignalLinkOut<T>): void;
-  addLinkIn(link: Kill): void;
-  removeLinkIn(link: Kill): void;
-  readonly hasValue: boolean;
-  readonly hasException: boolean;
-  readonly valueOrException: T | Error | undefined;
-
-}
-class Signal<T> implements SignalRO<T> {
-  linksIn: Set<Kill>;
-  linksOut: Set<SignalLinkOut<T>>;
-  hasValue: boolean;
-  hasException: boolean;
-  valueOrException: T | Error | undefined;
-  constructor(initialValue: T | undefined = undefined, hasInitialValue: boolean = true) {
-    this.linksIn = new Set;
-    this.linksOut = new Set;
-    this.hasValue = hasInitialValue;
-    this.hasException = false;
-    this.valueOrException = initialValue;
-  }
-  static of<U>(valueOrSig: SignalRO<U> | U): SignalRO<U> {
-    if (valueOrSig instanceof Signal) {
-      return valueOrSig;
-    } else {
-      return new Signal(valueOrSig as U);
-    }
-  }
-  static withoutInitialValue<U>(): Signal<U> {
-    return new Signal<U>(undefined, false);
-  }
-  bump(): void {
-    assert(this.hasValue || this.hasException);
-    for (let link of this.linksOut) {
-      link.update(this.hasException, this.valueOrException as (T | Error), link);
-    }
-  }
-  get cur(): T {
-    if (this.hasException) {
-      throw this.valueOrException;
-    } else if (this.hasValue) {
-      return this.valueOrException as T;
-    } else {
-      throw new Error('no cur');
-    }
-  }
-  get maybeCur(): T | undefined {
-    if (this.hasException) {
-      throw this.valueOrException;
-    } else {
-      return this.valueOrException as T;
-    }
-  }
-  set(value: T): void {
-    if (this.hasException) {
-      return;
-    }
-    if (this.hasValue && this.valueOrException === value) {
-      return;
-    }
-    this.valueOrException = value;
-    this.hasValue = true;
-    this.bump();
-  }
-  reject(exception: Error): void {
-    if (this.hasException) {
-      return;
-    }
-    this.valueOrException = exception;
-    this.hasException = true;
-    this.hasValue = false;
-    this.bump();
-    for (let link of this.linksIn) {
-      link.kill();
-    }
-    for (let link of this.linksOut) {
-      link.kill();
-    }
-  }
-
-  [Symbol.asyncIterator]<U extends T>(): SignalAsyncIterator<U, any> { // XXX
-    return new SignalAsyncIterator(this);
-  }
-
-  // this signature copy+pasted from TypeScript:
-  then<TResult1, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): Promise<TResult1 | TResult2> {
-    let pr = Promise.withResolvers<T>();
-    let stillCreating = true;
-    SignalLink.create(this, null, (hasException, valueOrException) => {
-      if (stillCreating) {
-        return;
-      }
-      if (hasException) {
-        pr.reject(valueOrException);
-      } else {
-        pr.resolve(valueOrException as T);
-      }
-    });
-    stillCreating = false;
-    return pr.promise.then(onfulfilled, onrejected);
-  }
-
-  map<U>(f: (_: T) => U): Signal<U> {
-    let mappedSignal = new Signal<U>;
-    SignalLink.create(this, mappedSignal, (hasException, valueOrException) => {
-      if (hasException) {
-        mappedSignal.reject(valueOrException as Error);
-      } else {
-        mappedSignal.set(f(valueOrException as T));
-      }
-    });
-    return mappedSignal;
-  }
-
-  bind<U>(f: (_: T) => Signal<U>): Signal<U> {
-    let boundSignal = new Signal<U>;
-    let forwardingLink: SomeSignalLink | null = null;
-    SignalLink.create(this, boundSignal, (hasException, valueOrException) => {
-      if (forwardingLink !== null) {
-        forwardingLink.kill();
-      }
-      if (hasException) {
-        boundSignal.reject(valueOrException as Error);
-      } else {
-        let forwarderSignal = Signal.of(f(valueOrException as T));
-        forwardingLink = SignalLink.create(forwarderSignal, boundSignal, (hasException, valueOrException) => {
-          if (hasException) {
-            boundSignal.reject(valueOrException as Error);
-          } else {
-            boundSignal.set(valueOrException as U);
-          }
-        });
-      }
-    });
-    return boundSignal;
-  }
-
-  hasValueSig(): Signal<boolean> {
-    let ret = this.map((_) => true);
-    if (!this.hasValue && !this.hasException) {
-      ret.set(false);
-    }
-    return ret;
-  }
-
-  kill(): void {
-    this.reject(new Error('killed'));
-  }
-  addLinkOut(link: SignalLinkOut<T>): void {
-    this.linksOut.add(link);
-  }
-  removeLinkOut(link: SignalLinkOut<T>): void {
-    this.linksOut.delete(link);
-  }
-  addLinkIn(link: Kill): void {
-    this.linksIn.add(link);
-  }
-  removeLinkIn(link: Kill): void {
-    this.linksIn.delete(link);
-  }
-}
-
-class SignalAsyncIterator<T, TReturn> implements AsyncIterator<T, TReturn> {
-  state: number;
-  signal: SignalRO<T>;
-  curPR: PromiseWithResolvers<IteratorYieldResult<T>> | null;
-  link: SignalLink<T> | null;
-  constructor(signal: SignalRO<T>) {
-    this.state = 1;
-    this.signal = signal;
-    this.curPR = null;
-    this.link = SignalLink.create<T>(signal, null, (hasException, valueOrException) => {
-      if (this.state == -1) {
-        this.state = 0;
-        let curPR = this.curPR;
-        this.curPR = null;
-        assert(curPR !== null);
-        if (hasException) {
-          curPR.reject(valueOrException);
-        } else {
-          curPR.resolve({done: false, value: valueOrException as T});
-        }
-      } else if (this.state == 0) {
-        this.state = 1;
-      }
-    });
-  }
-  [Symbol.asyncIterator]() { return this; }
-  next(): Promise<IteratorResult<T>> {
-    if (this.state == 1) {
-      this.state = 0;
-      if (this.signal.hasException) {
-        return Promise.reject(this.signal.valueOrException);
-      } else if (this.signal.hasValue) {
-        return Promise.resolve({done: false, value: this.signal.valueOrException as T});
-      }
-    }
-    if (this.state == 0) {
-      this.state = -1;
-      this.curPR = Promise.withResolvers();
-    }
-    assert(this.curPR !== null);
-    return this.curPR.promise;
-  }
-  async return(value: TReturn | PromiseLike<TReturn>): Promise<IteratorReturnResult<TReturn>> {
-    if (this.link !== null) {
-      this.link.kill();
-    }
-    console.log('>> return', value);
-    return {value: await value, done: true};
-  }
-  throw(e?: any): Promise<IteratorResult<T, TReturn>> {
-    if (this.link !== null) {
-      this.link.kill();
-    }
-    return Promise.reject(e);
-  }
-}
-
-function testSignals() {
-  let sig = new Signal<number>;
-  let moresigs: Signal<number>[] = [new Signal, new Signal];
-  let sig3 = sig.bind(i => moresigs[i]).map(x => x * 2);
-  (async () => {
-    for await (let val of sig3) {
-      console.log(val);
-    }
-  })();
-  sig.set(0);
-  moresigs[0].set(42);
-  moresigs[0].set(43);
-  sig.set(1);
-  moresigs[0].set(NaN);
-  moresigs[1].set(44);
-  console.log('*', sig3.cur);
-}
-
-
-interface Kill {
-  kill: () => void;
-}
-interface Reject {
-  reject: (reason?: any) => void;
-}
-class Lifecycle {
-  killCallbacks: (() => void)[] = [];
-  dead: boolean = false;
-  pushKill<T extends HasLifecycle | Reject /* | Kill*/>(objToKill: T): T {
-    const lifecycle = (objToKill as HasLifecycle).lifecycle;
-    let ok = false;
-    if (lifecycle !== undefined) {
-      this.killCallbacks.push(lifecycle.kill.bind(lifecycle));
-      ok = true;
-    }
-    if ((objToKill as Reject).reject !== undefined) {
-      this.killCallbacks.push(() => {
-        (objToKill as Reject).reject(`rejected by KillBox of ${this.constructor.name}`);
-      });
-      ok = true;
-    }
-    /*
-    if ((objToKill as Kill).kill !== undefined) {
-      this.killCallbacks.push(() => {
-        (objToKill as Kill).kill();
-      });
-      ok = true;
-    }
-    */
-    if (!ok) {
-      throw new Error('not sure how to clean this up');
-    }
-    return objToKill;
-
-  }
-  pushKillEventListener(target: EventTarget, event: string, callback: EventListenerOrEventListenerObject, options?: AddEventListenerOptions | boolean): void {
-    target.addEventListener(event, callback, options);
-    this.killCallbacks.push(() => {
-      target.removeEventListener(event, callback, options);
-    });
-  };
-  kill() {
-    if (this.dead) {
-      return;
-    }
-    this.dead = true;
-    for (let cb of this.killCallbacks) {
-      cb();
-    }
-    this.killCallbacks = null as any;
-  };
-  pushCatchKill(promise: Promise<any>): void {
-    promise.then(null, (exception) => {
-      if (this.dead && typeof exception === 'object' && exception.message === 'killed') {
-        // ignore
-        console.log('caught killed exception');
-        return;
-      }
-      throw exception; // devtools will catch if open
-    });
-
-  }
-}
-interface HasLifecycle {
-  readonly lifecycle: Lifecycle;
-}
-
 class Throttle {
   delay: number;
   constructor(public name: string, public defaultDelay: number = 100) {
@@ -539,21 +178,22 @@ class WSWrapper {
   state: string = 'idle';
   ws: WebSocket | null = null;
   wantOpen: boolean = false;
+  readonly lifecycle = new Lifecycle();
   constructor(public wsURL: string, public delegate: WSWrapperDelegate) {
+    this.lifecycle.killCallbacks.push(() => {
+      if (this.state == 'open') {
+        addStatsLine(`closing ${this.wsURL} due to kill`);
+        assert(this.ws !== null);
+        this.ws.close();
+      }
+      this.state = 'dead';
+      this.wantOpen = false;
+      this.ws = null;
+    });
   }
   setWantOpen(wantOpen: boolean): void {
     this.wantOpen = wantOpen;
     this.openCloseWSAsNeeded();
-  }
-  kill(): void {
-    if (this.state == 'open') {
-      addStatsLine(`closing ${this.wsURL} due to kill`);
-      assert(this.ws !== null);
-      this.ws.close();
-    }
-    this.state = 'dead';
-    this.wantOpen = false;
-    this.ws = null;
   }
   openCloseWSAsNeeded(): void {
     if (this.state == 'idle' && this.wantOpen) {
@@ -1478,12 +1118,11 @@ class NormalCollider {
 }
 
 class HoseFrame {
-  constructor(number) {
-    this.number = number;
-    this.hitboxes = new Map();
-    this.relevantHoseMessages = [];
-    this.normalColliders = [];
-    this.scolColliders = [];
+  readonly hitboxes = new Map<bigint, mmTypes.Hitbox>();
+  relevantHoseMessages: ArrayBuffer[] = [];
+  normalColliders: NormalCollider[] = [];
+  scolColliders: string[] = [];
+  constructor(public number: number) {
     this.bgCollisionPointEvents = [];
     this.bgCollisionTwoPointEvents = [];
     this.hitboxCollisionEvents = [];
@@ -1492,7 +1131,7 @@ class HoseFrame {
     return `frame[${this.number}]`;
   }
 
-  save(isFirst) {
+  save(isFirst: boolean) {
     let relevantHoseMessages = this.relevantHoseMessages;
     if (isFirst) {
       relevantHoseMessages = [this.relevantHoseMessages[0]];
@@ -1530,26 +1169,21 @@ class HoseFrame {
 };
 
 class HoseParser {
-  constructor(mmTypes, scrubbable) {
+  savedFrames: HoseFrame[] = [];
+  curFrame: HoseFrame = new HoseFrame(0);
+  normalColliderMap: Map<bigint, NormalCollider> = new Map();
+  scolColliderMap: Map<bigint, ScolCollider> = new Map();
+  tagStats: { [tag: string]: [bigint, number] } = {};
+  dontUpdateDiagram = false;
+  constructor(mmTypes, public scrubbable: Scrubbable) {
     this.mmTypes = mmTypes;
-    this.scrubbable = scrubbable;
-
-    this.savedFrames = [];
-    this.curFrame = new HoseFrame(0);
-
-    this.normalColliderMap = new Map();
-    this.scolColliderMap = new Map();
-
-    this.tagStats = {};
-
-    this.dontUpdateDiagram = false;
   }
-  parse(buffer) {
+  parse(buffer: ArrayBuffer) {
     assert(buffer instanceof ArrayBuffer);
     let r = new Reader(buffer);
-    let tag = r.read(ty.tag8);
+    let tag = r.read(Tag8);
 
-    this.tagStats[tag] ??= [0, 0];
+    this.tagStats[tag] ??= [0n, 0];
     this.tagStats[tag][0] += r.size; // total length
     this.tagStats[tag][1]++; // message count
 
@@ -1741,12 +1375,9 @@ class HoseConn implements WSWrapperDelegate {
   wsw: WSWrapper;
   readonly lifecycle = new Lifecycle();
   constructor(baseURL: string, public hoseParserPromise: Promise<HoseParser>) {
-    this.wsw = new WSWrapper(`${baseURL}/ws/hose`, this);
+    this.wsw = this.lifecycle.pushKill(new WSWrapper(`${baseURL}/ws/hose`, this));
     this.wsw.setWantOpen(true);
     this.hoseParserPromise = hoseParserPromise;
-    this.lifecycle.killCallbacks.push(() => {
-      this.wsw.kill();
-    });
   }
   onOpen() {
   }
@@ -1756,10 +1387,6 @@ class HoseConn implements WSWrapperDelegate {
   onClose() {
   }
 }
-
-var g_exportJsonPromise = (async () => {
-  return await (await fetch('../exlaunch/build/export.json')).json();
-})();
 
 /*
 class ButtonWrapper
@@ -1774,7 +1401,8 @@ class ButtonWrapper
 }
 */
 
-class BaseConns {
+abstract class BaseConns {
+  abstract readonly helloInfoPromise: Promise<HelloModInfo>;
   readonly lifecycle = new Lifecycle();
   readonly hoseParserPromise: Promise<HoseParser>;
   readonly mmTypesPromise: Promise<string>; // XXX
@@ -1782,12 +1410,13 @@ class BaseConns {
   diagram?: Diagram;
   scrubbable?: Scrubbable;
   _hoseParser?: HoseParser;
+  loadingSig: Signal<boolean>;
   constructor(hash: string) {
     location.hash = hash;
     this.hoseParserPromise = this.doHoseParser();
     this.mmTypesPromise = this.doMMTypes();
-    this.stillAlivePR = this.pushKill(Promise.withResolvers());
-    this.loadingSig = this.pushKill(new Signal(true));
+    this.stillAlivePR = this.lifecycle.pushKill(Promise.withResolvers());
+    this.loadingSig = this.lifecycle.pushKill(new Signal(true));
   }
 
   async doHoseParser(): Promise<HoseParser> {
@@ -1804,14 +1433,14 @@ class BaseConns {
 
   async doMMTypes(): Promise<string> {
     await yieldMe();
-    let [helloInfo, exportJson] = await Promise.any([
-      Promise.all([this.helloInfoPromise, g_exportJsonPromise]),
+    let helloInfo = await Promise.any([
+      this.helloInfoPromise,
       this.stillAlivePR.promise,
     ]);
     return new MMTypes(helloInfo, exportJson);
   }
 
-  async saveRaw(nframes) {
+  async saveRaw(nframes: number) {
     let savedFrames = (await this.hoseParserPromise).savedFrames;
     savedFrames = savedFrames.slice(-nframes);
     if (savedFrames.length && savedFrames[0].number == 0) {
@@ -1822,7 +1451,7 @@ class BaseConns {
       helloInfo: (await this.helloInfoPromise).rawData,
     }
   }
-  async save(nframes) {
+  async save(nframes: number): Promise<string> {
     return await stringifyWithArrayBuffers(await this.saveRaw(nframes));
   }
 }
@@ -1838,25 +1467,28 @@ function addStatsLine(text: string) {
 }
 
 class LiveConns extends BaseConns {
+  helloInfoPromise: Promise<HelloModInfo>;
+  rpc: RPCConn;
+  hose: HoseConn;
   constructor(public baseURL: string) {
     super('live');
 
-    this.rpc = this.pushKill(new RPCConn(baseURL));
+    this.rpc = this.lifecycle.pushKill(new RPCConn(baseURL));
     this.helloInfoPromise = this.rpc.helloInfoPR.promise;
 
-    this.hose = this.pushKill(new HoseConn(baseURL, this.hoseParserPromise));
+    this.hose = this.lifecycle.pushKill(new HoseConn(baseURL, this.hoseParserPromise));
 
-    document.getElementById('controls-left').removeAttribute('inert');
+    downcast(HTMLElement, document.getElementById('controls-left')).removeAttribute('inert');
 
-    this.pushCatchKill(this.doStats());
-    this.pushCatchKill(this.doCheckboxes());
+    this.lifecycle.pushCatchKill(this.doStats());
+    this.lifecycle.pushCatchKill(this.doCheckboxes());
 
     this.loadingSig.set(false);
   }
   async doStats() {
     let lastFrameNum = 0;
-    while (!this.dead) {
-      if (this.rpc.isOpen) {
+    while (!this.lifecycle.dead) {
+      if (this.rpc.isOpenSig.maybeCur) {
         let stats = await this.rpc.reqGetStats();
         let hoseParser = await this.hoseParserPromise;
         let frame = hoseParser.curFrame;
@@ -1871,7 +1503,7 @@ class LiveConns extends BaseConns {
   }
 
   async updateFlags() {
-    let flags = [
+    let flags: [string, bigint][] = [
       ['controls-backpressure', 1n],
       ['controls-send-coll-stuff', 2n], // XXX
       ['controls-bg-events', 4n],
@@ -1882,7 +1514,7 @@ class LiveConns extends BaseConns {
     let setFlagVals = 0n;
     for (let [flagName, flagVal] of flags) {
       allFlagVals |= flagVal;
-      if (document.getElementById(flagName).checked) {
+      if (downcast(HTMLInputElement, document.getElementById(flagName)).checked) {
         setFlagVals |= flagVal;
       }
     }
@@ -1891,10 +1523,13 @@ class LiveConns extends BaseConns {
 
   async doCheckboxes() {
     let checkedPR = Promise.withResolvers();
-    for (let input of document.querySelectorAll('#controls input[type=checkbox]')) {
+    for (let input_ of document.querySelectorAll('#controls input[type=checkbox]')) {
+      const input = downcast(HTMLInputElement, input_);
+      const checked = Signal.withoutInitialValue<boolean>();
       input.checked = localStorage[input.id] === '1';
-      input.onchange = (e) => {
+      input.onchange = (e: Event) => {
         localStorage[input.id] = input.checked ? '1' : '0';
+        checked.set(input.checked);
         //checkedPR.resolve();
       }
     }

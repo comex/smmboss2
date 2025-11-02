@@ -9,6 +9,7 @@
   "files": [
     "client.ts",
     "types_base.ts",
+    "reactive.ts",
     "build/mm_types.ts"
   ],
 }

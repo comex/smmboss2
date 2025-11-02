@@ -1,4 +1,4 @@
-import { assert } from 'types_base';
+import { assert, yieldMe } from './base.js';
 
 interface SomeSignalLink {
   kill(): void;
@@ -54,7 +54,7 @@ export interface SignalRO<out T> {
   [Symbol.asyncIterator](): AsyncIterator<T, any>;
   then<TResult1, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): Promise<TResult1 | TResult2>;
   map<U>(f: (_: T) => U): SignalRO<U>;
-  bind<U>(f: (_: T) => SignalRO<U>): SignalRO<U>;
+  bind<U>(f: (_: T) => SignalRO<U> | U): SignalRO<U>;
   hasValueSig(): Signal<boolean>;
   addLinkOut(link: SignalLinkOut<T>): void;
   removeLinkOut(link: SignalLinkOut<T>): void;
@@ -63,18 +63,29 @@ export interface SignalRO<out T> {
   readonly valueOrException: T | Error | undefined;
 
 }
+
+type SignalVal<T> = T extends Signal<infer U> ? U : never;
+
+class _NoInitialValueDontUse {}
+const NO_INITIAL_VALUE_DONT_USE = new _NoInitialValueDontUse
+
 export class Signal<T> implements SignalRO<T> {
   linksIn: Set<Kill>;
   linksOut: Set<SignalLinkOut<T>>;
   hasValue: boolean;
   hasException: boolean;
   valueOrException: T | Error | undefined;
-  constructor(initialValue: T | undefined = undefined, hasInitialValue: boolean = true) {
+  constructor(initialValue: T | _NoInitialValueDontUse = NO_INITIAL_VALUE_DONT_USE) {
     this.linksIn = new Set;
     this.linksOut = new Set;
-    this.hasValue = hasInitialValue;
     this.hasException = false;
-    this.valueOrException = initialValue;
+    if (initialValue === NO_INITIAL_VALUE_DONT_USE) {
+      this.hasValue = false;
+      this.valueOrException = undefined;
+    } else {
+      this.hasValue = true;
+      this.valueOrException = initialValue as T;
+    }
   }
   static of<U>(valueOrSig: SignalRO<U> | U): SignalRO<U> {
     if (valueOrSig instanceof Signal) {
@@ -84,7 +95,7 @@ export class Signal<T> implements SignalRO<T> {
     }
   }
   static withoutInitialValue<U>(): Signal<U> {
-    return new Signal<U>(undefined, false);
+    return new Signal<U>();
   }
   bump(): void {
     assert(this.hasValue || this.hasException);
@@ -169,27 +180,66 @@ export class Signal<T> implements SignalRO<T> {
     return mappedSignal;
   }
 
-  bind<U>(f: (_: T) => Signal<U>): Signal<U> {
+  bind<U>(f: (_: T) => SignalRO<U> | U): Signal<U> {
     let boundSignal = new Signal<U>;
     let forwardingLink: SomeSignalLink | null = null;
     SignalLink.create(this, boundSignal, (hasException, valueOrException) => {
       if (forwardingLink !== null) {
         forwardingLink.kill();
+        forwardingLink = null;
       }
       if (hasException) {
         boundSignal.reject(valueOrException as Error);
       } else {
         let forwarderSignal = Signal.of(f(valueOrException as T));
-        forwardingLink = SignalLink.create(forwarderSignal, boundSignal, (hasException, valueOrException) => {
-          if (hasException) {
-            boundSignal.reject(valueOrException as Error);
+        forwardingLink = SignalLink.create(forwarderSignal, boundSignal, (hasException2, valueOrException2) => {
+          if (hasException2) {
+            boundSignal.reject(valueOrException2 as Error);
           } else {
-            boundSignal.set(valueOrException as U);
+            boundSignal.set(valueOrException2 as U);
           }
         });
       }
     });
     return boundSignal;
+  }
+
+  static multimap<Obj>(obj: Obj):
+    Signal<{ [Key in keyof Obj]: Obj[Key] extends Signal<infer T> ? T : Obj[Key] }>
+  {
+    const retSignal = new Signal();
+    let numMissingVals = 1; // add 1 temporarily so we don't set retSignal during the loop
+    let retValue: any = {};
+    for (const key in obj) {
+      let sig = obj[key];
+      if (!(sig instanceof Signal)) {
+        retValue[key] = sig;
+        continue;
+      }
+      let hasVal = false;
+      numMissingVals++;
+      SignalLink.create(sig, retSignal, (hasException, valueOrException) => {
+        if (hasException) {
+          retSignal.reject(valueOrException as Error);
+          return;
+        }
+        if (!hasVal) {
+          hasVal = true;
+          numMissingVals--;
+        }
+        retValue[key] = valueOrException;
+        if (numMissingVals) {
+          // Some keys are still missing values.
+          return;
+        }
+        retSignal.set({...retValue});
+      });
+    }
+    --numMissingVals; // remove the temporary addition
+    if (!numMissingVals) {
+      retSignal.set({...retValue});
+    }
+    return retSignal as any;
   }
 
   hasValueSig(): Signal<boolean> {
@@ -263,7 +313,6 @@ export class SignalAsyncIterator<T, TReturn> implements AsyncIterator<T, TReturn
     if (this.link !== null) {
       this.link.kill();
     }
-    console.log('>> return', value);
     return {value: await value, done: true};
   }
   throw(e?: any): Promise<IteratorResult<T, TReturn>> {
@@ -273,25 +322,6 @@ export class SignalAsyncIterator<T, TReturn> implements AsyncIterator<T, TReturn
     return Promise.reject(e);
   }
 }
-
-export function testSignals() {
-  let sig = new Signal<number>;
-  let moresigs: Signal<number>[] = [new Signal, new Signal];
-  let sig3 = sig.bind(i => moresigs[i]).map(x => x * 2);
-  (async () => {
-    for await (let val of sig3) {
-      console.log(val);
-    }
-  })();
-  sig.set(0);
-  moresigs[0].set(42);
-  moresigs[0].set(43);
-  sig.set(1);
-  moresigs[0].set(NaN);
-  moresigs[1].set(44);
-  console.log('*', sig3.cur);
-}
-
 
 export interface Kill {
   kill: () => void;
@@ -318,7 +348,6 @@ export class Lifecycle {
       throw new Error('not sure how to clean this up');
     }
     return objToKill;
-
   }
   pushKillEventListener(target: EventTarget, event: string, callback: EventListenerOrEventListenerObject, options?: AddEventListenerOptions | boolean): void {
     target.addEventListener(event, callback, options);
@@ -350,5 +379,122 @@ export class Lifecycle {
 }
 interface HasLifecycle {
   readonly lifecycle: Lifecycle;
+}
+
+function testCheck(cond: boolean): void {
+  let junk: string;
+  if (cond) {
+    junk = ' OK';
+  } else {
+    let obj = new Error();
+    (Error as any).captureStackTrace(obj);
+    junk = '\n' + obj.stack!.toString() + '\n';
+  }
+  document.getElementById('results')!.append(document.createTextNode(junk));
+}
+
+function testSignalBind(): void {
+  const sigList: any[] = [new Signal(10), new Signal, 1000];
+  testCheck(sigList[1].hasValue === false);
+  const indexSig = new Signal(2);
+  const indexedSig = indexSig.bind(i => sigList[i]);
+  testCheck(indexedSig.cur === 1000);
+  indexSig.set(1);
+  testCheck(indexedSig.cur === 1000);
+  sigList[1].set(123);
+  testCheck(indexedSig.cur === 123);
+  // We don't reevaluate the function 'just because', so we have a stale value:
+  sigList[1] = new Signal(124);
+  testCheck(indexedSig.cur === 123);
+  // But we do eventually reevaluate:
+  indexSig.set(0);
+  indexSig.set(1);
+  testCheck(indexedSig.cur === 124);
+  // Make sure stale updates don't change the value:
+  indexSig.set(0);
+  testCheck(indexedSig.cur === 10);
+  sigList[1].set(125);
+  testCheck(indexedSig.cur === 10);
+  // Make sure kill cleans up after itself:
+  indexedSig.kill();
+  testCheck(sigList[0].linksOut.size === 0);
+}
+
+function testSignalMap(): void {
+  const signal = new Signal<number>;
+  const mappedSig = signal.map(x => 2 * x);
+  testCheck(!mappedSig.hasValue);
+  signal.set(10);
+  testCheck(mappedSig.cur == 20);
+  // Make sure kill cleans up after itself:
+  mappedSig.kill();
+  testCheck(signal.linksOut.size === 0);
+}
+
+function testSignalMultimap(): void {
+  const signalA = new Signal<string>;
+  const signalB = new Signal<string>;
+  const mappedSig = Signal.multimap({a: signalA, b: signalB, c: 123});
+  testCheck(!mappedSig.hasValue);
+  signalA.set('a');
+  testCheck(!mappedSig.hasValue);
+  signalB.set('b');
+  testCheck(mappedSig.hasValue);
+  const firstVal = mappedSig.cur;
+  testCheck(firstVal.a == 'a');
+  testCheck(firstVal.b == 'b');
+  testCheck(firstVal.c == 123);
+  signalA.set('d');
+  testCheck(mappedSig.cur.a == 'd');
+  testCheck(mappedSig.cur.b == 'b');
+  testCheck(firstVal.a == 'a');
+}
+
+async function testSignalAsyncIterate(): Promise<void> {
+  const signal = new Signal<number>;
+  const coro: any = (async () => {
+    let vals = [];
+    try {
+      for await (let val of signal) {
+        vals.push(val);
+      }
+    } catch (e) {
+      return {e, vals};
+    }
+  })();
+  signal.set(0);
+  signal.set(1);
+  signal.set(2);
+  await yieldMe();
+  signal.set(3);
+  signal.reject(new Error('bla bla'));
+  const ret = await coro;
+  testCheck(ret.e.message === 'bla bla');
+  testCheck(JSON.stringify(ret.vals) == JSON.stringify([0, 2, 3]));
+  testCheck(signal.linksOut.size === 0);
+}
+
+export async function testSignals() {
+  testSignalBind();
+  testSignalMap();
+  testSignalMultimap();
+  await testSignalAsyncIterate();
+  /*
+  let sig = new Signal<number>;
+  let moresigs: Signal<number>[] = [new Signal, new Signal];
+  let sig3 = sig.bind(i => moresigs[i]).map(x => x * 2);
+  (async () => {
+    for await (let val of sig3) {
+      console.log(val);
+    }
+  })();
+  sig.set(0);
+  moresigs[0].set(42);
+  moresigs[0].set(43);
+  sig.set(1);
+  moresigs[0].set(NaN);
+  moresigs[1].set(44);
+  console.log('*', sig3.cur);
+  */
 }
 

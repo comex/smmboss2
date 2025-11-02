@@ -1,15 +1,8 @@
+import { assert, hex } from './base.js';
 export interface DataViewWithAddr extends DataView {
   addr: bigint;
 }
 
-export function hex(n: number | bigint): string {
-  return '0x'+n.toString(16);
-}
-export function assert(x: boolean): asserts x {
-  if (!(x)) {
-    throw new Error('assertion failed');
-  }
-}
 export abstract class Instance {
   abstract type: Type<unknown>;
   constructor(public dv: DataView, public off: bigint) {}

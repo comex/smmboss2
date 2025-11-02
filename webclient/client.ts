@@ -1,43 +1,9 @@
-import * as mmTypes from 'build/mm_types';
-import { assert, hex, Type, u8, u32, u64, s8, Tag8, Pointer, DataViewWithAddr } from 'types_base';
-import { Signal, Lifecycle } from 'reactive';
+import * as mmTypes from './build/mm_types.js';
+import { yieldMe, hexbuf, downcast, sleep, assert, hex } from './base.js';
+import { Type, u8, u32, u64, s8, Tag8, Pointer, DataViewWithAddr } from './types_base.js';
+import { Signal, Lifecycle } from './reactive.js';
 
 var theRPCConn: RPCConn
-
-function hexbuf(array: bigint[]): string {
-  return array.map(num => num.toString(16).padStart(2, '0')).join('');
-}
-
-function notNull<T>(val: T | null): T {
-  if (val === null) {
-    throw new Error('unexpectedly null');
-  }
-  return val;
-}
-/*
-function unwrap<T>(val: T | undefined): T {
-  if (val === undefined) {
-    throw new Error('unexpectedly undefined');
-  }
-  return val;
-}
-*/
-function downcast(ty: any, val: unknown): InstanceType<typeof ty> {
-  if (!(val instanceof ty)) {
-    throw new Error('unexpectedly undefined');
-  }
-  return val;
-}
-function yieldMe(): Promise<void> {
-  let { promise, resolve, reject } = Promise.withResolvers<void>();
-  queueMicrotask(resolve);
-  return promise;
-}
-function sleep(n: number): Promise<void> {
-  let { promise, resolve, reject } = Promise.withResolvers<void>();
-  setTimeout(resolve, n);
-  return promise;
-}
 
 async function doRead(addr: bigint, len: number | bigint): Promise<DataView> {
   let resp = await theRPCConn.reqRead(addr, len);
@@ -1617,7 +1583,7 @@ class LiveConns extends BaseConns {
     const checkboxValuesVal: FlagCheckboxes = {};
     const checkboxes = Array.of(document.querySelectorAll('#controls input[type=checkbox]'))
       .map(input => downcast(HTMLInputElement, input));
-    checkboxes.forEach(input => {
+    for (const input of checkboxes) {
       const id = input.id;
       input.checked = checkboxValuesVal[id] = localStorage[id] === '1';
       input.onchange = (e: Event) => {
@@ -1626,7 +1592,7 @@ class LiveConns extends BaseConns {
         checkboxValues.set({...checkboxValuesVal});
       }
       checkboxValues.set({...checkboxValuesVal});
-    });
+    }
     while (1) {
       console.log('wtf');
       await Promise.any([

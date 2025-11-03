@@ -110,16 +110,8 @@ class HotPotato<out T> implements Disposable {
     this._val = undefined;
     return ret;
   }
-  // Using peek() and @@dispose() directly on the HotPotato is not recommended
-  // but can be useful in a generic context if the object is not known to be
-  // disposable.  Sigh.
-  peek(): T {
-    const ret = this._val;
-    if (ret === undefined) {
-      throw new Error('double used()');
-    }
-    return ret;
-  }
+  // Using @@dispose() directly on the HotPotato is not recommended but can be
+  // useful in a generic context.
   [Symbol.dispose](): void {
     dispose(this._val);
   }

@@ -1,7 +1,7 @@
 import * as mmTypes from './build/mm_types.js';
 import { yieldMe, hexbuf, downcast, sleep, assert, hex } from './base.js';
 import { Type, u8, u32, u64, s8, Tag8, Pointer, DataViewWithAddr } from './types_base.js';
-import { Signal, RefCounted } from './reactive.js';
+import { Signal, SignalRO, RefCounted } from './reactive.js';
 
 var theRPCConn: RPCConn
 
@@ -242,7 +242,7 @@ class RPCConn extends RefCounted implements WSWrapperDelegate {
     this.wsw = this.use(new WSWrapper(`${baseURL}/ws/rpc`, this));
     this.wsw.setWantOpen(true);
     this.helloInfoPR = this.useRejectable(Promise.withResolvers());
-    this.isOpenSig = this.use(new Signal(false));
+    this.isOpenSig = this.use(Signal.create(false));
   }
   onOpen() {
     this.pendingResponsePRs = [this.helloPendingResponsePR()];
@@ -1003,7 +1003,7 @@ class Scrubbable extends RefCounted {
     this.scrubberDisplay.textContent = text;
   }
   updateFrames(frames: HoseFrame[]) {
-    if (this.lifecycle.dead) {
+    if (this.isDead()) {
       return;
     }
     let oldFrameIdx = this.frameIdx;
@@ -1099,7 +1099,7 @@ async function stringifyWithArrayBuffers(data: any): Promise<string> {
   return json + '\n' + await compressBufs(bufs);
 }
 
-async function parseWithArrayBuffers(jsonPlus: string): Promise<any> {
+async function parseWithArrayBuffers(jsonPlus: string): Promise<unknown> {
   let [json, url] = jsonPlus.split('\n');
   let raw = await decompressBuf(url);
   let strToBuf = new Map;
@@ -1171,6 +1171,11 @@ type BgCollisionTwoPointEvent = {
   bic?: mmTypes.CollisionBIC,
 };
 
+type SavedHoseFrame = {
+  number: number,
+  relevantHoseMessages: ArrayBuffer[],
+};
+
 class HoseFrame {
   readonly hitboxes = new Map<bigint, mmTypes.Hitbox>();
   relevantHoseMessages: ArrayBuffer[] = [];
@@ -1184,7 +1189,7 @@ class HoseFrame {
     return `frame[${this.number}]`;
   }
 
-  save(isFirst: boolean) {
+  save(isFirst: boolean): SavedHoseFrame {
     let relevantHoseMessages = this.relevantHoseMessages;
     if (isFirst) {
       relevantHoseMessages = [this.relevantHoseMessages[0]];
@@ -1201,7 +1206,7 @@ class HoseFrame {
     }
   }
 
-  static loadInto(frameInfo: HoseFrame, hoseParser: HoseParser): void {
+  static loadInto(frameInfo: SavedHoseFrame, hoseParser: HoseParser): void {
     for (let [i, buffer] of frameInfo.relevantHoseMessages.entries()) {
       let tag = hoseParser.parse(buffer);
       if (i == 0) {
@@ -1211,7 +1216,7 @@ class HoseFrame {
     }
   }
 
-  static async loadFramesInto(frames: HoseFrame[], hoseParser: HoseParser) {
+  static async loadFramesInto(frames: SavedHoseFrame[], hoseParser: HoseParser) {
     for (let [i, frame] of frames.entries()) {
       hoseParser.dontUpdateDiagram = i != frames.length - 1;
       HoseFrame.loadInto(frame, hoseParser);
@@ -1230,7 +1235,7 @@ class HoseParser {
   dontUpdateDiagram = false;
   constructor(public scrubbable: Scrubbable) {
   }
-  parse(buffer: ArrayBuffer) {
+  parse(buffer: ArrayBuffer): string {
     assert(buffer instanceof ArrayBuffer);
     let r = new Reader(buffer);
     let tag = r.read(Tag8);
@@ -1438,18 +1443,10 @@ class HoseConn extends RefCounted implements WSWrapperDelegate {
   }
 }
 
-/*
-class ButtonWrapper
-  constructor(button, onClick) {
-    this.onClick = onClick;
-    this.button = button;
-    button.addEventListener('click', onClick);
-  }
-  kill() {
-    this.button.removeEventListener('click', this.onClick);
-  }
-}
-*/
+type Save = {
+  frames: SavedHoseFrame[],
+  helloInfo: ArrayBuffer,
+};
 
 abstract class BaseConns extends RefCounted {
   abstract readonly helloInfoPromise: Promise<HelloModInfo>;
@@ -1466,7 +1463,7 @@ abstract class BaseConns extends RefCounted {
     this.hoseParserPromise = this.doHoseParser();
     this.mmTypesPromise = this.doMMTypes();
     this.stillAlivePR = this.useRejectable(Promise.withResolvers());
-    this.loadingSig = this.use(new Signal(true));
+    this.loadingSig = this.use(Signal.create(true));
   }
 
   async doHoseParser(): Promise<HoseParser> {
@@ -1496,7 +1493,7 @@ abstract class BaseConns extends RefCounted {
     return;
   }
 
-  async saveRaw(nframes: number) {
+  async saveRaw(nframes: number): Promise<Save> {
     let savedFrames = (await this.hoseParserPromise).savedFrames;
     savedFrames = savedFrames.slice(-nframes);
     if (savedFrames.length && savedFrames[0].number == 0) {
@@ -1558,7 +1555,7 @@ class LiveConns extends BaseConns {
     }
   }
 
-  async updateFlags() {
+  async updateFlags(vals: { [_: string]: boolean }): Promise<void> {
     let flags: [string, bigint][] = [
       ['controls-backpressure', 1n],
       ['controls-send-coll-stuff', 2n], // XXX
@@ -1570,7 +1567,8 @@ class LiveConns extends BaseConns {
     let setFlagVals = 0n;
     for (let [flagName, flagVal] of flags) {
       allFlagVals |= flagVal;
-      if (downcast(HTMLInputElement, document.getElementById(flagName)).checked) {
+      assert(vals[flagName] !== undefined);
+      if (vals[flagName]) {
         setFlagVals |= flagVal;
       }
     }
@@ -1578,63 +1576,61 @@ class LiveConns extends BaseConns {
   }
 
   async doCheckboxes() {
+    using holder = new RefCounted;
     const checkboxes = Array.of(document.querySelectorAll('#controls input[type=checkbox]'))
       .map(input => downcast(HTMLInputElement, input));
     const checkboxSigs: { [name: string]: Signal<boolean> } = {};
     for (const input of checkboxes) {
       const id = input.id;
       input.checked = localStorage[id] === '1';
-      const sig = new Signal(input.checked);
+      const sig = holder.use(Signal.create(input.checked));
       input.onchange = (e: Event) => {
         localStorage[id] = input.checked ? '1' : '0';
         sig.set(input.checked);
       }
       checkboxSigs[id] = sig;
     }
-    const checkboxSig = this.lifecycle.pushKill(Signal.combine(checkboxSigs));
-    this.lifecycle.pushKill(this.lifecycle.pushKill(Signal.combine({
+    using checkboxSig = Signal.combine(checkboxSigs).used();
+    using combined2 = Signal.combine({
       checkboxVals: checkboxSig,
       isOpen: this.rpc.isOpenSig,
-    })).map(res => {
-      if (res.isOpen) {
-
+    }).used();
+    let lastSetCheckboxVals = '';
+    this.use(combined2.map(res => {
+      let checkboxValsStr;
+      if (res.isOpen && (checkboxValsStr = res.checkboxVals.toString()) != lastSetCheckboxVals) {
+        (async () => {
+          await this.updateFlags(res.checkboxVals);
+          lastSetCheckboxVals = checkboxValsStr;
+        })();
       }
-
     }));
-    while (1) {
-      console.log('wtf');
-      await Promise.any([
-        Promise.all([
-          checkedPR.promise,
-          this.rpc.openedCond,
-        ]),
-        this.stillAlivePR.promise,
-      ]);
-      await this.updateFlags();
-    }
   }
 }
 
 class LoadedConns extends BaseConns {
-  constructor(savedText) {
+  helloInfoPR: PromiseWithResolvers<HelloModInfo>;
+  helloInfoPromise: Promise<HelloModInfo>;
+  loadStartTime: number;
+  constructor(savedText: string) {
     super('loaded');
-    this.helloInfoPR = Promise.withResolvers();
+    this.helloInfoPR = this.useRejectable(Promise.withResolvers());
     this.helloInfoPromise = this.helloInfoPR.promise;
 
-    document.getElementById('controls-left').setAttribute('inert', '');
+    document.getElementById('controls-left')!.setAttribute('inert', '');
     addStatsLine('loading...');
     this.loadStartTime = new Date().getTime();
 
     this.load(savedText);
   }
-  async load(savedText) {
-    let stuff = await parseWithArrayBuffers(savedText);
+  async load(savedText: string) {
+    let stuff = await parseWithArrayBuffers(savedText) as Save;
     await this.loadRaw(stuff);
     let loadTime = new Date().getTime() - this.loadStartTime;
     addStatsLine(`loaded in ${loadTime}ms.`);
     this.loadingSig.set(false);
   }
-  async loadRaw({frames, helloInfo}) {
+  async loadRaw({frames, helloInfo}: Save) {
     this.helloInfoPR.resolve(readHelloModInfo(new Reader(helloInfo)));
     let hoseParser = await this.hoseParserPromise;
     await HoseFrame.loadFramesInto(frames, hoseParser);
@@ -1645,26 +1641,27 @@ class LoadedConns extends BaseConns {
 function jsMemCallback() {
   let text;
   try {
-    let mem = performance.memory.usedJSHeapSize / 1048576;
-    text = Math.floor(mem);
+    let mem = (performance as any).memory.usedJSHeapSize / 1048576;
+    text = ''+Math.floor(mem);
   } catch (e) {
-    document.getElementById('js-mem-container').style.display = 'none';
+    document.getElementById('js-mem-container')!.style.display = 'none';
     return;
   }
-  document.getElementById('js-mem').textContent = text;
+  document.getElementById('js-mem')!.textContent = text;
 }
 setInterval(jsMemCallback, 2000);
 jsMemCallback();
 
-class ButtonWrapper {
-  readonly lifecycle = new Lifecycle();
+class ButtonWrapper extends RefCounted {
   elm: HTMLButtonElement;
   clicks: Signal<number>;
-  constructor(id: string, {enabled}: {enabled: Signal<boolean> | boolean | undefined}) {
+  constructor(id: string, {enabled}: {enabled: SignalRO<boolean> | boolean | undefined}) {
+    super();
     this.elm = downcast(HTMLButtonElement, document.getElementById(id));
-    this.clicks = this.pushKill(Signal.withoutInitialValue());
-    this.lifecycle.pushKillEventListener(this.elm, 'click', this.onClick.bind(this));
-    this.lifecycle.pushKill(Signal.of<boolean | undefined>(enabled).map(e => {
+    this.clicks = this.use(Signal.withoutInitialValue<number>());
+    this.useEventListener(this.elm, 'click', this.onClick.bind(this));
+    using enabledSig = Signal.of<boolean | undefined>(enabled).used();
+    this.use(enabledSig.map(e => {
       this.elm.disabled = !e;
     }));
   }
@@ -1673,45 +1670,48 @@ class ButtonWrapper {
   }
 }
 
-class UI {
-  readonly lifecycle = new Lifecycle();
-  constructor(connsSig: SignalRO<BaseConns>) {
-    this.notLoadingSig = connsSig.bind(conns =>
-      !conns ? true : conns.loadingSig.map(loading => !loading));
-    const lc = this.lifecycle;
+class UI extends RefCounted {
+  notLoadingSig: SignalRO<boolean>;
+  constructor(connsSig: Signal<BaseConns>) {
+    super();
+    this.notLoadingSig = this.use(
+      connsSig.bind(conns =>
+        !conns ? true : conns.loadingSig.map(loading => !loading))
+    );
 
-    lc.pushKill(lc.pushKill(new ButtonWrapper('load-button', {
-      enabled: new Signal(true),//this.notLoadingSig,
+    this.use(this.use(new ButtonWrapper('load-button', {
+      enabled: this.use(Signal.of(true)),//this.notLoadingSig,
     })).clicks.map(() => {
-      connsSig.maybeCur?.kill();
+      connsSig.maybeCur?.unref();
       connsSig.set(new LoadedConns(localStorage.zw));
     }));
 
-    lc.pushKill(lc.pushKill(new ButtonWrapper('live-button', {
+    this.use(this.use(new ButtonWrapper('live-button', {
       enabled: true,
     })).clicks.map(async () => {
-      g_connsSig.maybeCur?.kill();
+      g_connsSig.maybeCur?.unref();
       g_connsSig.set(new LiveConns('ws://neb-solidus:8000'));
     }));
 
-    lc.pushKill(lc.pushKill(new ButtonWrapper('disconnect-button', {
+    this.use(this.use(new ButtonWrapper('disconnect-button', {
       enabled: true,
     })).clicks.map(async () => {
-      g_connsSig.maybeCur?.kill();
+      g_connsSig.maybeCur?.unref();
+      // XXX this is bad
     }));
 
-    lc.pushKill(lc.pushKill(new ButtonWrapper('save-button', {
+    this.use(this.use(new ButtonWrapper('save-button', {
       enabled: this.notLoadingSig,
     })).clicks.map(async () => {
       addStatsLine('saving...');
-      localStorage.zw = await connsSig.cur.save();
+      localStorage.zw = await connsSig.cur.save(1000);
       addStatsLine('saved.');
     }));
   }
 }
 
-g_connsSig = new Signal(null);
-g_ui = new UI(g_connsSig);
+using g_connsSig = Signal.withoutInitialValue<BaseConns>().used();
+var g_ui = new UI(g_connsSig);
 
 
 function loadByHash() {
@@ -1720,10 +1720,10 @@ function loadByHash() {
   }
   let hash = location.hash.substr(1);
   if (hash == 'live') {
-    document.getElementById('live-button').click();
+    downcast(HTMLButtonElement, document.getElementById('live-button')).click();
   } else if (hash == 'loaded') {
     // todo: more than one save
-    document.getElementById('load-button').click();
+    downcast(HTMLButtonElement, document.getElementById('load-button')).click();
   }
 }
 loadByHash();

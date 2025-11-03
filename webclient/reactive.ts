@@ -144,27 +144,27 @@ class SignalLink<SourceT> implements SignalLinkOut<SourceT> {
     }
     let link = new SignalLink<SourceU>(source.ref(), target, update);
     if (target !== null) {
-      target.addLinkIn(link);
+      target._addLinkIn(link);
     }
-    source.addLinkOut(link);
+    source._addLinkOut(link);
     if (source.hasValue) {
       update(false, source.valueOrException as Error, link);
     }
     return link;
   }
   kill(): void {
-    this.source.removeLinkOut(this);
+    this.source._removeLinkOut(this);
     this.source.unref();
     if (this.target !== null) {
-      this.target.removeLinkIn(this);
+      this.target._removeLinkIn(this);
     }
   }
 }
 
 interface SomeSignal {
   readonly hasException: boolean;
-  addLinkIn(link: Kill): void;
-  removeLinkIn(link: Kill): void;
+  _addLinkIn(link: Kill): void;
+  _removeLinkIn(link: Kill): void;
 }
 export interface SignalRO<out T> extends RefCounted {
   get cur(): T;
@@ -175,8 +175,8 @@ export interface SignalRO<out T> extends RefCounted {
   map<U>(f: (_: T) => U): HotPotato<SignalRO<U>>;
   bind<U>(f: (_: T) => HotPotato<SignalRO<U>> | U): HotPotato<SignalRO<U>>;
   hasValueSig(): HotPotato<Signal<boolean>>;
-  addLinkOut(link: SignalLinkOut<T>): void;
-  removeLinkOut(link: SignalLinkOut<T>): void;
+  _addLinkOut(link: SignalLinkOut<T>): void;
+  _removeLinkOut(link: SignalLinkOut<T>): void;
   readonly hasValue: boolean;
   readonly hasException: boolean;
   readonly valueOrException: T | Error | undefined;
@@ -403,16 +403,22 @@ export class Signal<T> extends RefCounted implements SignalRO<T> {
       this.reject(DISPOSED_ERROR);
     }
   }
-  addLinkOut(link: SignalLinkOut<T>): void {
+
+  // These methods should only be used by SignalLink.  The only reason they
+  // exist, rather than having SignalLink manipulate the properties directly,
+  // is to let `SignalRO` be contravariant and let `SomeSignal` have no type
+  // parameter.
+
+  _addLinkOut(link: SignalLinkOut<T>): void {
     this.linksOut.add(link);
   }
-  removeLinkOut(link: SignalLinkOut<T>): void {
+  _removeLinkOut(link: SignalLinkOut<T>): void {
     this.linksOut.delete(link);
   }
-  addLinkIn(link: SomeSignalLink): void {
+  _addLinkIn(link: SomeSignalLink): void {
     this.linksIn.add(link);
   }
-  removeLinkIn(link: SomeSignalLink): void {
+  _removeLinkIn(link: SomeSignalLink): void {
     this.linksIn.delete(link);
   }
 }

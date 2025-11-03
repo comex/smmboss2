@@ -97,13 +97,31 @@ export class RefCounted {
 //     using foo = makeHotPotato().used();
 // When adding as a child of another RefCounted, it will do that for you:
 //     let foo = this.use(makeHotPotato());
-class HotPotato<out T extends RefCounted> {
-  readonly _val: T;
+class HotPotato<out T> implements Disposable {
+  _val?: T;
   constructor(val: T) {
     this._val = val;
   }
   used(): T {
-    return this._val;
+    const ret = this._val;
+    if (ret === undefined) {
+      throw new Error('double used()');
+    }
+    this._val = undefined;
+    return ret;
+  }
+  // Using peek() and @@dispose() directly on the HotPotato is not recommended
+  // but can be useful in a generic context if the object is not known to be
+  // disposable.  Sigh.
+  peek(): T {
+    const ret = this._val;
+    if (ret === undefined) {
+      throw new Error('double used()');
+    }
+    return ret;
+  }
+  [Symbol.dispose](): void {
+    dispose(this._val);
   }
 }
 
@@ -161,6 +179,7 @@ export interface SignalRO<out T> extends RefCounted {
   get maybeCur(): T | undefined;
   [Symbol.asyncIterator](): AsyncIterator<T, any>;
   then<TResult1, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): Promise<TResult1 | TResult2>;
+  mapHot<U>(f: (_: T) => HotPotato<U>): HotPotato<SignalRO<U>>;
   map<U>(f: (_: T) => U): HotPotato<SignalRO<U>>;
   bind<U>(f: (_: T) => HotPotato<SignalRO<U>> | U): HotPotato<SignalRO<U>>;
   hasValueSig(): HotPotato<Signal<boolean>>;
@@ -204,7 +223,7 @@ export class Signal<T> extends RefCounted implements SignalRO<T> {
   static create<U>(initialValue: U): HotPotato<Signal<U>> {
     return new HotPotato(new Signal<U>(true, initialValue));
   }
-  static createHot<U extends RefCounted>(initialValue: HotPotato<U>): HotPotato<Signal<U>> {
+  static createHot<U extends Disposable>(initialValue: HotPotato<U>): HotPotato<Signal<U>> {
     using val = initialValue.used();
     return new HotPotato(new Signal<U>(true, val));
   }
@@ -233,19 +252,24 @@ export class Signal<T> extends RefCounted implements SignalRO<T> {
       return this.valueOrException as T;
     }
   }
-  setHot(potato: T extends RefCounted ? HotPotato<T> : never): void {
-    using value = potato.used();
-    this.set(value);
+  setHot(potato: HotPotato<T>): void {
+    this._setImpl(potato.used());
   }
   set(value: T): void {
+    this._setImpl(ref(value));
+  }
+  // _setImpl: like `set` but takes ownership of `value`
+  _setImpl(value: T): void {
     if (this.hasException) {
+      dispose(value);
       return;
     }
     if (this.hasValue && this.valueOrException === value) {
+      dispose(value);
       return;
     }
     dispose(this.valueOrException);
-    this.valueOrException = ref(value);
+    this.valueOrException = value;
     this.hasValue = true;
     this.bump();
   }
@@ -288,6 +312,18 @@ export class Signal<T> extends RefCounted implements SignalRO<T> {
     return pr.promise.then(onfulfilled, onrejected);
   }
 
+  mapHot<U>(f: (_: T) => HotPotato<U>): HotPotato<Signal<U>> {
+    using mappedSignal = Signal.withoutInitialValue<U>().used();
+    SignalLink.create(this, mappedSignal, (hasException, valueOrException) => {
+      if (hasException) {
+        mappedSignal.reject(valueOrException as Error);
+      } else {
+        mappedSignal.setHot(f(valueOrException as T));
+      }
+    });
+    return new HotPotato(mappedSignal.ref());
+  }
+
   map<U>(f: (_: T) => U): HotPotato<Signal<U>> {
     using mappedSignal = Signal.withoutInitialValue<U>().used();
     SignalLink.create(this, mappedSignal, (hasException, valueOrException) => {
@@ -300,7 +336,7 @@ export class Signal<T> extends RefCounted implements SignalRO<T> {
     return new HotPotato(mappedSignal.ref());
   }
 
-  bind<U>(f: (_: T) => HotPotato<SignalRO<U>> | U): HotPotato<Signal<U>> {
+  bind<U>(f: (_: T) => HotPotato<SignalRO<U>>): HotPotato<Signal<U>> {
     using boundSignal = Signal.withoutInitialValue<U>().used();
     let forwardingLink: SomeSignalLink | null = null;
     SignalLink.create(this, boundSignal, (hasException, valueOrException) => {
@@ -486,7 +522,7 @@ function testSignalBind(): void {
   using indexSig = Signal.create(2).used();
   let indexedSigRefCount;
   {
-    using indexedSig = indexSig.bind(i => sigList[i]).used();
+    using indexedSig: SignalRO<any> = indexSig.bind(i => sigList[i]).used();
     indexedSigRefCount = indexedSig.refCount;
     testCheck(indexedSigRefCount.value == 1);
     testCheck(indexedSig.cur === 1000);
@@ -519,6 +555,18 @@ function testSignalMap(): void {
     testCheck(!mappedSig.hasValue);
     signal.set(10);
     testCheck(mappedSig.cur == 20);
+  }
+  // Make sure kill cleans up after itself:
+  testCheck(signal.linksOut.size === 0);
+}
+
+function testSignalMapHot(): void {
+  using signal = Signal.withoutInitialValue<RCTestObj>().used();
+  {
+    using mappedSig = signal.mapHot(x => RCTestObj.create(x.value * 2)).used();
+    testCheck(!mappedSig.hasValue);
+    signal.setHot(RCTestObj.create(10));
+    testCheck(mappedSig.cur.value == 20);
   }
   // Make sure kill cleans up after itself:
   testCheck(signal.linksOut.size === 0);
@@ -572,6 +620,7 @@ export async function testReactive() {
     ALL_REFCOUNTED_OBJECTS = new Set();
     testSignalBind();
     testSignalMap();
+    testSignalMapHot();
     testSignalCombine();
     await testSignalAsyncIterate();
     testCheck(ALL_REFCOUNTED_OBJECTS.size == 0);

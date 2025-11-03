@@ -1678,7 +1678,7 @@ class UI extends RefCounted {
     super();
     this.notLoadingSig = this.use(
       connsSig.bind(conns =>
-        !conns ? true : conns.loadingSig.map(loading => !loading))
+        !conns ? Signal.of(true) : conns.loadingSig.map(loading => !loading))
     );
 
     this.use(this.use(new ButtonWrapper('load-button', {

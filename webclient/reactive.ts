@@ -20,6 +20,7 @@ class DisposedError extends Error {
   }
 }
 const DISPOSED_ERROR = new DisposedError;
+let ALL_REFCOUNTED_OBJECTS: Set<RefCounted> | undefined = undefined;
 
 class RefCount {
   value: number = 1;
@@ -49,6 +50,13 @@ export class RefCounted {
   constructor() {
     this.refCount = new RefCount;
     refCountedFinalizationRegistry.register(this, this.refCount);
+    if (ALL_REFCOUNTED_OBJECTS !== undefined) {
+      // for testing
+      ALL_REFCOUNTED_OBJECTS.add(this);
+      this.disposeStack.defer(() => {
+        ALL_REFCOUNTED_OBJECTS.delete(this);
+      });
+    }
   }
   _destructor(): void {}
   [Symbol.dispose](): void {
@@ -335,7 +343,7 @@ export class Signal<T> extends RefCounted implements SignalRO<T> {
     return new HotPotato(ret.ref());
   }
 
-  _destructor(): void {
+  override _destructor(): void {
     if (!this.hasException) {
       this.reject(DISPOSED_ERROR);
     }
@@ -522,9 +530,12 @@ async function testSignalAsyncIterate(): Promise<void> {
 }
 
 export async function testSignals() {
+  ALL_REFCOUNTED_OBJECTS = new Set();
   testSignalBind();
   testSignalMap();
   testSignalCombine();
   await testSignalAsyncIterate();
+  testCheck(ALL_REFCOUNTED_OBJECTS.size == 0);
+  ALL_REFCOUNTED_OBJECTS = undefined;
 }
 

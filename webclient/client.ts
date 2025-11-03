@@ -162,7 +162,7 @@ class WSWrapper extends RefCounted {
   constructor(public wsURL: string, public delegate: WSWrapperDelegate) {
     super();
   }
-  _destructor() {
+  override _destructor() {
     if (this.state == 'open') {
       addStatsLine(`closing ${this.wsURL} due to kill`);
       assert(this.ws !== null);
@@ -783,7 +783,7 @@ class Diagram extends RefCounted {
                           {passive: false});
     this.useEventListener(this.svg, 'mousedown', this.onMouseDown.bind(this) as EventListener);
   }
-  _destructor() {
+  override _destructor() {
     this.svg.innerHTML = '';
     delete this.lastRenderedFrame;
     this.removeMouseMoveUp();

@@ -6,8 +6,19 @@ const refCountedFinalizationRegistry = new FinalizationRegistry<RefCount>((refCo
   }
 });
 
-export function dispose(obj: Disposable) {
-  obj[Symbol.dispose]();
+export function ref<T>(obj: T): T {
+  if (obj instanceof RefCounted) {
+    obj.ref();
+  }
+  return obj;
+}
+export function dispose(obj: any) {
+  if (typeof obj == 'object') {
+    const dispose = obj[Symbol.dispose];
+    if (dispose !== undefined) {
+      dispose.call(obj);
+    }
+  }
 }
 
 interface Rejectable {
@@ -54,7 +65,7 @@ export class RefCounted {
       // for testing
       ALL_REFCOUNTED_OBJECTS.add(this);
       this.disposeStack.defer(() => {
-        ALL_REFCOUNTED_OBJECTS.delete(this);
+        ALL_REFCOUNTED_OBJECTS!.delete(this);
       });
     }
   }
@@ -80,6 +91,12 @@ export class RefCounted {
   }
 }
 
+// Used to wrap an object returned at +1 and remind you to pass it into a
+// scope.
+// With `using`, you have to manually call `.used()`:
+//     using foo = makeHotPotato().used();
+// When adding as a child of another RefCounted, it will do that for you:
+//     let foo = this.use(makeHotPotato());
 class HotPotato<out T extends RefCounted> {
   readonly _val: T;
   constructor(val: T) {
@@ -172,7 +189,7 @@ export class Signal<T> extends RefCounted implements SignalRO<T> {
     this.linksOut = new Set;
     this.hasException = false;
     this.hasValue = hasValue;
-    this.valueOrException = valueOrException as T;
+    this.valueOrException = ref(valueOrException);
   }
   static of<U>(valueOrSig: SignalRO<U> | HotPotato<SignalRO<U>> | U): HotPotato<SignalRO<U>> {
     if (valueOrSig instanceof Signal) {
@@ -186,6 +203,10 @@ export class Signal<T> extends RefCounted implements SignalRO<T> {
   }
   static create<U>(initialValue: U): HotPotato<Signal<U>> {
     return new HotPotato(new Signal<U>(true, initialValue));
+  }
+  static createHot<U extends RefCounted>(initialValue: HotPotato<U>): HotPotato<Signal<U>> {
+    using val = initialValue.used();
+    return new HotPotato(new Signal<U>(true, val));
   }
   static withoutInitialValue<U>(): HotPotato<Signal<U>> {
     return new HotPotato(new Signal<U>(false, undefined));
@@ -212,6 +233,10 @@ export class Signal<T> extends RefCounted implements SignalRO<T> {
       return this.valueOrException as T;
     }
   }
+  setHot(potato: T extends RefCounted ? HotPotato<T> : never): void {
+    using value = potato.used();
+    this.set(value);
+  }
   set(value: T): void {
     if (this.hasException) {
       return;
@@ -219,7 +244,8 @@ export class Signal<T> extends RefCounted implements SignalRO<T> {
     if (this.hasValue && this.valueOrException === value) {
       return;
     }
-    this.valueOrException = value;
+    dispose(this.valueOrException);
+    this.valueOrException = ref(value);
     this.hasValue = true;
     this.bump();
   }
@@ -227,6 +253,7 @@ export class Signal<T> extends RefCounted implements SignalRO<T> {
     if (this.hasException) {
       return;
     }
+    dispose(this.valueOrException);
     this.valueOrException = exception;
     this.hasException = true;
     this.hasValue = false;
@@ -425,6 +452,9 @@ export interface Reject {
   reject: (reason?: any) => void;
 }
 
+function testLog(s: string): void {
+  document.getElementById('results')!.append(document.createTextNode(s));
+}
 function testCheck(cond: boolean): void {
   let junk: string;
   if (cond) {
@@ -434,16 +464,24 @@ function testCheck(cond: boolean): void {
     (Error as any).captureStackTrace(obj);
     junk = '\n' + obj.stack!.toString() + '\n';
   }
-  document.getElementById('results')!.append(document.createTextNode(junk));
+  testLog(junk);
+}
+
+class RCTestObj extends RefCounted {
+  private constructor(public value: any) { super(); }
+  static create(val: any): HotPotato<RCTestObj> {
+    return new HotPotato(new RCTestObj(val));
+  }
 }
 
 function testSignalBind(): void {
-  using holder = new RefCounted;
+  using scope = new RefCounted;
   const sigList: any[] = [
-    holder.use(Signal.create(10)),
-    holder.use(Signal.withoutInitialValue()),
+    scope.use(Signal.createHot(RCTestObj.create(10))),
+    scope.use(Signal.withoutInitialValue()),
     1000
   ];
+  using x124 = RCTestObj.create(124).used();
   testCheck(sigList[1].hasValue === false);
   using indexSig = Signal.create(2).used();
   let indexedSigRefCount;
@@ -457,17 +495,17 @@ function testSignalBind(): void {
     sigList[1].set(123);
     testCheck(indexedSig.cur === 123);
     // We don't reevaluate the function 'just because', so we have a stale value:
-    sigList[1] = holder.use(Signal.create(124));
+    sigList[1] = scope.use(Signal.create(x124));
     testCheck(indexedSig.cur === 123);
     // But we do eventually reevaluate:
     indexSig.set(0);
     indexSig.set(1);
-    testCheck(indexedSig.cur === 124);
+    testCheck(indexedSig.cur.value === 124);
     // Make sure stale updates don't change the value:
     indexSig.set(0);
-    testCheck(indexedSig.cur === 10);
+    testCheck(indexedSig.cur.value === 10);
     sigList[1].set(125);
-    testCheck(indexedSig.cur === 10);
+    testCheck(indexedSig.cur.value === 10);
   }
   // Make sure kill cleans up after itself:
   testCheck(indexedSigRefCount.value == 0);
@@ -529,13 +567,18 @@ async function testSignalAsyncIterate(): Promise<void> {
   testCheck(signal.linksOut.size === 0);
 }
 
-export async function testSignals() {
-  ALL_REFCOUNTED_OBJECTS = new Set();
-  testSignalBind();
-  testSignalMap();
-  testSignalCombine();
-  await testSignalAsyncIterate();
-  testCheck(ALL_REFCOUNTED_OBJECTS.size == 0);
-  ALL_REFCOUNTED_OBJECTS = undefined;
+export async function testReactive() {
+  try {
+    ALL_REFCOUNTED_OBJECTS = new Set();
+    testSignalBind();
+    testSignalMap();
+    testSignalCombine();
+    await testSignalAsyncIterate();
+    testCheck(ALL_REFCOUNTED_OBJECTS.size == 0);
+    ALL_REFCOUNTED_OBJECTS = undefined;
+    testLog('\ndone');
+  } catch (e) {
+    testLog(''+e);
+  }
 }
 

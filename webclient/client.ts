@@ -1576,14 +1576,14 @@ class LiveConns extends BaseConns {
   }
 
   async doCheckboxes() {
-    using holder = new RefCounted;
+    using scope = new RefCounted;
     const checkboxes = Array.of(document.querySelectorAll('#controls input[type=checkbox]'))
       .map(input => downcast(HTMLInputElement, input));
     const checkboxSigs: { [name: string]: Signal<boolean> } = {};
     for (const input of checkboxes) {
       const id = input.id;
       input.checked = localStorage[id] === '1';
-      const sig = holder.use(Signal.create(input.checked));
+      const sig = scope.use(Signal.create(input.checked));
       input.onchange = (e: Event) => {
         localStorage[id] = input.checked ? '1' : '0';
         sig.set(input.checked);
@@ -1591,17 +1591,19 @@ class LiveConns extends BaseConns {
       checkboxSigs[id] = sig;
     }
     using checkboxSig = Signal.combine(checkboxSigs).used();
+    using lastSetCheckboxValsSig = Signal.create('').used();
     using combined2 = Signal.combine({
       checkboxVals: checkboxSig,
       isOpen: this.rpc.isOpenSig,
+      lastSetCheckboxVals: lastSetCheckboxValsSig,
     }).used();
     let lastSetCheckboxVals = '';
     this.use(combined2.map(res => {
       let checkboxValsStr;
-      if (res.isOpen && (checkboxValsStr = res.checkboxVals.toString()) != lastSetCheckboxVals) {
+      if (res.isOpen && (checkboxValsStr = res.checkboxVals.toString()) != res.lastSetCheckboxVals) {
         (async () => {
           await this.updateFlags(res.checkboxVals);
-          lastSetCheckboxVals = checkboxValsStr;
+          lastSetCheckboxValsSig.set(checkboxValsStr);
         })();
       }
     }));
@@ -1697,7 +1699,7 @@ class UI extends RefCounted {
       enabled: true,
     })).clicks.map(async () => {
       g_connsSig.maybeCur?.unref();
-      // XXX this is bad
+      // XXX this is bad, come up with a better way to disconnect
     }));
 
     this.use(this.use(new ButtonWrapper('save-button', {

@@ -19,9 +19,9 @@ class NumericType<T> implements Type<T> {
   constructor(public name: string, public sizeof: bigint, dataViewName: string, needBigintConversion: boolean) {
     let code;
     if (needBigintConversion) {
-      code = `return BigInt(dv.get${dataViewName}(off, true));`
+      code = `return BigInt(dv.get${dataViewName}(Number(off), true));`
     } else {
-      code = `return dv.get${dataViewName}(off, true);`
+      code = `return dv.get${dataViewName}(Number(off), true);`
     }
     this.get = new Function('dv', 'off', code) as any;
   }
@@ -42,14 +42,16 @@ export interface Array<ItemI> extends Instance {
 
 
 export function createArrayType<ItemI, ItemTy extends Type<ItemI>>(name_: string, count_: bigint, itemTy_: ItemTy): ArrayType<ItemI> {
-    assert(itemTy_.sizeof !== undefined);
-    const sizeOfItem = itemTy_.sizeof;
+    const sizeOfItem = (): bigint => {
+      assert(itemTy_.sizeof !== undefined);
+      return itemTy_.sizeof;
+    };
     class A extends Instance {
       get type(): typeof A { return A; }
       static readonly name: string = name_;
       static readonly itemType: ItemTy = itemTy_;
       static readonly count: bigint = count_;
-      static readonly sizeof: bigint = sizeOfItem * count_;
+      static get sizeof(): bigint { return sizeOfItem() * count_; }
       static get(dv: DataView, off: bigint): Array<ItemI> {
         return new A(dv, off);
       }
@@ -58,7 +60,7 @@ export function createArrayType<ItemI, ItemTy extends Type<ItemI>>(name_: string
         if (n < 0 || n >= this.type.count) {
           throw new Error(`out-of-bounds array index: ${n}, count = ${this.type.count}`);
         }
-        return itemTy_.get(this.dv, this.off + sizeOfItem * n);
+        return itemTy_.get(this.dv, this.off + sizeOfItem() * n);
       }
     };
     return A;

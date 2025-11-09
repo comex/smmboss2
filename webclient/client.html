@@ -90,5 +90,16 @@
   </div>
 </div>
 
-<script src="build/client.js">
+<script type="module">
+import * as mmTypes from './build/build/mm_types.js';
+import * as base from './build/base.js';
+import * as typesBase from './build/types_base.js';
+import * as reactive from './build/reactive.js';
+import * as client from './build/client.js';
+window.$mmTypes = mmTypes;
+window.$base = base;
+window.$typesBase = typesBase;
+window.$reactive = reactive;
+window.$client = client;
+window.g = new client.Global;
 </script>

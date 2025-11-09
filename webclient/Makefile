@@ -1,8 +1,8 @@
 WEBCLIENT ?= .
 WBUILD := $(abspath $(WEBCLIENT)/build)
-$(WBUILD)/ran_tsc: $(glob $(WEBCLIENT)/*.ts) $(WBUILD)/mm_types.ts
+$(WBUILD)/ran_tsc: $(glob $(WEBCLIENT)/*.ts) $(WBUILD)/mm_types.ts $(WEBCLIENT)/tsconfig.json Makefile
 	tsc -p $(WEBCLIENT)/tsconfig.json && touch $@
-$(WBUILD)/mm_types.ts:
+$(WBUILD)/mm_types.ts: Makefile
 	mkdir -p $(WBUILD)
 	cd $(WEBCLIENT)/../py && uv run export.py typescript $@ $(WBUILD)/mm_types.ts.d
 -include $(WBUILD)/mm_types.ts.d

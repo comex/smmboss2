@@ -209,7 +209,7 @@ def write_typescript(fp):
     p('  ArrayType, PointerType,')
     p('  createArrayType, createPointerType,')
     p('  GuestPtr, Angle, GuestCString,')
-    p('} from "types_base";')
+    p('} from "../types_base.js";')
     p('type MMAddrs = {')
     for name, x in merged['addrs']['addrs'].items():
         question = '?' if x['any_missing'] else ''

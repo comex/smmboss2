@@ -4,7 +4,8 @@
     "lib": [ "esnext", "dom", "dom.iterable" ],
     "target": "esnext",
     "module": "esnext",
-    "outDir": "build"
+    "outDir": "build",
+    "sourceMap": true
   },
   "files": [
     "base.ts",

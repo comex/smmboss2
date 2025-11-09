@@ -37,14 +37,14 @@ declare module 'build/mm_types' {
     _ptr?: bigint;
   }
 }
-Object.defineProperty(mmTypes.Rect, 'width', {
+Object.defineProperty(mmTypes.Rect.prototype, 'width', {
   get(): number { return this.max.x - this.min.x; }
 });
-Object.defineProperty(mmTypes.Rect, 'height', {
+Object.defineProperty(mmTypes.Rect.prototype, 'height', {
   get(): number { return this.max.y - this.min.y; }
 });
 
-class Reader {
+export class Reader {
   dv: DataView;
   off: bigint;
   size: bigint;
@@ -116,12 +116,12 @@ class Reader {
 
 // These could be structs but using Reader avoids a circular dependency
 type ExlUtilRange = {start: bigint, size: bigint};
-function readExlUtilRange(r: Reader): ExlUtilRange {
+export function readExlUtilRange(r: Reader): ExlUtilRange {
   return {start: r.read(u64), size: r.read(u64)}
 }
 
 type HelloModInfo = Array<{total: ExlUtilRange, text: ExlUtilRange, rodata: ExlUtilRange, data: ExlUtilRange, buildId: string}> & {rawData: ArrayBuffer};
-function readHelloModInfo(r: Reader): HelloModInfo {
+export function readHelloModInfo(r: Reader): HelloModInfo {
   return Object.assign(r.readArrayUnbounded(() => ({
     total: readExlUtilRange(r),
     text: readExlUtilRange(r),
@@ -133,7 +133,7 @@ function readHelloModInfo(r: Reader): HelloModInfo {
   });
 }
 
-class Throttle {
+export class Throttle {
   delay: number;
   constructor(public name: string, public defaultDelay: number = 100) {
     this.delay = this.defaultDelay;
@@ -154,7 +154,7 @@ interface WSWrapperDelegate {
   onMessage(e: MessageEvent<any>): void;
   onClose(e: Event): void;
 }
-class WSWrapper extends RefCounted {
+export class WSWrapper extends RefCounted {
   openThrottle: Throttle = new Throttle('open');
   state: string = 'idle';
   ws: WebSocket | null = null;
@@ -231,7 +231,7 @@ class WSWrapper extends RefCounted {
 const rpcConnClosedMessage = 'RPCConn closed';
 
 type GetStatsResp = {overrunBytes: bigint, sentBytes: bigint, backpressuredNsec: bigint};
-class RPCConn extends RefCounted implements WSWrapperDelegate {
+export class RPCConn extends RefCounted implements WSWrapperDelegate {
   readonly rpcThrottle = new Throttle('rpc');
   helloInfoPR: PromiseWithResolvers<HelloModInfo>;
   isOpenSig: Signal<boolean>;
@@ -388,7 +388,7 @@ interface SVGLineWithDTCache extends SVGLineElement, ElementDTCache {
 //interface SVGCircleWithDTCache extends SVGCircleElement, ElementDTCache
 
 
-abstract class DiagramThingKind<out Thing> {
+export abstract class DiagramThingKind<out Thing> {
   group: SVGGElement;
   elmsByPtr: Map<bigint, SVGElementWithDTCache> = new Map();
   genericElmsCount?: number;
@@ -396,7 +396,8 @@ abstract class DiagramThingKind<out Thing> {
   constructor(public diagram: Diagram) {
     this.group = document.createElementNS(svgNS, 'g') as SVGGElement;
     this.group.setAttribute('kind', this.constructor.name);
-    diagram.svg.appendChild(this.group);
+    // constructor not run yet, so defer this:
+    queueMicrotask(() => diagram.svg.appendChild(this.group));
   }
   abstract getThingsFromFrame(): Iterable<Thing>;
   abstract getWorldID(thing: Thing): bigint;
@@ -544,7 +545,7 @@ abstract class DiagramThingKind<out Thing> {
   }
 }
 
-class DiagramHitboxes extends DiagramThingKind<[bigint, mmTypes.Hitbox]> {
+export class DiagramHitboxes extends DiagramThingKind<[bigint, mmTypes.Hitbox]> {
   getThingsFromFrame() {
     return this.diagram.curFrame!.hitboxes.entries();
   }
@@ -581,7 +582,7 @@ class DiagramHitboxes extends DiagramThingKind<[bigint, mmTypes.Hitbox]> {
   }
 }
 
-class DiagramNormalColliders extends DiagramThingKind<NormalCollider> {
+export class DiagramNormalColliders extends DiagramThingKind<NormalCollider> {
   getThingsFromFrame(): Iterable<NormalCollider> {
     return this.diagram.curFrame!.normalColliders;
   }
@@ -638,7 +639,7 @@ class DiagramNormalColliders extends DiagramThingKind<NormalCollider> {
   };
 }
 
-class DiagramScolColliders extends DiagramThingKind<ScolCollider> {
+export class DiagramScolColliders extends DiagramThingKind<ScolCollider> {
   getThingsFromFrame(): Iterable<ScolCollider> {
     return this.diagram.curFrame!.scolColliders;
   }
@@ -686,7 +687,7 @@ class DiagramScolColliders extends DiagramThingKind<ScolCollider> {
   }
 }
 
-class DiagramBGCollisionPoints extends DiagramThingKind<BgCollisionPointEvent> {
+export class DiagramBGCollisionPoints extends DiagramThingKind<BgCollisionPointEvent> {
   getThingsFromFrame() {
     return this.diagram.curFrame!.bgCollisionPointEvents;
   }
@@ -707,7 +708,7 @@ class DiagramBGCollisionPoints extends DiagramThingKind<BgCollisionPointEvent> {
   }
 }
 
-class DiagramBGCollisionTwoPoints extends DiagramThingKind<BgCollisionTwoPointEvent> {
+export class DiagramBGCollisionTwoPoints extends DiagramThingKind<BgCollisionTwoPointEvent> {
   getThingsFromFrame() {
     return this.diagram.curFrame!.bgCollisionTwoPointEvents;
   }
@@ -730,12 +731,12 @@ class DiagramBGCollisionTwoPoints extends DiagramThingKind<BgCollisionTwoPointEv
     );
   }
 }
-function timelineTime(): number {
+export function timelineTime(): number {
   const ret = document.timeline.currentTime;
   assert(typeof ret === 'number');
   return ret;
 }
-class Diagram extends RefCounted {
+export class Diagram extends RefCounted {
   lastRenderedFrame?: HoseFrame;
   zoomLevel = 1;
   panX = 0;
@@ -954,7 +955,7 @@ class Diagram extends RefCounted {
   }
 };
 
-class Scrubbable extends RefCounted {
+export class Scrubbable extends RefCounted {
   scrubber: HTMLInputElement;
   scrubberDisplay: HTMLDivElement;
   frameIdx = 0;
@@ -1028,7 +1029,7 @@ class Scrubbable extends RefCounted {
   }
 }
 
-function readableToArrayAsync<R>(readable: ReadableStream<R>): Promise<R[]> {
+export function readableToArrayAsync<R>(readable: ReadableStream<R>): Promise<R[]> {
   // This one-liner is enough in Chrome but not Safari for some reason:
   // return Array.fromAsync(readable);
 
@@ -1037,7 +1038,7 @@ function readableToArrayAsync<R>(readable: ReadableStream<R>): Promise<R[]> {
   return Array.fromAsync(ai) as Promise<R[]>; // XXX: is this right?
 }
 
-async function compressBufs(bufs: ArrayBuffer[]): Promise<string> {
+export async function compressBufs(bufs: ArrayBuffer[]): Promise<string> {
   let compression = new CompressionStream('gzip');
   let compressedBufs = readableToArrayAsync(compression.readable);
   let writer = compression.writable.getWriter();
@@ -1057,7 +1058,7 @@ async function compressBufs(bufs: ArrayBuffer[]): Promise<string> {
   return url;
 }
 
-async function decompressBuf(url: string): Promise<ArrayBuffer> {
+export async function decompressBuf(url: string): Promise<ArrayBuffer> {
   let buf = await (await fetch(url)).arrayBuffer();
   let decompression = new DecompressionStream('gzip');
   let decompressedBufs = readableToArrayAsync(decompression.readable);
@@ -1079,7 +1080,7 @@ async function decompressBuf(url: string): Promise<ArrayBuffer> {
   return total;
 }
 
-async function stringifyWithArrayBuffers(data: any): Promise<string> {
+export async function stringifyWithArrayBuffers(data: any): Promise<string> {
   let curOffset = 0;
   let bufs: ArrayBuffer[] = [];
   let bufToStr = new Map<ArrayBuffer, string>;
@@ -1099,7 +1100,7 @@ async function stringifyWithArrayBuffers(data: any): Promise<string> {
   return json + '\n' + await compressBufs(bufs);
 }
 
-async function parseWithArrayBuffers(jsonPlus: string): Promise<unknown> {
+export async function parseWithArrayBuffers(jsonPlus: string): Promise<unknown> {
   let [json, url] = jsonPlus.split('\n');
   let raw = await decompressBuf(url);
   let strToBuf = new Map;
@@ -1121,8 +1122,7 @@ async function parseWithArrayBuffers(jsonPlus: string): Promise<unknown> {
   });
 }
 
-
-type NormalCollider = {
+export type NormalCollider = {
   ptr: bigint,
   col: mmTypes.Collider,
   extPosCur: mmTypes.Point2D,
@@ -1134,7 +1134,7 @@ type NormalCollider = {
   worldID: bigint,
 };
 
-type ScolCollider = {
+export type ScolCollider = {
   ptr: bigint,
   scol: mmTypes.Scol,
   extPosCur: mmTypes.Point2D,
@@ -1143,14 +1143,14 @@ type ScolCollider = {
   rawData: ArrayBuffer,
 };
 
-type HitboxCollisionEvent = {
+export type HitboxCollisionEvent = {
   hb1?: mmTypes.Hitbox,
   hb2?: mmTypes.Hitbox,
   ret: bigint,
   worldID: bigint,
 };
 
-type BgCollisionPointEvent = {
+export type BgCollisionPointEvent = {
   worldID: bigint,
   xy: mmTypes.Point2D,
   enable1: bigint,
@@ -1159,7 +1159,7 @@ type BgCollisionPointEvent = {
   bic: mmTypes.CollisionBIC,
 };
 
-type BgCollisionTwoPointEvent = {
+export type BgCollisionTwoPointEvent = {
   worldID: bigint,
   xy1: mmTypes.Point2D,
   xy2: mmTypes.Point2D,
@@ -1171,12 +1171,12 @@ type BgCollisionTwoPointEvent = {
   bic?: mmTypes.CollisionBIC,
 };
 
-type SavedHoseFrame = {
+export type SavedHoseFrame = {
   number: number,
   relevantHoseMessages: ArrayBuffer[],
 };
 
-class HoseFrame {
+export class HoseFrame {
   readonly hitboxes = new Map<bigint, mmTypes.Hitbox>();
   relevantHoseMessages: ArrayBuffer[] = [];
   normalColliders: NormalCollider[] = [];
@@ -1226,12 +1226,12 @@ class HoseFrame {
   }
 };
 
-class HoseParser {
+export class HoseParser {
   savedFrames: HoseFrame[] = [];
   curFrame: HoseFrame = new HoseFrame(0);
   normalColliderMap: Map<bigint, NormalCollider> = new Map();
   scolColliderMap: Map<bigint, ScolCollider> = new Map();
-  tagStats: { [tag: string]: [bigint, number] } = {};
+  tagStats: { [tag: string]: [number, number] } = {};
   dontUpdateDiagram = false;
   constructor(public scrubbable: Scrubbable) {
   }
@@ -1240,8 +1240,8 @@ class HoseParser {
     let r = new Reader(buffer);
     let tag = r.read(Tag8);
 
-    this.tagStats[tag] ??= [0n, 0];
-    this.tagStats[tag][0] += r.size; // total length
+    this.tagStats[tag] ??= [0, 0];
+    this.tagStats[tag][0] += Number(r.size); // total length
     this.tagStats[tag][1]++; // message count
 
     let bufferToSave: ArrayBuffer | undefined = undefined;
@@ -1484,13 +1484,14 @@ abstract class BaseConns extends RefCounted {
       this.helloInfoPromise,
       this.stillAlivePR.promise,
     ]);
-    const buildId = helloInfo[0].buildId;
+    const buildId = helloInfo[1].buildId + '00000000000000000000000000000000';
     console.log(`buildId: ${buildId}`);
     const setOffsets = mmTypes.setOffsets[buildId];
     if (!setOffsets) {
+      console.log('wtf');
       throw new Error(`Unknown main buildId ${buildId}`);
     }
-    return;
+    setOffsets();
   }
 
   async saveRaw(nframes: number): Promise<Save> {
@@ -1509,7 +1510,7 @@ abstract class BaseConns extends RefCounted {
   }
 }
 
-function addStatsLine(text: string) {
+export function addStatsLine(text: string) {
   let div = document.createElement('div');
   div.textContent = text;
   let parent = downcast(HTMLElement, document.getElementById('stats'));
@@ -1519,7 +1520,7 @@ function addStatsLine(text: string) {
   }
 }
 
-class LiveConns extends BaseConns {
+export class LiveConns extends BaseConns {
   helloInfoPromise: Promise<HelloModInfo>;
   rpc: RPCConn;
   hose: HoseConn;
@@ -1577,7 +1578,7 @@ class LiveConns extends BaseConns {
 
   async doCheckboxes() {
     using scope = new RefCounted;
-    const checkboxes = Array.of(document.querySelectorAll('#controls input[type=checkbox]'))
+    const checkboxes = Array.from(document.querySelectorAll('#controls input[type=checkbox]'))
       .map(input => downcast(HTMLInputElement, input));
     const checkboxSigs: { [name: string]: Signal<boolean> } = {};
     for (const input of checkboxes) {
@@ -1610,7 +1611,7 @@ class LiveConns extends BaseConns {
   }
 }
 
-class LoadedConns extends BaseConns {
+export class LoadedConns extends BaseConns {
   helloInfoPR: PromiseWithResolvers<HelloModInfo>;
   helloInfoPromise: Promise<HelloModInfo>;
   loadStartTime: number;
@@ -1640,7 +1641,7 @@ class LoadedConns extends BaseConns {
 
 }
 
-function jsMemCallback() {
+export function jsMemCallback() {
   let text;
   try {
     let mem = (performance as any).memory.usedJSHeapSize / 1048576;
@@ -1654,7 +1655,7 @@ function jsMemCallback() {
 setInterval(jsMemCallback, 2000);
 jsMemCallback();
 
-class ButtonWrapper extends RefCounted {
+export class ButtonWrapper extends RefCounted {
   elm: HTMLButtonElement;
   clicks: Signal<number>;
   constructor(id: string, {enabled}: {enabled: SignalRO<boolean> | boolean | undefined}) {
@@ -1672,10 +1673,12 @@ class ButtonWrapper extends RefCounted {
   }
 }
 
-class UI extends RefCounted {
+export class UI extends RefCounted {
   notLoadingSig: SignalRO<boolean>;
+  connsSig: Signal<BaseConns>;
   constructor(connsSig: Signal<BaseConns>) {
     super();
+    this.connsSig = connsSig;
     this.notLoadingSig = this.use(
       connsSig.bind(conns =>
         !conns ? Signal.of(true) : conns.loadingSig.map(loading => !loading))
@@ -1691,14 +1694,14 @@ class UI extends RefCounted {
     this.use(this.use(new ButtonWrapper('live-button', {
       enabled: true,
     })).clicks.map(async () => {
-      g_connsSig.maybeCur?.unref();
-      g_connsSig.set(new LiveConns('ws://neb-solidus:8000'));
+      this.connsSig.maybeCur?.unref();
+      this.connsSig.set(new LiveConns('ws://neb-solidus:8000'));
     }));
 
     this.use(this.use(new ButtonWrapper('disconnect-button', {
       enabled: true,
     })).clicks.map(async () => {
-      g_connsSig.maybeCur?.unref();
+      this.connsSig.maybeCur?.unref();
       // XXX this is bad, come up with a better way to disconnect
     }));
 
@@ -1712,11 +1715,7 @@ class UI extends RefCounted {
   }
 }
 
-using g_connsSig = Signal.withoutInitialValue<BaseConns>().used();
-var g_ui = new UI(g_connsSig);
-
-
-function loadByHash() {
+export function loadByHash() {
   if (location.hash.length < 2) {
     return;
   }
@@ -1728,5 +1727,14 @@ function loadByHash() {
     downcast(HTMLButtonElement, document.getElementById('load-button')).click();
   }
 }
-loadByHash();
 
+export class Global extends RefCounted {
+  connsSig: Signal<BaseConns>;
+  ui: UI;
+  constructor() {
+    super();
+    this.connsSig = this.use(Signal.withoutInitialValue<BaseConns>());
+    this.ui = new UI(this.connsSig);
+    loadByHash();
+  }
+}

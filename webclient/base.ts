@@ -33,7 +33,8 @@ export function unwrap<T>(val: T | undefined): T {
 */
 export function downcast(ty: any, val: unknown): InstanceType<typeof ty> {
   if (!(val instanceof ty)) {
-    throw new Error('unexpectedly undefined');
+    console.error('downcast fail:', ty, val);
+    throw new Error('downcast fail');
   }
   return val;
 }

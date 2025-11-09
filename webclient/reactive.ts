@@ -1,9 +1,7 @@
 import { assert, yieldMe } from './base.js';
 
 const refCountedFinalizationRegistry = new FinalizationRegistry<RefCount>((refCount) => {
-  if (refCount.value) {
-    throw new Error('RefCounted destroyed without being disposed');
-  }
+  refCount.finalize();
 });
 
 export function ref<T>(obj: T): T {
@@ -35,6 +33,12 @@ let ALL_REFCOUNTED_OBJECTS: Set<RefCounted> | undefined = undefined;
 
 class RefCount {
   value: number = 1;
+  constructor(public objectKind: any) {}
+  finalize() {
+    if (this.value) {
+      throw new Error('RefCounted destroyed without being disposed');
+    }
+  }
 }
 export class RefCounted {
   readonly refCount: RefCount;
@@ -59,7 +63,7 @@ export class RefCounted {
     });
   };
   constructor() {
-    this.refCount = new RefCount;
+    this.refCount = new RefCount(this.constructor);
     refCountedFinalizationRegistry.register(this, this.refCount);
     if (ALL_REFCOUNTED_OBJECTS !== undefined) {
       // for testing

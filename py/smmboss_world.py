@@ -406,6 +406,7 @@ class Actor(ActorBase):
     angles25c = prop(0x25c - _ofs, fixed_array(Angle, 3))
     angle = prop(0x268 - _ofs, Angle)
     probably_facing_direction = prop(0x26c - _ofs, u32)
+    push = prop(0x254 - _ofs, Point2D)
     source_xvel = prop(0x274 - _ofs, f32)
     source_xvel_goal = prop(0x278 - _ofs, f32)
     gravity = prop(0x280 - _ofs, f32)

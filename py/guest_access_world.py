@@ -438,8 +438,7 @@ class RegsWrap:
 class Emu:
     pass
 
-# barebones (for now)
-def emulate_call(pc, verbose=False, slide=0, mm=None, stubbed_functions=None, **kwargs):
+def emulate_call(pc, verbose=False, slide=0, mm=None, stubbed_functions=None, writes={}, **kwargs):
     if mm is not None:
         slide = mm.slide
         unslide = mm.unslide
@@ -457,7 +456,8 @@ def emulate_call(pc, verbose=False, slide=0, mm=None, stubbed_functions=None, **
     fake_guest = CachingGuest(GuestPlusFakeStack(guest), imaginary_mode=True)
     got_exc = False
 
-    fake_mem = {}
+    for waddr, wdata in writes.items():
+        fake_guest.write(waddr, wdata)
 
     def mmio_read_cb(uc, offset, size, data):
         nonlocal got_exc

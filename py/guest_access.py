@@ -51,6 +51,8 @@ class Guest:
     read16, write16 = _xreadwrite('<H')
     read32, write32 = _xreadwrite('<I')
     read64, write64 = _xreadwrite('<Q')
+    readf32, writef32 = _xreadwrite('<f')
+    readf64, writef64 = _xreadwrite('<d')
 
     def read_cstr(self, addr):
         data = b''
@@ -147,6 +149,19 @@ class CachingGuest(Guest):
 
     def par_map(self, *args, **kwargs):
         return self.backing.par_map(*args, **kwargs)
+
+class FileGuest(Guest):
+    def __init__(self, filename, base_addr):
+        self.fp = open(filename, 'rb')
+        self.base_addr = base_addr
+    def try_read(self, addr, size):
+        offset = addr - self.base_addr
+        if offset < 0:
+            return b''
+        self.fp.seek(offset)
+        return self.fp.read(size)
+    def try_write(self, addr, size):
+        raise Exception('FileGuest is read-only')
 
 class PersistentCache:
     def __init__(self, path, build_id):

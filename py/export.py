@@ -1,10 +1,11 @@
 import re
 import json
+import enum
 from pymonad.maybe import Just, Nothing
 import smmboss
 import guest_access
 
-def mget(dict, key):
+def maybe_get(dict, key):
     try:
         return Just(dict[key])
     except KeyError:
@@ -19,7 +20,7 @@ def mrotate_dict(dict):
     '''see assert below for what this does'''
     return {
         inner_key: {
-            outer_key: mget(inner, inner_key)
+            outer_key: maybe_get(inner, inner_key)
             for (outer_key, inner) in dict.items()
         }
         for inner_key in unique_inner_items(dict.values())
@@ -109,6 +110,14 @@ def json_info_for_build(build_id, classes_to_export):
                 'is_float': isinstance(cls, world.GuestPrimPtr) and cls.code in 'fd',
                 'is_integer': isinstance(cls, world.GuestPrimPtr) and cls.code not in 'fd',
             }
+        elif issubclass(cls, enum.Enum):
+            # For now this is not a GuestPtr at all, and the JS type is not either:
+            assert sizeof is None
+
+            cls_info = {
+                'kind': 'enum',
+                'enumerators': [(name, val.value) for (name, val) in cls.__members__.items()],
+            }
         else:
             raise Exception(f"? {cls}")
         cls_infos[cls.__name__] = cls_info
@@ -136,6 +145,7 @@ ROOT_CLASSES = [
     'ColliderSegment',
     'Scol',
     'CollisionPoint',
+    'Direction',
 ]
 
 def json_info():
@@ -259,6 +269,13 @@ def write_typescript(fp):
                 p(f'}}')
             case 'primitive':
                 pass
+            case 'enum':
+                p(f'export const enum {munged_cls} {{')
+                for name, val in cls_info['enumerators']:
+                    p(f'  {name} = {val},')
+                p(f'}}')
+                
+                pass
             case 'fixed_array':
                 emit_class(cls_info['val_ptr_cls'])
                 munged_item = munge(cls_info['val_ptr_cls'])
@@ -317,16 +334,17 @@ using BuildId = std::array<uint8_t, 16>;
     p('extern uintptr_t get_addr_impl(const uintptr_t (&by_ver)[VER_COUNT], const char *name);')
     p()
     yaml_data = {ver: smmboss.get_addrs_yaml()[build_id_for_version(ver)] for ver in RELEVANT_VERSIONS}
-    addrs = rotate(rotate(yaml_data)['addrs'], default=None)
+    addrs_by_ver = {ver: ver_data['addrs'] for (ver, ver_data) in yaml_data.items()}
+    addrs = mrotate_dict(addrs_by_ver)
     p('struct mm_addrs {')
     for name, addrs_by_ver in addrs.items():
         p(f'    static inline uintptr_t {name}() {{')
         p('        static const uintptr_t by_ver[VER_COUNT] = {')
         for ver, addr in addrs_by_ver.items():
-            if addr is None:
+            if addr.is_nothing():
                 addr_str = 'MISSING_ADDR'
             else:
-                addr_str = f'{addr:#x}'
+                addr_str = f'{addr.value:#x}'
             p(f'            [VER_{ver}] = {addr_str},')
         p('        };')
         p(f'        return get_addr_impl(by_ver, "{name}");')

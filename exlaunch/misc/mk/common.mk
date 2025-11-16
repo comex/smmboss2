@@ -171,12 +171,12 @@ $(OFILES_SRC)	: $(HFILES_BIN)
 
 # added by comex
 $(DEPSDIR)/generated.hpp:
-	uv run $(TOPDIR)/../py/export.py cpp_header $(DEPSDIR)/generated.hpp $(DEPSDIR)/generated.hpp.d
+	uv run --project $(TOPDIR)/../py $(TOPDIR)/../py/export.py cpp_header $(DEPSDIR)/generated.hpp $(DEPSDIR)/generated.hpp.d
 -include $(DEPSDIR)/generated.hpp.d
 main.o: $(DEPSDIR)/generated.hpp
 
 $(DEPSDIR)/export.json:
-	uv run $(TOPDIR)/../py/export.py json $(DEPSDIR)/export.json $(DEPSDIR)/export.json.d
+	uv run --project $(TOPDIR)/../py $(TOPDIR)/../py/export.py json $(DEPSDIR)/export.json $(DEPSDIR)/export.json.d
 -include $(DEPSDIR)/export.json.d
 all: $(DEPSDIR)/export.json
 

@@ -38,6 +38,16 @@ export function downcast(ty: any, val: unknown): InstanceType<typeof ty> {
   }
   return val;
 }
+export function downcastString(val: unknown): string {
+  if (typeof val == 'string') {
+    return val;
+  }
+  if (val instanceof String) {
+    return ''+val;
+  }
+  console.error('downcastString fail:', val);
+  throw new Error('downcastString fail');
+}
 export function sleep(n: number): Promise<void> {
   let { promise, resolve, reject } = Promise.withResolvers<void>();
   setTimeout(resolve, n);

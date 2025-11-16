@@ -1,4 +1,5 @@
 from pathlib import Path
+from enum import IntEnum
 import math
 import smmboss, guest_access
 
@@ -34,10 +35,10 @@ class Rect(GuestStruct):
         return (self.max.x - self.min.x, self.max.y - self.min.y)
     full_repr = True
 
-class XXY(GuestStruct):
-    x_left = prop(0, f32)
-    x_right = prop(4, f32)
-    y = prop(8, f32)
+class ScolSeg(GuestStruct):
+    perpendicular_min = prop(0, f32)
+    perpendicular_max = prop(4, f32)
+    parallel_dist = prop(8, f32)
     sizeof_star = 12
     full_repr = True
 
@@ -481,6 +482,22 @@ class ScolResultList(fixed_array(ScolResult, 7)):
     def should_dump_ith(self, i):
         return self[i].valid
 
+class Direction(IntEnum):
+    RIGHT = 0
+    LEFT = 1
+    TOP = 2
+    BOTTOM = 3
+
+#@functools.lru_cache(None)
+# def array_by_direction(ptr_ty, count):
+#     '''An array indexed by Direction.'''
+#     class ThisArray(fixed_array(ptr_ty, count)):
+#         pass
+#     ThisArray.__name__ = f'array_by_direction({ptr_ty.__name__}, {count})'
+#     return ThisArray
+# XXX: for now let's just make it documentation only
+array_by_direction = fixed_array
+
 class Scol(GuestStruct):
     vt = prop(0, GuestPtrPtr)
     h60 = prop(0x28, lambda: ColliderListNodeOuter, dump=False)
@@ -494,11 +511,11 @@ class Scol(GuestStruct):
     owners_pos_old = prop(0x198, Point2D)
     owners_relatedtopos = prop(0x1a0, u8)
 
-    xxy_ptrs_cur = prop(0x1a8, fixed_array(ptr_to(XXY), 4))
-    xxy_ptrs_old = prop(0x1c8, fixed_array(ptr_to(XXY), 4))
-    xxys_storage = prop(0x1e8, fixed_array(XXY, 8), dump=False)
-    pre_xxy_ptrs = prop(0x248, fixed_array(ptr_to(XXY), 4)) # copied in from p1250 or elsewhere; copied to xxy_ptrs_cur/old
-    pre_xxys_storage = prop(0x268, fixed_array(XXY, 4), dump=False)
+    scolseg_ptrs_cur = prop(0x1a8, fixed_array(ptr_to(ScolSeg), 4))
+    scolseg_ptrs_old = prop(0x1c8, fixed_array(ptr_to(ScolSeg), 4))
+    scolsegs_storage = prop(0x1e8, fixed_array(ScolSeg, 8), dump=False)
+    pre_scolseg_ptrs = prop(0x248, fixed_array(ptr_to(ScolSeg), 4)) # copied in from p1250 or elsewhere; copied to scolseg_ptrs_cur/old
+    pre_scolsegs_storage = prop(0x268, fixed_array(ScolSeg, 4), dump=False)
     owner_idbits = prop(0x298, u64)
 
     ptr_owners_pos_cur = prop(0x2a0, ptr_to(Point2D))
@@ -509,7 +526,8 @@ class Scol(GuestStruct):
     bitmask_cur = prop(0x2b8, fixed_array(u32, 2))
     bitmask_old = prop(0x2c0, fixed_array(u32, 2)) # copied from cur
 
-    rects = prop(0x2c8, fixed_array(Rect, 4))
+    bboxes = prop(0x2c8, array_by_direction(Rect, 4))
+
     owners_pos = prop(0x308, Point2D)
     clamped_delta = prop(0x310, Point2D)
     desired_delta = prop(0x318, Point2D)
@@ -517,28 +535,22 @@ class Scol(GuestStruct):
 
     something_from_collider = prop(0x328, u32)
 
-    actor_idbits = prop(0x330, fixed_array(u64, 4))
+    actor_idbits = prop(0x330, array_by_direction(u64, 4))
 
-    xxys_360_cur = prop(0x360, fixed_array(XXY, 2))
-    xxys_360_old = prop(0x370, fixed_array(XXY, 2)) # copied from cur
-    sees_valid_cur = prop(0x390, fixed_array(u8, 2))
-    sees_valid_old = prop(0x392, fixed_array(u8, 2)) # copied from cur
-    sees_by_point_idx = prop(0x394, fixed_array(ScolSee, 4))
-    result_list_idxs_cur = prop(0x3c4, fixed_array(u32, 4))
-    result_list_idxs_old = prop(0x3d4, fixed_array(u32, 4)) # copied from cur
+    override_vertical_segs_cur = prop(0x360, array_by_direction(ScolSeg, 2))
+    override_vertical_segs_old = prop(0x370, array_by_direction(ScolSeg, 2)) # copied from cur
 
+    should_override_vertical_segs_cur = prop(0x390, array_by_direction(u8, 2))
+    should_override_vertical_segs_old = prop(0x392, array_by_direction(u8, 2)) # copied from cur
+
+    sees = prop(0x394, array_by_direction(ScolSee, 4))
+
+    result_list_idxs_cur = prop(0x3c4, array_by_direction(u32, 4))
+    result_list_idxs_old = prop(0x3d4, array_by_direction(u32, 4)) # copied from cur
+
+    # This is the only one of these arrays _not_ indexed by direction:
     result_lists_cur = prop(0x3e8, fixed_array(ScolResultList, 4))
     result_lists_old = prop(0xa08, fixed_array(ScolResultList, 4)) # copied from cur
-
-    # these are all associated:
-    # xxy_ptrs_cur[i]
-    # xxy_ptrs_old[i]
-    # sees_by_point_idx[i]
-    # sees_valid_cur[i] (only for 0 and 1)
-    # result_lists_cur[i][result_list_idxs_cur[i]]
-    # actor_idbits[i]
-    # ridden_by_scol_lists[(2,3,1,0)[i]]
-
 
 class ScolWrap(GuestStruct):
     scol = prop(0x10, Scol)

@@ -1,5 +1,5 @@
 import * as mmTypes from './build/mm_types.js';
-import { yieldMe, hexbuf, downcast, sleep, assert, hex } from './base.js';
+import { yieldMe, hexbuf, downcast, downcastString, sleep, assert, hex } from './base.js';
 import { Type, u8, u32, u64, s8, Tag8, Pointer, DataViewWithAddr } from './types_base.js';
 import { Signal, SignalRO, RefCounted } from './reactive.js';
 
@@ -639,6 +639,32 @@ export class DiagramNormalColliders extends DiagramThingKind<NormalCollider> {
   };
 }
 
+const dirToSegCoordRotation: number[] = [
+  /*RIGHT*/ 0,
+  /*LEFT*/ Math.PI,
+  /*TOP*/ Math.PI / 2,
+  /*BOTTOM*/ -Math.PI / 2,
+];
+
+class Point {
+  constructor(public readonly x: number, public readonly y: number) {}
+  add(other: Point): Point {
+    return new Point(this.x + other.x, this.y + other.y);
+  }
+  rotate(angle: number): Point {
+    const cosAngle = Math.cos(angle);
+    const sinAngle = Math.sin(angle);
+    const x = this.x, y = this.y;
+    return new Point(
+      x * cosAngle - y * sinAngle,
+      x * sinAngle + y * cosAngle,
+    );
+  }
+  toString() {
+    return `Point(${this.x}, ${this.y})`;
+  }
+};
+
 export class DiagramScolColliders extends DiagramThingKind<ScolCollider> {
   getThingsFromFrame(): Iterable<ScolCollider> {
     return this.diagram.curFrame!.scolColliders;
@@ -649,31 +675,55 @@ export class DiagramScolColliders extends DiagramThingKind<ScolCollider> {
   renderThing(data: ScolCollider): void {
     let dia = this.diagram;
     let scol = data.scol;
+    const posBase = new Point(data.extPosCur.x, data.extPosCur.y);
     if (1) {
-      for (let i = 0; i < 4; i++) {
-        let fakePtr = data.ptr + BigInt(i);
-        let xxy = scol.xxy_ptrs_cur.at(i).pointee;
-        if (xxy === null) {
+      for (let dir: mmTypes.Direction = 0; dir < 4; dir++) {
+        const fakePtr = data.ptr + BigInt(dir);
+        const override = dir >= 2 ? false : (scol.should_override_vertical_segs_cur.at(dir) != 0n);
+        if (override) {
+          alert('override');
+        }
+        const seg = scol.scolseg_ptrs_cur.at(dir).pointee;
+        if (seg === null) {
           // TODO (2025-09-28): not sure what null here means, might be I
           // forgot something, but I'm getting it
           continue;
         }
 
+        const perpMin = seg.perpendicular_min, perpMax = seg.perpendicular_max;
+        assert(perpMin <= perpMax);
+        const perpMid = (perpMin + perpMax) / 2;
+        const perpRadius = (perpMax - perpMin) / 2;
+
+        const see = scol.sees.at(dir);
+        
+        let a: Point; let b: Point;
+        if (dir >= 2) {
+          a = new Point(posBase.x + perpMin, posBase.y + seg.parallel_dist);
+          b = new Point(posBase.x + perpMax, posBase.y + seg.parallel_dist);
+        } else {
+          a = new Point(posBase.x + seg.parallel_dist, posBase.y + perpMin);
+          b = new Point(posBase.x + seg.parallel_dist, posBase.y + perpMax);
+        }
+
+        //const rect = scol.bboxes.at(dir);
+        //console.log(`dir:${dir}  a:${a.x},${a.y} b:${b.x},${b.y} rmin:${rect.min.x},${rect.min.y} rmax:${rect.max.x},${rect.max.y}`);
+        console.log('**', see.f4 & 0x100n);
+
         this.line(
           fakePtr,
 
-          xxy.x_left + data.extPosCur.x,
-          xxy.y + data.extPosCur.y,
-          xxy.x_right + data.extPosCur.x,
-          xxy.y + data.extPosCur.y,
+          a.x, a.y,
+          b.x, b.y,
 
           {
-            stroke: ['pink', 'green', 'blue', 'orange'][i],
+            stroke: ['pink', 'green', 'blue', 'orange'][dir],
             strokeWidth: 4,
           }
         );
       }
     }
+    /*
     for (let i = 0; i < 4; i++) {
       let resultListIdx = scol.result_list_idxs_cur.at(i);
       let resultList = scol.result_lists_cur.at(i);
@@ -684,6 +734,7 @@ export class DiagramScolColliders extends DiagramThingKind<ScolCollider> {
       }
 
     }
+    */
   }
 }
 
@@ -958,11 +1009,15 @@ export class Diagram extends RefCounted {
 export class Scrubbable extends RefCounted {
   scrubber: HTMLInputElement;
   scrubberDisplay: HTMLDivElement;
-  frameIdx = 0;
-  framesLength = 0;
-  frames: HoseFrame[] = undefined as any;
-  constructor(public diagram: Diagram, scrubberRow: HTMLElement) {
+  desiredFrameIdx: Signal<number>;
+  displayedFrameIdx: Signal<number | undefined>;
+  frames?: HoseFrame[] = undefined;
+  framesLength: Signal<number>; // set from outside, many times
+  constructor(scrubberRow: HTMLElement, initialFrameIdx: number) {
     super();
+    this.desiredFrameIdx = this.use(Signal.create(initialFrameIdx));
+    this.displayedFrameIdx = this.use(Signal.create<number | undefined>(undefined));
+    this.framesLength = this.use(Signal.withoutInitialValue<number>());
     this.scrubber = downcast(HTMLInputElement, scrubberRow.querySelector('#scrubber'));
 
     this.scrubberDisplay = downcast(HTMLDivElement, scrubberRow.querySelector('#scrubber-display'));
@@ -976,13 +1031,12 @@ export class Scrubbable extends RefCounted {
       this.scrubber, 'wheel', this.onWheel.bind(this) as EventListener,
       {passive: false});
 
-    this.updateFrames([]);
+    this.registerUpdateRender();
+    this.registerUpdatePos();
+    this.registerUpdateScrubber();
   }
   onChangeOrInput() {
-    let oldFrameIdx = this.frameIdx;
-    this.frameIdx = this.frames.length <= 1 ? 0 : parseInt(this.scrubber.value);
-    this.framesLength = this.frames.length;
-    this.updateRender(this.frameIdx);
+    this.desiredFrameIdx.set(parseInt(this.scrubber.value) ?? 0);
   }
   onWheel(e: WheelEvent) {
     if (e.deltaX == 0) {
@@ -991,41 +1045,65 @@ export class Scrubbable extends RefCounted {
     e.preventDefault();
     console.log(e);
   }
-  updateRender(oldFrameIdx: number) {
-    let text;
-    if (this.framesLength == 0) {
-      text = '0/0';
-    } else {
-      if (this.frameIdx !== oldFrameIdx) {
-        this.diagram.renderFrame(this.frames[this.frameIdx]);
+  registerUpdateRender() {
+    using combined = Signal.combine({
+      desiredFrameIdx: this.desiredFrameIdx,
+      displayedFrameIdx: this.displayedFrameIdx,
+      framesLength: this.framesLength,
+    }).used();
+    this.use(combined.map((x) => {
+      if (x.desiredFrameIdx === x.displayedFrameIdx) {
+        return;
       }
-      text = `${this.frameIdx + 1}/${this.framesLength}`;
-    }
-    this.scrubberDisplay.textContent = text;
+      if (x.desiredFrameIdx < x.framesLength) {
+        this.displayedFrameIdx.set(x.desiredFrameIdx);
+      }
+    }));
   }
-  updateFrames(frames: HoseFrame[]) {
-    if (this.isDead()) {
-      return;
-    }
-    let oldFrameIdx = this.frameIdx;
-    if (this.frameIdx >= this.framesLength - 1) {
-      this.frameIdx = frames.length - 1;
-    }
-    this.frames = frames;
-    this.framesLength = frames.length;
-    if (frames.length <= 1) {
-      // since min=max=value doesn't show as filled, fake it
-      this.scrubber.min = '-1';
-      this.scrubber.max = '0';
-      this.scrubber.value = '0';
-      this.scrubber.disabled = true;
-    } else {
-      this.scrubber.min = '0';
-      this.scrubber.max = ''+(frames.length - 1);
-      this.scrubber.value = ''+(this.frameIdx);
-      this.scrubber.disabled = false;
-    }
-    this.updateRender(oldFrameIdx);
+  registerUpdatePos() {
+    using combined = Signal.combine({
+      desiredFrameIdx: this.desiredFrameIdx,
+      framesLength: this.framesLength,
+    }).used();
+    let oldFramesLength: number | undefined = undefined;
+    this.use(combined.map((x) => {
+      let sticky = oldFramesLength !== undefined &&
+        x.desiredFrameIdx === oldFramesLength - 1 &&
+        x.framesLength > oldFramesLength;
+      oldFramesLength = x.framesLength;
+      if (sticky) {
+        this.desiredFrameIdx.set(x.framesLength - 1);
+      }
+    }));
+  }
+  registerUpdateScrubber() {
+    using combined = Signal.combine({
+      displayedFrameIdx: this.displayedFrameIdx,
+      framesLength: this.framesLength,
+    }).used();
+    this.use(combined.map((x) => {
+      if (x.framesLength <= 1) {
+        // since min=max=value doesn't show as filled, fake it
+        this.scrubber.min = '-1';
+        this.scrubber.max = '0';
+        this.scrubber.value = '0';
+        this.scrubber.disabled = true;
+      } else {
+        this.scrubber.min = '0';
+        this.scrubber.max = ''+(x.framesLength - 1);
+        this.scrubber.value = ''+(x.displayedFrameIdx);
+        this.scrubber.disabled = false;
+      }
+      let text: string;
+      if (x.framesLength == 0) {
+        text = '0/0';
+      } else if (x.displayedFrameIdx === undefined) {
+        return;
+      } else {
+        text = `${x.displayedFrameIdx + 1}/${x.framesLength}`;
+      }
+      this.scrubberDisplay.textContent = text;
+    }));
   }
 }
 
@@ -1050,7 +1128,7 @@ export async function compressBufs(bufs: ArrayBuffer[]): Promise<string> {
   let file = new Blob(cb);
   let url = await new Promise<string>((resolve, reject) => {
     const reader = Object.assign(new FileReader(), {
-      onload: () => resolve(downcast(String, reader.result)),
+      onload: () => resolve(downcastString(reader.result)),
       onerror: () => reject(reader.error),
     });
     reader.readAsDataURL(file);
@@ -1127,7 +1205,7 @@ export type NormalCollider = {
   col: mmTypes.Collider,
   extPosCur: mmTypes.Point2D,
   extPosOld: mmTypes.Point2D,
-  firstSeenFrameNumber: number,
+ firstSeenFrameNumber: number,
   segmentsCur: mmTypes.ColliderSegment[],
   segmentsOld: mmTypes.ColliderSegment[],
   rawData: ArrayBuffer,
@@ -1217,23 +1295,27 @@ export class HoseFrame {
   }
 
   static async loadFramesInto(frames: SavedHoseFrame[], hoseParser: HoseParser) {
+    hoseParser.currentlyInBatchLoad = true;
     for (let [i, frame] of frames.entries()) {
-      hoseParser.dontUpdateDiagram = i != frames.length - 1;
       HoseFrame.loadInto(frame, hoseParser);
       await yieldMe();
     }
+    hoseParser.currentlyInBatchLoad = false;
     hoseParser.finalizeFrame();
   }
 };
 
-export class HoseParser {
+export class HoseParser extends RefCounted {
   savedFrames: HoseFrame[] = [];
+  savedFramesLength: Signal<number>;
   curFrame: HoseFrame = new HoseFrame(0);
   normalColliderMap: Map<bigint, NormalCollider> = new Map();
   scolColliderMap: Map<bigint, ScolCollider> = new Map();
   tagStats: { [tag: string]: [number, number] } = {};
-  dontUpdateDiagram = false;
-  constructor(public scrubbable: Scrubbable) {
+  currentlyInBatchLoad = false;
+  constructor() {
+    super();
+    this.savedFramesLength = this.use(Signal.create(this.savedFrames.length));
   }
   parse(buffer: ArrayBuffer): string {
     assert(buffer instanceof ArrayBuffer);
@@ -1308,8 +1390,9 @@ export class HoseParser {
 
     let oldFrame = this.curFrame;
     this.savedFrames.push(oldFrame);
-    if (!this.dontUpdateDiagram) {
-      this.scrubbable.updateFrames(this.savedFrames);
+    if (!this.currentlyInBatchLoad) {
+      // while loading, don't render every frame as it's loaded
+      this.savedFramesLength.set(this.savedFrames.length);
     }
     this.curFrame = new HoseFrame(oldFrame.number + 1);
   }
@@ -1457,24 +1540,32 @@ abstract class BaseConns extends RefCounted {
   scrubbable?: Scrubbable;
   _hoseParser?: HoseParser;
   loadingSig: Signal<boolean>;
-  constructor(hash: string) {
+  constructor(initialFrameIdx: number) {
     super();
-    location.hash = hash;
-    this.hoseParserPromise = this.doHoseParser();
+    this.hoseParserPromise = this.doHoseParser(initialFrameIdx);
     this.mmTypesPromise = this.doMMTypes();
     this.stillAlivePR = this.useRejectable(Promise.withResolvers());
     this.loadingSig = this.use(Signal.create(true));
   }
 
-  async doHoseParser(): Promise<HoseParser> {
+  async doHoseParser(initialFrameIdx: number): Promise<HoseParser> {
     await yieldMe();
     await this.mmTypesPromise;
-    let diagram = this.use(new Diagram(downcast(SVGSVGElement, document.getElementById('diagram'))));
-    this.diagram = diagram; // mostly for debugging
-    let scrubbable = this.use(new Scrubbable(diagram, downcast(HTMLElement, document.getElementById('scrubber-row'))));
-    this.scrubbable = scrubbable; // ditto
-    let parser = new HoseParser(scrubbable);
-    this._hoseParser = parser; // ditto
+    this.diagram = this.use(new Diagram(downcast(SVGSVGElement, document.getElementById('diagram'))));
+    this.scrubbable = this.use(new Scrubbable(
+      downcast(HTMLElement, document.getElementById('scrubber-row')),
+      initialFrameIdx
+    ));
+    let parser = this.use(new HoseParser());
+    this._hoseParser = parser; // mostly for debugging
+    this.use(parser.savedFramesLength.map((length) => {
+      this.scrubbable!.framesLength.set(length);
+    }));
+    this.use(this.scrubbable.displayedFrameIdx.map((frameIdx) => {
+      if (frameIdx !== undefined) {
+        this.diagram!.renderFrame(parser.savedFrames[frameIdx]);
+      }
+    }));
     return parser;
   }
 
@@ -1522,26 +1613,32 @@ export function addStatsLine(text: string) {
 
 export class LiveConns extends BaseConns {
   helloInfoPromise: Promise<HelloModInfo>;
-  rpc: RPCConn;
-  hose: HoseConn;
+  rpc?: RPCConn; // manually unreffed
+  hose?: HoseConn; // manually unreffed
   constructor(public baseURL: string) {
-    super('live');
+    super(/*initialFrameIdx*/ 0);
+    location.hash = 'live';
 
-    this.rpc = this.use(new RPCConn(baseURL));
+    this.rpc = new RPCConn(baseURL);
     this.helloInfoPromise = this.rpc.helloInfoPR.promise;
 
-    this.hose = this.use(new HoseConn(baseURL, this.hoseParserPromise));
+    this.hose = new HoseConn(baseURL, this.hoseParserPromise);
 
     downcast(HTMLElement, document.getElementById('controls-left')).removeAttribute('inert');
 
-    /*this.lifecycle.pushCatchKill*/(this.doStats());
-    /*this.lifecycle.pushCatchKill*/(this.doCheckboxes());
+    this.doStats();
+    this.doCheckboxes();
 
     this.loadingSig.set(false);
   }
-  async doStats() {
+  override _destructor() {
+    super._destructor();
+    this.rpc?.unref();
+    this.hose?.unref();
+  }
+  async doStats(): Promise<void> {
     let lastFrameNum = 0;
-    while (!this.isDead()) {
+    while (!this.isDead() && this.rpc !== undefined) {
       if (this.rpc.isOpenSig.maybeCur) {
         let stats = await this.rpc.reqGetStats();
         let hoseParser = await this.hoseParserPromise;
@@ -1559,7 +1656,6 @@ export class LiveConns extends BaseConns {
   async updateFlags(vals: { [_: string]: boolean }): Promise<void> {
     let flags: [string, bigint][] = [
       ['controls-backpressure', 1n],
-      ['controls-send-coll-stuff', 2n], // XXX
       ['controls-bg-events', 4n],
       ['controls-pause', 8n],
       ['controls-send-coll-stuff', 0x10n],
@@ -1573,10 +1669,10 @@ export class LiveConns extends BaseConns {
         setFlagVals |= flagVal;
       }
     }
-    await this.rpc.reqSetFlags(allFlagVals & ~setFlagVals, setFlagVals);
+    await this.rpc?.reqSetFlags(allFlagVals & ~setFlagVals, setFlagVals);
   }
 
-  async doCheckboxes() {
+  doCheckboxes(): void {
     using scope = new RefCounted;
     const checkboxes = Array.from(document.querySelectorAll('#controls input[type=checkbox]'))
       .map(input => downcast(HTMLInputElement, input));
@@ -1595,13 +1691,13 @@ export class LiveConns extends BaseConns {
     using lastSetCheckboxValsSig = Signal.create('').used();
     using combined2 = Signal.combine({
       checkboxVals: checkboxSig,
-      isOpen: this.rpc.isOpenSig,
+      isOpen: this.rpc!.isOpenSig,
       lastSetCheckboxVals: lastSetCheckboxValsSig,
     }).used();
     let lastSetCheckboxVals = '';
     this.use(combined2.map(res => {
       let checkboxValsStr;
-      if (res.isOpen && (checkboxValsStr = res.checkboxVals.toString()) != res.lastSetCheckboxVals) {
+      if (res.isOpen && (checkboxValsStr = JSON.stringify(res.checkboxVals)) != res.lastSetCheckboxVals) {
         (async () => {
           await this.updateFlags(res.checkboxVals);
           lastSetCheckboxValsSig.set(checkboxValsStr);
@@ -1615,8 +1711,8 @@ export class LoadedConns extends BaseConns {
   helloInfoPR: PromiseWithResolvers<HelloModInfo>;
   helloInfoPromise: Promise<HelloModInfo>;
   loadStartTime: number;
-  constructor(savedText: string) {
-    super('loaded');
+  constructor(savedText: string, initialFrameIdx: number) {
+    super(initialFrameIdx);
     this.helloInfoPR = this.useRejectable(Promise.withResolvers());
     this.helloInfoPromise = this.helloInfoPR.promise;
 
@@ -1632,6 +1728,11 @@ export class LoadedConns extends BaseConns {
     let loadTime = new Date().getTime() - this.loadStartTime;
     addStatsLine(`loaded in ${loadTime}ms.`);
     this.loadingSig.set(false);
+    this.use(this.scrubbable!.displayedFrameIdx.map((frameIdx) => {
+      if (frameIdx !== undefined) {
+        location.hash = `loaded/${frameIdx + 1}`;
+      }
+    }));
   }
   async loadRaw({frames, helloInfo}: Save) {
     this.helloInfoPR.resolve(readHelloModInfo(new Reader(helloInfo)));
@@ -1685,24 +1786,29 @@ export class UI extends RefCounted {
     );
 
     this.use(this.use(new ButtonWrapper('load-button', {
-      enabled: this.use(Signal.of(true)),//this.notLoadingSig,
+      enabled: this.use(Signal.of(true)),//this.notLoadingSig, XXX
     })).clicks.map(() => {
-      connsSig.maybeCur?.unref();
-      connsSig.set(new LoadedConns(localStorage.zw));
+      using conns = new LoadedConns(localStorage.zw, /*initialFrameIdx*/ 0);
+      connsSig.set(conns);
     }));
 
     this.use(this.use(new ButtonWrapper('live-button', {
       enabled: true,
     })).clicks.map(async () => {
-      this.connsSig.maybeCur?.unref();
-      this.connsSig.set(new LiveConns('ws://neb-solidus:8000'));
+      using conns = new LiveConns('ws://neb-solidus:8000');
+      this.connsSig.set(conns);
     }));
 
     this.use(this.use(new ButtonWrapper('disconnect-button', {
       enabled: true,
     })).clicks.map(async () => {
-      this.connsSig.maybeCur?.unref();
-      // XXX this is bad, come up with a better way to disconnect
+      let conns = this.connsSig.maybeCur;
+      if (conns instanceof LiveConns) {
+        conns.rpc?.unref();
+        conns.rpc = undefined;
+        conns.hose?.unref();
+        conns.hose = undefined;
+      }
     }));
 
     this.use(this.use(new ButtonWrapper('save-button', {
@@ -1715,19 +1821,6 @@ export class UI extends RefCounted {
   }
 }
 
-export function loadByHash() {
-  if (location.hash.length < 2) {
-    return;
-  }
-  let hash = location.hash.substr(1);
-  if (hash == 'live') {
-    downcast(HTMLButtonElement, document.getElementById('live-button')).click();
-  } else if (hash == 'loaded') {
-    // todo: more than one save
-    downcast(HTMLButtonElement, document.getElementById('load-button')).click();
-  }
-}
-
 export class Global extends RefCounted {
   connsSig: Signal<BaseConns>;
   ui: UI;
@@ -1735,6 +1828,21 @@ export class Global extends RefCounted {
     super();
     this.connsSig = this.use(Signal.withoutInitialValue<BaseConns>());
     this.ui = new UI(this.connsSig);
-    loadByHash();
+    this.loadByHash();
   }
+  loadByHash() {
+    if (location.hash.length < 2) {
+      return;
+    }
+    let hash = location.hash.substr(1);
+    let m;
+    if (hash == 'live') {
+      downcast(HTMLButtonElement, document.getElementById('live-button')).click();
+    } else if (m = /^loaded\/([0-9]+)$/.exec(hash)) {
+      // todo: more than one save
+      using conns = new LoadedConns(localStorage.zw, parseInt(m[1]) - 1);
+      this.connsSig.set(conns);
+    }
+  }
+
 }

@@ -35,6 +35,7 @@ void xprintf(const char *fmt, ...) {
 
 static mm_version s_cur_mm_version;
 static uintptr_t s_target_start;
+static std::atomic<bool> s_new_hose_connection;
 
 // -- Naming
 //
@@ -452,7 +453,7 @@ static StupidHash<UInt48, uint64_t, 3079> s_hashed_scols;
 static StupidHash<UInt48, Nothing, 3079> s_hitboxes_this_frame;
 
 void note_new_hose_connection() { // run on hose thread
-    //g_cur_rpc_flags.fetch_or(RPC_FLAG_SEND_COLLS, std::memory_order_release);
+    s_new_hose_connection.store(true, std::memory_order_relaxed);
 }
 
 static void report_hitbox(mm_hitbox *hb, bool surprise) {
@@ -654,7 +655,8 @@ static void frame_start_collision_actions() {
         install<Stub_cctx_bg_collide_against_point>();
     }
     s_hitboxes_this_frame.clear();
-    if (test_and_clear_rpc_flag(RPC_FLAG_SEND_ALL_COLLS)) {
+    bool expected = true;
+    if (s_new_hose_connection.compare_exchange_strong(expected, false, std::memory_order_relaxed)) {
         s_hashed_scols.clear();
         s_hose.write_packet([&](auto &w) {
             w.write_tag({"allcols"});

@@ -575,7 +575,7 @@ class ScolMidNode(GuestStruct):
     owner = prop(0x10, lambda: ptr_to(Collider))
     scol_mid = prop(0x18, GuestPtrPtr)
 
-class Collider(GuestStruct):
+class ColliderSuper(GuestStruct):
     # aka HasBlockInfo
     vtable = prop(0, GuestPtrPtr)
     scol_mid_node = prop(0x20, ScolMidNode, dump=False)
@@ -605,7 +605,10 @@ class Collider(GuestStruct):
     ridden_by_scol_lists = prop(0x300, fixed_array(sead_list(ScolNode), 4))
     base_block_info = prop(0x364, u32)
     push_strength = prop(0x368, f32)
+    scol_push = prop(0x36c, Point2D)
     ext_size = prop(0x3b8, ptr_to(fixed_array(f32, 4)), dump_deep=True)
+
+class Collider(ColliderSuper):
     segments_cur = prop(0x3c0, count4_ptr(ColliderSegment))
     segments_old = prop(0x3d0, count4_ptr(ColliderSegment))
 
@@ -1155,7 +1158,7 @@ def print_timer():
 def print_block_kind_info():
     bkia = block_kind_info_array()
     for i, bki in enumerate(bkia):
-        print(f'0x{i:02}: bits=0x{bki.bits:8} {bki.name}')
+        print(f'0x{i:02}: bits=0x{bki.bits:8x} {bki.name}')
 
 def _print_collider(collider):
     print(f'  {collider}')
